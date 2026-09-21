@@ -578,17 +578,39 @@ def _photo_id(message: Any) -> str:
     return str(sizes[-1].file_id)
 
 
+async def _send_document(bot: Bot, chat_id: int, path: Path, caption: str) -> str:
+    """The last resort that is never wrong: the bytes, as a file."""
+    sent = await bot.send_document(chat_id, _input_file(path), caption=caption)
+    return _file_id(sent.document)
+
+
 async def _send_photos(bot: Bot, chat_id: int, images: list[Path], caption: str) -> Delivered:
-    """One photo, or an album of them — plus the ids a replay needs."""
+    """One photo, or an album of them — plus the ids a replay needs.
+
+    Telegram caps a *photo* well below what a camera or an instagram export produces,
+    and refuses a group it cannot render. Neither is a reason to fail a link that is
+    a picture: it goes as a document instead, which is still the content.
+    """
     if len(images) == 1:
-        single = await bot.send_photo(chat_id, _input_file(images[0]), caption=caption)
-        return Delivered(file_id=_photo_id(single), kind="photo")
-    group = await send_album(
-        bot,
-        chat_id,
-        [InputMediaPhoto(media=_input_file(path)) for path in images],
-        caption,
-    )
+        try:
+            single = await bot.send_photo(chat_id, _input_file(images[0]), caption=caption)
+            return Delivered(file_id=_photo_id(single), kind="photo")
+        except TelegramBadRequest:
+            logger.info("Telegram refused a photo as a photo — sending it as a document")
+            file_id = await _send_document(bot, chat_id, images[0], caption)
+            return Delivered(file_id=file_id, kind="file")
+    try:
+        group = await send_album(
+            bot,
+            chat_id,
+            [InputMediaPhoto(media=_input_file(path)) for path in images],
+            caption,
+        )
+    except TelegramBadRequest:
+        logger.info("Telegram refused a media group — sending each picture on its own")
+        for path in images:
+            await _send_document(bot, chat_id, path, caption)
+        return Delivered()  # several messages of one kind are not one cache row
     ids = [_photo_id(message) for message in group]
     if len(ids) != len(images):  # pragma: no cover — Telegram answers one per photo
         logger.warning("sent %s photos but got %s ids back", len(images), len(ids))
@@ -608,8 +630,7 @@ async def _send_file(
         )
         return _file_id(sent.video)
     except TelegramBadRequest:
-        sent = await bot.send_document(chat_id, _input_file(path), caption=caption)
-        return _file_id(sent.document)
+        return await _send_document(bot, chat_id, path, caption)
 
 
 async def _upload(bot: Bot, chat_id: int, result: DownloadResult) -> Delivered:

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 
 from core.config import get_settings
 from services import fallback, worker
@@ -74,20 +75,26 @@ class Status:
 
 
 class FakeBot:
-    def __init__(self) -> None:
+    def __init__(self, *, failing: tuple[str, ...] = ()) -> None:
         self.status = Status()
         self.messages: list[tuple[int, str]] = []
         self.uploads: list[dict[str, Any]] = []
+        #: Methods Telegram refuses here (a photo above its own ceiling, say).
+        self.failing = set(failing)
 
     async def send_message(self, chat_id: int, text: str, **kwargs: Any) -> Status:
         self.messages.append((chat_id, text))
         return self.status
 
     async def send_photo(self, chat_id: int, photo: Any, **kwargs: Any) -> Any:
+        if self.failing & {"send_photo"}:
+            raise TelegramBadRequest(method=None, message="PHOTO_EXT_INVALID")  # type: ignore[arg-type]
         self.uploads.append({"chat_id": chat_id, "kind": "photo", "caption": kwargs.get("caption", "")})
         return SimpleNamespace(photo=[SimpleNamespace(file_id="photo-1")])
 
     async def send_media_group(self, chat_id: int, media: Any, **kwargs: Any) -> Any:
+        if self.failing & {"send_media_group"}:
+            raise TelegramBadRequest(method=None, message="MEDIA_GROUP_INVALID")  # type: ignore[arg-type]
         self.uploads.append(
             {
                 "chat_id": chat_id,
@@ -107,7 +114,7 @@ class FakeBot:
 
     async def send_document(self, chat_id: int, file: Any, **kwargs: Any) -> Any:
         self.uploads.append({"chat_id": chat_id, "kind": "document", "caption": kwargs.get("caption", "")})
-        return SimpleNamespace(document=SimpleNamespace(file_id="file-1"))
+        return SimpleNamespace(document=SimpleNamespace(file_id="doc-1"))
 
     async def send_audio(self, chat_id: int, file: Any, **kwargs: Any) -> Any:
         self.uploads.append({"chat_id": chat_id, "kind": "audio", "caption": kwargs.get("caption", "")})
@@ -444,6 +451,44 @@ async def test_a_mixed_post_is_delivered_and_not_remembered(
 
     assert [upload["kind"] for upload in env.bot.uploads] == ["photo", "video"]
     assert env.memorized == []
+
+
+async def test_a_photo_telegram_refuses_still_goes_as_a_document(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Telegram caps a *photo* far below what an image post can weigh; the picture is
+    the content, so it must not turn into a failed download."""
+    env = _install(
+        monkeypatch,
+        extract_error=IMAGE_ERROR,
+        cobalt=_fake_cobalt(files=["twitter_123.jpg"]),
+        download_dir=tmp_path,
+    )
+    _record_uses(monkeypatch)
+    env.bot = FakeBot(failing=("send_photo",))
+
+    await _run_image_task(env)
+
+    assert [upload["kind"] for upload in env.bot.uploads] == ["document"]
+    assert env.memorized[0]["kind"] == "file", "and the cache replays it that way"
+
+
+async def test_a_gallery_telegram_refuses_is_sent_picture_by_picture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env = _install(
+        monkeypatch,
+        extract_error=IMAGE_ERROR,
+        cobalt=_fake_cobalt(files=["a.jpg", "b.jpg"], media=_photo_media("https://x/1.jpg", "https://x/2.jpg")),
+        download_dir=tmp_path,
+    )
+    _record_uses(monkeypatch)
+    env.bot = FakeBot(failing=("send_media_group",))
+
+    await _run_image_task(env)
+
+    assert [upload["kind"] for upload in env.bot.uploads] == ["document", "document"]
+    assert env.memorized == [], "several messages are not one cache row"
 
 
 async def test_an_image_arrives_as_a_photo_even_when_mp3_was_asked(

@@ -30,8 +30,8 @@ from core.utils import format_size, today_local, utcnow
 from services import cache as cache_service
 from services import cobalt_cookies, fallback, preflight, telemetry
 from services.cobalt import CobaltService, url_is_fetchable
-from services.delivery import join_file_ids, split_file_ids
 from services.cookie_watch import CookieJarWatcher
+from services.delivery import join_file_ids, split_file_ids
 from services.doctor import fallback_health as doctor_fallback_health
 from services.extractor import RETRYABLE_EXTRACTION_CODES, ExtractionError, ExtractorService
 from services.payments.manual import ManualPaymentStrategy
@@ -180,7 +180,7 @@ async def main() -> int:
         and album["kind"] == "photo_group"
         and split_file_ids(album["telegram_file_id"]) == ["AgAC_PHOTO_1", "AgAC_PHOTO_2"]
         and cache_service.cache_key(album_url, "video") == album["url_hash"],
-        None if album is None else str(album["kind"]),
+        "no row" if album is None else str(album["kind"]),
     )
     await cache_service.forget(pool, album_url, "video")
 

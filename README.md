@@ -557,6 +557,27 @@ fails (an unreachable fallback degrades to the behaviour that existed before it,
 a deployment), and `smoke.py` checks the same plus the decision itself: a block is handed over, a
 geo-blocked link is not.
 
+### Posts with no video in them (image tweets, galleries)
+
+yt-dlp serves *video*, so an image post is a dead end for it — by design, and in its own words:
+`No video could be found in this tweet` (twitter/x), `No media found` (reddit), `…in this post`
+(bluesky, tumblr). That is a classification now (`IMAGE_ONLY`), not an unexpected error, and the
+link goes to the fallback — which serves pictures perfectly well:
+
+- **one picture** comes back as an ordinary stream and is sent with **`sendPhoto`**;
+- **several** (a tweet's photo album, an instagram carousel) come back as a `picker` — a list — and
+  every item is downloaded, in the post's own order, and sent as **one media group**
+  (`sendMediaGroup`, batched at Telegram's ten per group);
+- **a mixed post** (photos *and* a video) is delivered too — the album first, then each video — and
+  deliberately **not cached**: one cache row cannot describe two kinds at once, and replaying half
+  of a post is worse than downloading it again.
+
+What gets sent is decided by the **file**, not by what was asked for: a user who picked «ویدیو» for
+an image post receives a photo, and so does one who picked «🎵 فقط صدا» — sending a JPEG as a video,
+as audio, or as a document would each be a different way of being wrong. The decision is stored in
+`smart_cache.kind` (a gallery keeps its ids as a JSON list), so a repeat request replays the album
+exactly; `smoke.py` asserts that round trip against a live database.
+
 ### Spotify: the link is rewritten, not downloaded
 
 Spotify is the one platform where **both** engines refuse the link itself, and both refusals are

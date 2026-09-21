@@ -245,6 +245,13 @@ directory, and the user sees a normal download instead of «🚧». The failure 
 `COBALT_API_URL` = off, and every other failure (private, geo, live, playlist) is untouched — it is
 not the fallback's job.
 
+Two other kinds of link belong to it as well. **Image posts** have no video for yt-dlp at all
+(«No video could be found in this tweet»), so they are handed over and arrive as a **photo** — or as
+a **media group** when the post has several pictures, each downloaded in the post's own order.
+And **Spotify** links are refused by *both* engines, so they are rewritten to the same song on
+YouTube before anything is tried (see the note below). Both need no configuration: with the cobalt
+service running, they work.
+
 **It ships with the stack, so there is nothing to configure.** `docker-compose.yml` runs
 `ghcr.io/imputnet/cobalt:10` as a `cobalt` service (`init: true`, `restart: unless-stopped`, port
 published on `127.0.0.1:9000` only — it is unauthenticated), and `COBALT_API_URL` defaults to
