@@ -4,6 +4,8 @@ Scalable Telegram bot that downloads media (YouTube, Twitter/X, Instagram, TikTo
 via `yt-dlp` and uploads it back to the user. Python 3.11+ · Aiogram 3.x (async) ·
 PostgreSQL (`asyncpg`) · Redis (queue + FSM state) · fully decoupled Gateway/Worker model.
 
+sudo bash -c "$(wget -qO- https://raw.githubusercontent.com/KanekiDevPro/telegram-downloader-bot/main/install.sh)"
+
 ## Highlights
 
 - **Premium output, HEVC first** — the extractor prefers H.265/HEVC video (`hev1`/`hvc1`)
