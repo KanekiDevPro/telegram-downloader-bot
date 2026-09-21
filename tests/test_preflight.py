@@ -60,7 +60,7 @@ def test_a_login_less_jar_only_warns_and_still_queues(tmp_path: Path) -> None:
     """Most videos extract anonymously; refusing on suspicion would be wrong."""
     jar = _logged_out_jar(tmp_path / "cookies.txt")
 
-    verdict = youtube_preflight("https://youtu.be/abc", jar)
+    verdict = youtube_preflight("https://youtu.be/abc", jar, lang="fa")
 
     assert verdict.status == "risky"
     assert not verdict.refused
@@ -68,11 +68,21 @@ def test_a_login_less_jar_only_warns_and_still_queues(tmp_path: Path) -> None:
     assert "ادمین" in verdict.message
 
 
+def test_the_warning_is_also_available_in_english(tmp_path: Path) -> None:
+    jar = _logged_out_jar(tmp_path / "cookies.txt")
+
+    verdict = youtube_preflight("https://youtu.be/abc", jar, lang="en")
+
+    assert verdict.status == "risky"
+    assert "not signed in" in verdict.message
+    assert "ادمین" not in verdict.message
+
+
 def test_an_observed_refusal_refuses_the_next_link(tmp_path: Path) -> None:
     jar = _logged_out_jar(tmp_path / "cookies.txt")
     preflight.note_anonymous_refusal()
 
-    verdict = youtube_preflight("https://youtu.be/abc", jar)
+    verdict = youtube_preflight("https://youtu.be/abc", jar, lang="fa")
 
     assert verdict.refused
     assert verdict.message and "دوباره بفرست" in verdict.message
@@ -132,7 +142,9 @@ def test_an_observed_refusal_no_longer_refuses_when_a_fallback_can_serve_it(
     jar = _logged_out_jar(tmp_path / "cookies.txt")
     preflight.note_anonymous_refusal(now=time.monotonic())
 
-    verdict = youtube_preflight("https://youtu.be/abc", jar, fallback_available=True)
+    verdict = youtube_preflight(
+        "https://youtu.be/abc", jar, fallback_available=True, lang="fa"
+    )
 
     assert not verdict.refused
     assert verdict.status == "risky"
@@ -142,7 +154,9 @@ def test_an_observed_refusal_no_longer_refuses_when_a_fallback_can_serve_it(
 def test_a_suspicion_names_the_fallback_too(tmp_path: Path) -> None:
     jar = _logged_out_jar(tmp_path / "cookies.txt")
 
-    verdict = youtube_preflight("https://youtu.be/abc", jar, fallback_available=True)
+    verdict = youtube_preflight(
+        "https://youtu.be/abc", jar, fallback_available=True, lang="fa"
+    )
 
     assert verdict.status == "risky"
     assert "جایگزین" in verdict.message

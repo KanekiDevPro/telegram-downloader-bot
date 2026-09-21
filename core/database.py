@@ -30,6 +30,10 @@ END $$;
 CREATE TABLE IF NOT EXISTS users (
     telegram_id        BIGINT PRIMARY KEY,
     username           TEXT,
+    -- 'en' or 'fa'. Seeded from the Telegram locale on first contact and only ever
+    -- changed by the user (/language or the welcome buttons), because a background
+    -- worker's progress message has no locale to look at.
+    language           TEXT NOT NULL DEFAULT 'en',
     is_premium         BOOLEAN NOT NULL DEFAULT FALSE,
     premium_until      TIMESTAMPTZ,
     daily_downloads    INTEGER NOT NULL DEFAULT 0,
@@ -37,6 +41,10 @@ CREATE TABLE IF NOT EXISTS users (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- The language column arrived after the first release; existing rows read as
+-- English, which is the product's default anyway.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT NOT NULL DEFAULT 'en';
 
 CREATE TABLE IF NOT EXISTS subscription_plans (
     id            SERIAL PRIMARY KEY,
@@ -180,18 +188,87 @@ async def init_db(pool: asyncpg.Pool) -> None:
 # users
 # ---------------------------------------------------------------------------
 
-async def get_or_create_user(pool: asyncpg.Pool, telegram_id: int, username: str | None) -> asyncpg.Record:
-    """Insert the user if new; refresh the username if it changed. Returns the row."""
+async def get_or_create_user(
+    pool: asyncpg.Pool,
+    telegram_id: int,
+    username: str | None,
+    language: str | None = None,
+) -> asyncpg.Record:
+    """Insert the user if new; refresh the username if it changed. Returns the row.
+
+    ``language`` is only ever used on the *insert*: it is the Telegram locale of a
+    first contact (so a Persian speaker starts in Persian), never a reason to
+    overwrite an existing choice — a user who picked English must keep it even if
+    their client is in Persian.
+    """
     return await pool.fetchrow(
         """
-        INSERT INTO users (telegram_id, username)
-        VALUES ($1, $2)
+        INSERT INTO users (telegram_id, username, language)
+        VALUES ($1, $2, COALESCE($3, 'en'))
         ON CONFLICT (telegram_id) DO UPDATE
             SET username = COALESCE(EXCLUDED.username, users.username)
         RETURNING *
         """,
         telegram_id,
         username,
+        language,
+    )
+
+
+async def set_user_language(pool: asyncpg.Pool, telegram_id: int, language: str) -> None:
+    """Store a user's language choice."""
+    await pool.execute(
+        "UPDATE users SET language = $2, updated_at = now() WHERE telegram_id = $1",
+        telegram_id,
+        language,
+    )
+
+
+async def languages_for(pool: asyncpg.Pool, telegram_ids: list[int]) -> dict[int, str]:
+    """The stored language of each id that has an account (missing ids just absent).
+
+    One query for a whole recipient list: an admin notice can go to several people,
+    and it must not cost a round trip per recipient before it can be sent.
+    """
+    if not telegram_ids:
+        return {}
+    rows = await pool.fetch(
+        "SELECT telegram_id, language FROM users WHERE telegram_id = ANY($1::bigint[])",
+        telegram_ids,
+    )
+    return {int(row["telegram_id"]): str(row["language"]) for row in rows}
+
+
+async def language_counts(pool: asyncpg.Pool) -> list[asyncpg.Record]:
+    """How many users each language has (for the admin panel)."""
+    return list(
+        await pool.fetch(
+            "SELECT language, COUNT(*) AS count FROM users GROUP BY language ORDER BY count DESC"
+        )
+    )
+
+
+async def admin_stats(pool: asyncpg.Pool, today: date) -> asyncpg.Record:
+    """One row of the numbers an operator asks for first.
+
+    A single round trip on purpose: the panel is opened while downloads are running,
+    and seven separate counts would be seven chances to notice the pool is busy.
+    """
+    return await pool.fetchrow(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM users)                                AS users,
+            (SELECT COUNT(*) FROM users WHERE is_premium)               AS premium,
+            (SELECT COUNT(*) FROM users WHERE created_at::date = $1)    AS new_users,
+            (SELECT COUNT(*) FROM users WHERE last_download_date = $1)  AS active_today,
+            (SELECT COALESCE(SUM(daily_downloads), 0) FROM users
+              WHERE last_download_date = $1)                            AS downloads_today,
+            (SELECT COUNT(*) FROM smart_cache)                          AS cache_rows,
+            (SELECT COUNT(*) FROM block_events
+              WHERE created_at > now() - interval '24 hours')           AS blocks_24h,
+            (SELECT COUNT(*) FROM transactions WHERE status = 'pending') AS pending_txns
+        """,
+        today,
     )
 
 

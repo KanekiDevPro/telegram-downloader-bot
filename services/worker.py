@@ -23,9 +23,10 @@ from aiogram.types import FSInputFile, InputMediaPhoto
 
 from core import database
 from core.config import get_settings
+from core.i18n import DEFAULT_LANG, error_message, t
 from core.utils import MediaFormat, escape_html, format_size, sanitize_filename, today_local
 from services import cache as cache_service
-from services import cookie_refresh, fallback, preflight, spotify, telemetry
+from services import cookie_refresh, fallback, preflight, recipients, spotify, telemetry
 from services.cobalt import CobaltError, CobaltService
 from services.delivery import join_file_ids, send_album, send_cached_file
 from services.extractor import (
@@ -50,14 +51,6 @@ MAX_ATTEMPTS = 3
 #: not once per link. Ten minutes is short enough to notice a second, unrelated
 #: cause and long enough to stay silent through a burst of retries.
 LOGIN_BLOCK_ALERT_INTERVAL_S = 600.0
-
-#: Shown to the user whose link failed. No jargon (cookie/LOGIN_INFO) and no
-#: blame: the fix is on the operator's side, and it is already in motion.
-LOGIN_BLOCK_USER_MESSAGE = (
-    "🔒 این لینک فقط با یک حساب واردشده (لاگین) قابل دانلود است و اتصال فعلی ربات "
-    "اجازهٔ دانلود را ندارد — مشکل از سمت شما نیست.\n"
-    "موضوع را به ادمین اطلاع دادیم؛ بعد از این‌که برطرف شد، همین لینک را دوباره بفرست."
-)
 
 # Error codes that retrying can never fix — fail fast and tell the user.
 _PERMANENT_ERROR_CODES = {
@@ -165,7 +158,10 @@ async def _process_with_retry(
                 preflight.clear_anonymous_refusal()
             return
         except ExtractionError as exc:
-            last_error = exc.message
+            # The *user's* text is chosen by code, in their language (see
+            # ``error_message``); ``exc.message`` stays the engine's own Persian
+            # wording, which is what the log and an admin reading it want.
+            last_error = error_message(exc.code, task.lang, fallback=exc.message)
             last_failure = exc
             logger.warning("attempt %s/%s failed for %s (%s)", attempt, MAX_ATTEMPTS, task.url, exc.code)
             if exc.code in _PERMANENT_ERROR_CODES or fallback.fallback_was_attempted(exc):
@@ -174,7 +170,7 @@ async def _process_with_retry(
                 # another wait and cannot change the answer.
                 break
         except Exception as exc:
-            last_error = f"خطای داخلی: {exc}"
+            last_error = t("work.internal_error", task.lang, detail=str(exc))
             last_failure = None
             logger.exception("attempt %s/%s crashed for %s", attempt, MAX_ATTEMPTS, task.url)
         if await _sleep_until(stop_event, min(2**attempt, 8)):
@@ -192,7 +188,7 @@ async def _process_with_retry(
     ):
         # "Blocked" usually reaches the user as a shrug and the admins as nothing
         # at all. Both are wrong here: the cause is known and fixable.
-        await _notify_login_block(bot, task, extractor.cookie_file)
+        await _notify_login_block(bot, pool, task, extractor.cookie_file)
         # ...and the fix may be mechanical: read the profile, replace the jar,
         # prove it with a probe, report. Off unless COOKIE_AUTO_EXPORT is set.
         settings = get_settings()
@@ -202,12 +198,12 @@ async def _process_with_retry(
             settings, extractor, bot, settings.admin_ids, pool=pool
         )
         return
-    await _notify_failure(bot, task, last_error or "خطای نامشخص")
+    await _notify_failure(bot, task, last_error or t("work.unexpected", task.lang))
 
 
 async def _notify_failure(bot: Bot, task: DownloadTask, message: str) -> None:
     try:
-        await bot.send_message(task.chat_id, f"❌ دانلود انجام نشد:\n{message}")
+        await bot.send_message(task.chat_id, t("work.failed", task.lang, error=message))
     except Exception:
         logger.exception("could not notify failure to chat %s", task.chat_id)
 
@@ -227,14 +223,14 @@ def _login_block_alert_due(now: float | None = None) -> bool:
 
 
 async def _notify_login_block(
-    bot: Bot, task: DownloadTask, cookie_file: Path | None
+    bot: Bot, pool: asyncpg.Pool, task: DownloadTask, cookie_file: Path | None
 ) -> None:
     """Answer the user with the actual cause, and the admins with the fix."""
     # Evidence for the next link: YouTube refused an anonymous request here just
     # now, which is what turns the preflight's suspicion into a refusal.
     preflight.note_anonymous_refusal()
     try:
-        await bot.send_message(task.chat_id, LOGIN_BLOCK_USER_MESSAGE)
+        await bot.send_message(task.chat_id, t("work.login_block", task.lang))
     except Exception:
         logger.exception("could not notify chat %s about a login-looking block", task.chat_id)
 
@@ -247,23 +243,23 @@ async def _notify_login_block(
         )
         return
 
-    if hint := youtube_login_hint(cookie_file):
-        cause = escape_html(hint)
-    else:
-        cause = (
-            "کوکی قابل‌استفاده‌ای برای یوتیوب نیست (COOKIE_FILE خالی/غیرقابل خواندن) — "
-            "هر درخواست ناشناس می‌رود."
-        )
-    text = (
-        "🍪 <b>دانلودها به خاطر لاگین نبودن ربات رد می‌شوند</b>\n\n"
-        f"آخرین لینک ناموفق: <code>{escape_html(task.url)}</code>\n"
-        f"علت: {cause}\n\n"
-        "👉 کوکی را تازه کنید و بفرستید؛ دانلود بعدی خودش برمی‌دارد (بدون ری‌استارت). "
-        "گزارش کامل: /doctor"
-    )
     settings = get_settings()
     notified = 0
-    for admin_id in settings.admin_ids:
+    # Each admin reads it in their own language: this alert is the one admins get
+    # most often, and half of them did not choose the language it used to be in.
+    for admin_id, admin_lang in await recipients.targets(
+        pool, settings.admin_ids, fallback=task.lang
+    ):
+        if hint := youtube_login_hint(cookie_file):
+            cause = escape_html(hint)
+        else:
+            cause = t("admin.no_cookies_cause", admin_lang)
+        text = t(
+            "admin.login_block_alert",
+            admin_lang,
+            url=escape_html(task.url),
+            cause=cause,
+        )
         try:
             await bot.send_message(admin_id, text)
             notified += 1
@@ -288,16 +284,19 @@ async def process_download_task(
     cobalt: CobaltService | None = None,
 ) -> None:
     settings = get_settings()
-    status = await bot.send_message(task.chat_id, "🔄 در حال پردازش لینک…")
+    lang = task.lang or DEFAULT_LANG
+    status = await bot.send_message(task.chat_id, t("work.processing", lang))
 
     # 1) Cache re-check (worker-side, guards concurrent duplicate requests).
-    cached = await cache_service.get_cached(pool, task.url, task.media_format)
+    cached = await cache_service.get_cached(pool, task.url, task.media_format, task.quality)
     if cached is not None:
-        await _edit(status, "⚡️ لینک قبلاً دانلود شده؛ در حال ارسال از کش…")
-        if await send_cached_file(bot, task.chat_id, cached):
-            await _edit(status, "✅ ارسال شد (از حافظهٔ کش)")
+        await _edit(status, t("work.cache_resend", lang))
+        if await send_cached_file(
+            bot, task.chat_id, cached, caption=t("work.cache_caption", lang)
+        ):
+            await _edit(status, t("work.cache_done", lang))
             return
-        await cache_service.forget(pool, task.url, task.media_format)
+        await cache_service.forget(pool, task.url, task.media_format, task.quality)
 
     # 1b) Neither engine can fetch a Spotify link (yt-dlp refuses the site by
     #     policy, Cobalt has no Spotify service), so the *link* is rewritten to the
@@ -306,12 +305,14 @@ async def process_download_task(
     #     on the mapped video, while the cache key stays the link the user sent.
     target_url = task.url
     if spotify.is_spotify_url(task.url):
-        await _edit(status, "🎵 لینک اسپاتیفای — نسخهٔ یوتیوبِ همین آهنگ پیدا می‌شود…")
+        await _edit(status, t("work.spotify_lookup", lang))
+        # No language argument on purpose: a mapping failure is translated from its
+        # *code* by ``error_message`` below, so the Spotify module keeps saying what
+        # it diagnosed (Persian, for the log) and the user reads their own language.
         target = await spotify.youtube_target(task.url, extractor)
         target_url = target.url
         await _edit(
-            status,
-            f"🎵 <b>{escape_html(target.track.credit)}</b> — از نسخهٔ یوتیوب دانلود می‌شود…",
+            status, t("work.spotify_mapped", lang, credit=escape_html(target.track.credit))
         )
 
     # 2) Metadata extraction (threaded, non-blocking). A site that refuses *this
@@ -328,13 +329,19 @@ async def process_download_task(
         )
         return
     if media_info.is_live:
-        await _edit(status, "⛔️ پخش زنده قابل دانلود نیست.")
+        await _edit(status, t("work.live", lang))
         return
     if media_info.filesize_approx and media_info.filesize_approx > settings.upload_limit_bytes:
         await _edit(
             status,
-            f"⛔️ حجم فایل ({format_size(media_info.filesize_approx)}) از سقف "
-            f"{settings.upload_limit_mb} مگابایت بیشتر است.",
+            t(
+                "work.too_big",
+                lang,
+                size=format_size(
+                    media_info.filesize_approx, unknown=t("misc.unknown_size", lang)
+                ),
+                limit=settings.upload_limit_mb,
+            ),
         )
         return
 
@@ -343,11 +350,13 @@ async def process_download_task(
         return
 
     # 4) Download with live progress (threaded + throttled edits).
-    await _edit(status, f"⬇️ در حال دانلود: <b>{escape_html(media_info.title[:120])}</b>")
-    progress = _ProgressEditor(status)
+    await _edit(
+        status, t("work.downloading", lang, title=escape_html(media_info.title[:120]))
+    )
+    progress = _ProgressEditor(status, lang)
     try:
         result = await extractor.download(
-            target_url, task.media_format, progress_hook=progress.hook
+            target_url, task.media_format, task.quality, progress_hook=progress.hook
         )
     except ExtractionError as exc:
         if not fallback.should_use_fallback(exc, cobalt):
@@ -375,13 +384,14 @@ async def process_download_task(
 
 async def _claim_quota(pool: asyncpg.Pool, task: DownloadTask, status: Any) -> bool:
     """Reserve today's slot for this user and say so; ``False`` = nothing to run."""
+    lang = task.lang or DEFAULT_LANG
     user = await database.get_user(pool, task.telegram_id)
     if user is None:
-        await _edit(status, "⛔️ حساب کاربر پیدا نشد؛ دوباره /start بزن.")
+        await _edit(status, t("work.account_missing", lang))
         return False
     limit = effective_daily_limit(user)
     if not await database.can_claim_download(pool, task.telegram_id, limit, today_local()):
-        await _edit(status, f"⛔️ سهمیهٔ دانلود امروز ({limit}) تمام شده است.")
+        await _edit(status, t("work.quota_exhausted", lang, limit=limit))
         return False
     return True
 
@@ -403,22 +413,22 @@ async def _finish_upload(
         files = (result.file_path, *result.extra_paths)
         actual_size = sum(path.stat().st_size for path in files)
         if actual_size > settings.upload_limit_bytes:
-            await _edit(status, "⛔️ حجم فایل نهایی از سقف مجاز بیشتر است.")
+            await _edit(status, t("work.final_too_big", task.lang or DEFAULT_LANG))
             return
 
         # Upload to Telegram and remember the file_id (and how to send it again).
-        await _edit(status, "⬆️ در حال ارسال به تلگرام…")
-        delivered = await _upload(bot, task.chat_id, result)
+        await _edit(status, t("work.uploading", task.lang or DEFAULT_LANG))
+        delivered = await _upload(bot, task.chat_id, result, task.lang or DEFAULT_LANG)
         if delivered.cacheable:
             await cache_service.memorize(
                 pool,
                 url=task.url,
                 platform=result.info.platform,
                 telegram_file_id=delivered.file_id,
-                quality=task.media_format,
+                request=cache_service.request_key(task.media_format, task.quality),
                 kind=delivered.kind,
             )
-        await _edit(status, "✅ دانلود و ارسال شد.")
+        await _edit(status, t("work.done", task.lang or DEFAULT_LANG))
     finally:
         shutil.rmtree(result.file_path.parent, ignore_errors=True)  # per-job dir
 
@@ -481,14 +491,15 @@ async def _deliver_via_fallback(
     if not quota_claimed and not await _claim_quota(pool, task, status):
         return
 
-    await _edit(status, "🛠 مسیر اصلی به این لینک دسترسی نداشت؛ از مسیر جایگزین دانلود می‌شود…")
+    await _edit(status, t("work.fallback", task.lang))
     settings = get_settings()
-    progress = _ProgressEditor(status)
+    progress = _ProgressEditor(status, task.lang)
     try:
         result = await fallback.fetch(
             cobalt,
             source_url,
             task.media_format,
+            quality=task.quality,
             download_dir=extractor.download_dir,
             max_bytes=settings.upload_limit_bytes,
             progress_hook=progress.hook,
@@ -521,17 +532,30 @@ def _file_id(media: Any) -> str:
     return str(file_id)
 
 
-def _upload_caption(result: DownloadResult) -> str:
-    """Caption for the uploaded media (title, size and duration when known)."""
+def _upload_caption(result: DownloadResult, lang: str) -> str:
+    """Caption for the uploaded media (title, size, resolution and duration when known).
+
+    The resolution is the *actual* one, not the tier that was asked for: "up to
+    1080p" is a ceiling, and a 720p upload answering it should say 720p.
+    """
     files = (result.file_path, *result.extra_paths)
     parts = [
         f"<b>{escape_html(result.info.title[:200])}</b>",
-        f"🌐 {escape_html(result.info.platform)}",
-        f"📦 {format_size(sum(path.stat().st_size for path in files))}",
+        t("work.caption_platform", lang, platform=escape_html(result.info.platform)),
+        t(
+            "work.caption_size",
+            lang,
+            size=format_size(
+                sum(path.stat().st_size for path in files),
+                unknown=t("misc.unknown_size", lang),
+            ),
+        ),
     ]
+    if result.info.height:
+        parts.append(t("work.caption_quality", lang, resolution=f"{result.info.height}p"))
     duration = _fmt_duration(result.info.duration)
     if duration:
-        parts.append(f"⏱ {duration}")
+        parts.append(t("work.caption_duration", lang, duration=duration))
     return "\n".join(parts)
 
 
@@ -633,7 +657,7 @@ async def _send_file(
         return await _send_document(bot, chat_id, path, caption)
 
 
-async def _upload(bot: Bot, chat_id: int, result: DownloadResult) -> Delivered:
+async def _upload(bot: Bot, chat_id: int, result: DownloadResult, lang: str) -> Delivered:
     """Send what the download produced: one file, one photo, or a whole album.
 
     Telegram has a method per shape and the shape is the file's, so an image post
@@ -641,7 +665,7 @@ async def _upload(bot: Bot, chat_id: int, result: DownloadResult) -> Delivered:
     and an album of them as a media group, in the post's own order.
     """
     files = (result.file_path, *result.extra_paths)
-    caption = _upload_caption(result)
+    caption = _upload_caption(result, lang)
     images = [path for path in files if _delivery_kind(path, result.media_format) == "photo"]
     others = [path for path in files if path not in images]
     if images and not others:
@@ -683,8 +707,9 @@ class _ProgressEditor:
     the event loop via ``call_soon_threadsafe``.
     """
 
-    def __init__(self, status: Any) -> None:
+    def __init__(self, status: Any, lang: str = DEFAULT_LANG) -> None:
         self._status = status
+        self._lang = lang
         self._loop = asyncio.get_running_loop()
         self._last_edit = 0.0
 
@@ -698,7 +723,13 @@ class _ProgressEditor:
         if pct < 100 and now - self._last_edit < PROGRESS_EDIT_INTERVAL_S:
             return  # throttle Telegram API calls
         self._last_edit = now
-        text = f"⬇️ دانلود: {pct:.0f}% ({format_size(done)} / {format_size(total)})"
+        text = t(
+            "work.progress",
+            self._lang,
+            percent=pct,
+            done=format_size(done, unknown=t("misc.unknown_size", self._lang)),
+            total=format_size(total, unknown=t("misc.unknown_size", self._lang)),
+        )
         self._loop.call_soon_threadsafe(asyncio.create_task, self._edit(text))
 
     async def _edit(self, text: str) -> None:

@@ -44,12 +44,21 @@ def create_redis_client(url: str) -> aioredis.Redis:
 
 @dataclass(slots=True)
 class DownloadTask:
-    """One queued download request (serialized as JSON in the queue)."""
+    """One queued download request (serialized as JSON in the queue).
+
+    It carries two things beyond the link, and both exist because the worker is a
+    different process from the update that started it: ``quality`` (the tier the
+    user picked — a height ceiling, or which audio format) and ``lang`` (so the
+    background messages arrive in the language the user reads, long after the
+    ``Message`` object is gone).
+    """
 
     url: str
     telegram_id: int
     chat_id: int
     media_format: MediaFormat = "video"
+    quality: str = ""
+    lang: str = ""
     url_hash: str = ""
     platform: str = ""
     attempts: int = 0

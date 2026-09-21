@@ -129,11 +129,14 @@ class FakeBot:
 
 
 def _task(chat_id: int = 42, url: str = "https://youtu.be/abc") -> DownloadTask:
+    # ``lang="fa"``: this task is a Persian user's, so the wording asserted below is
+    # the one they read. The English side is covered separately.
     return DownloadTask(
         chat_id=chat_id,
         telegram_id=chat_id,
         url=url,
         media_format="video",
+        lang="fa",
     )
 
 
@@ -144,11 +147,27 @@ def _reset_alert_window(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ADMIN_IDS", "1,2")
 
 
+@pytest.fixture(autouse=True)
+def _admin_languages(monkeypatch: pytest.MonkeyPatch) -> dict[int, str]:
+    """Admins with no stored language by default; a test may add one.
+
+    Without this the alerts' language would come from a real database, and these
+    tests would be asserting whatever row happened to exist on the machine.
+    """
+    stored: dict[int, str] = {}
+
+    async def languages_for(pool: Any, telegram_ids: list[int]) -> dict[int, str]:
+        return {tg_id: stored[tg_id] for tg_id in telegram_ids if tg_id in stored}
+
+    monkeypatch.setattr(worker_module.database, "languages_for", languages_for)
+    return stored
+
+
 async def test_the_user_is_told_the_cause_not_a_shrug(tmp_path: Path) -> None:
     bot = FakeBot()
     jar = _logged_out_jar(tmp_path / "cookies.txt")
 
-    await worker_module._notify_login_block(bot, _task(chat_id=42), jar)  # type: ignore[arg-type]
+    await worker_module._notify_login_block(bot, object(), _task(chat_id=42), jar)  # type: ignore[arg-type]
 
     (message,) = bot.texts_for(42)
     assert "لاگین" in message and "ادمین" in message
@@ -161,7 +180,9 @@ async def test_the_admins_get_the_fix_and_the_failing_link(tmp_path: Path) -> No
     bot = FakeBot()
     jar = _logged_out_jar(tmp_path / "cookies.txt")
 
-    await worker_module._notify_login_block(bot, _task(url="https://youtu.be/abc"), jar)  # type: ignore[arg-type]
+    await worker_module._notify_login_block(
+        bot, object(), _task(url="https://youtu.be/abc"), jar  # type: ignore[arg-type]
+    )
 
     for admin_id in (1, 2):
         (hint,) = bot.texts_for(admin_id)
@@ -171,13 +192,31 @@ async def test_the_admins_get_the_fix_and_the_failing_link(tmp_path: Path) -> No
         assert "تازه" in hint  # the fix, in the operator's words
 
 
+async def test_each_admin_reads_the_alert_in_their_own_language(
+    tmp_path: Path, _admin_languages: dict[int, str]
+) -> None:
+    """One notice, two readers: the text is rendered per recipient."""
+    _admin_languages[2] = "en"
+    bot = FakeBot()
+
+    await worker_module._notify_login_block(
+        bot, object(), _task(), _logged_out_jar(tmp_path / "cookies.txt")  # type: ignore[arg-type]
+    )
+
+    (persian,) = bot.texts_for(1)
+    (english,) = bot.texts_for(2)
+    assert "دانلودها به خاطر لاگین" in persian
+    assert "not signed in" in english and "دانلودها" not in english
+    assert "/doctor" in english, "the same report link, in the same place"
+
+
 async def test_a_broken_jar_pages_the_admins_once_per_window(tmp_path: Path) -> None:
     """Every link fails while the jar is logged out; the admins hear it once."""
     bot = FakeBot()
     jar = _logged_out_jar(tmp_path / "cookies.txt")
 
     for chat_id in (42, 43, 44):
-        await worker_module._notify_login_block(bot, _task(chat_id=chat_id), jar)  # type: ignore[arg-type]
+        await worker_module._notify_login_block(bot, object(), _task(chat_id=chat_id), jar)  # type: ignore[arg-type]
 
     assert len(bot.texts_for(1)) == 1, "one notice, not one per failed link"
     assert len(bot.texts_for(42)) == 1 and len(bot.texts_for(43)) == 1
@@ -189,12 +228,12 @@ async def test_the_admins_hear_again_after_the_window(
 ) -> None:
     bot = FakeBot()
     jar = _logged_out_jar(tmp_path / "cookies.txt")
-    await worker_module._notify_login_block(bot, _task(), jar)  # type: ignore[arg-type]
+    await worker_module._notify_login_block(bot, object(), _task(), jar)  # type: ignore[arg-type]
 
     monkeypatch.setattr(
         worker_module, "_last_login_block_alert_at", time.monotonic() - 3600.0
     )
-    await worker_module._notify_login_block(bot, _task(chat_id=43), jar)  # type: ignore[arg-type]
+    await worker_module._notify_login_block(bot, object(), _task(chat_id=43), jar)  # type: ignore[arg-type]
 
     assert len(bot.texts_for(1)) == 2
 
@@ -202,7 +241,9 @@ async def test_the_admins_hear_again_after_the_window(
 async def test_a_missing_jar_is_still_reported_with_a_reason(tmp_path: Path) -> None:
     bot = FakeBot()
 
-    await worker_module._notify_login_block(bot, _task(), tmp_path / "cookies.txt")  # type: ignore[arg-type]
+    await worker_module._notify_login_block(
+        bot, object(), _task(), tmp_path / "cookies.txt"  # type: ignore[arg-type]
+    )
 
     (hint,) = bot.texts_for(1)
     assert "ناشناس" in hint  # no jar at all → anonymous requests
@@ -213,7 +254,7 @@ async def test_an_unreachable_admin_does_not_stop_the_user_message(tmp_path: Pat
     bot = FakeBot(failing=(1, 2))
     jar = _logged_out_jar(tmp_path / "cookies.txt")
 
-    await worker_module._notify_login_block(bot, _task(chat_id=42), jar)  # type: ignore[arg-type]
+    await worker_module._notify_login_block(bot, object(), _task(chat_id=42), jar)  # type: ignore[arg-type]
 
     assert len(bot.texts_for(42)) == 1
 

@@ -27,7 +27,7 @@ import yt_dlp
 from yt_dlp.cookies import SUPPORTED_BROWSERS, SUPPORTED_KEYRINGS, load_cookies
 from yt_dlp.utils import DownloadError
 
-from core.utils import MediaFormat
+from core.utils import MediaFormat, normalize_quality
 
 ProgressHook = Callable[[dict[str, Any]], None]
 T = TypeVar("T")
@@ -68,9 +68,44 @@ AUDIO_FORMAT_SELECTOR = "bestaudio[ext=m4a]/bestaudio/best"
 MERGE_OUTPUT_FORMAT = "mp4/mkv"
 
 
-def format_selector(media_format: MediaFormat) -> str:
-    """yt-dlp ``-f`` value for the requested media type."""
-    return AUDIO_FORMAT_SELECTOR if media_format == "audio" else VIDEO_FORMAT_SELECTOR
+def _video_selector(height: int) -> str:
+    """The video chain with a height *ceiling* on every step.
+
+    ``[height<=N]`` and never ``[height=N]``: a request for 1080p on a video that
+    only exists in 480p must return the 480p file, not nothing. The trailing
+    ``best``/``best[height<=N]`` pair is the other half of that promise — a site that
+    reports no height at all would otherwise match no filter and fail with "requested
+    format is not available", which is a *worse* answer than a file that is slightly
+    bigger than asked for.
+    """
+    ceiling = f"[height<={height}]"
+    return "/".join(
+        (
+            f"{_HEVC_VIDEO}{ceiling}+bestaudio[ext=m4a]",
+            f"{_HEVC_VIDEO}{ceiling}+bestaudio",
+            f"{_AVC_VIDEO}{ceiling}+bestaudio[ext=m4a]",
+            f"{_AVC_VIDEO}{ceiling}+bestaudio",
+            f"bestvideo{ceiling}+bestaudio",
+            f"best{ceiling}",
+            "best",
+        )
+    )
+
+
+def format_selector(media_format: MediaFormat, quality: object = "") -> str:
+    """yt-dlp ``-f`` value for the requested media type and quality tier.
+
+    ``quality`` is a :data:`core.utils.Quality`: a height ceiling for video (``best``
+    means the existing no-ceiling chain), and ``mp3``/``m4a`` for audio — where m4a
+    is the untouched stream, so the *post-processor* is what differs, not the
+    selector (see ``_download_attempt``).
+    """
+    if media_format == "audio":
+        return AUDIO_FORMAT_SELECTOR
+    tier = normalize_quality(quality, media_format)
+    if tier == "best":
+        return VIDEO_FORMAT_SELECTOR
+    return _video_selector(int(tier))
 
 
 #: yt-dlp's own spelling of ``--cookies-from-browser``: BROWSER[+KEYRING][:PROFILE][::CONTAINER].
@@ -640,6 +675,13 @@ def _map_download_error(exc: DownloadError) -> ExtractionError:
 #: Failures that can only mean the site refused to serve us.
 BLOCK_EXTRACTION_CODES: frozenset[str] = frozenset({"EXTRACTOR_BLOCKED", "SESSION_STALE"})
 
+#: Refusals a *search* is retried without the cookie jar for. Both are, in yt-dlp's
+#: own words for the two, "retry without the cookies" cases: a session the site has
+#: already rotated, or a request the site treats as a bot — and a jar that is in the
+#: request is a known trigger for both. Only searches take that second opinion; see
+#: ``_search_attempt`` for why a download deliberately does not.
+_ANONYMOUS_RETRY_CODES: frozenset[str] = frozenset({"SESSION_STALE", "EXTRACTOR_BLOCKED"})
+
 #: The link carries no *video* for the primary engine to fetch — an image post, or
 #: a post with no media at all. Not a block (nothing was refused us) and not a dead
 #: end either: photos are exactly what the fallback engine can serve.
@@ -659,10 +701,14 @@ YOUTUBE_HOSTS: tuple[str, ...] = ("youtube.com", "youtu.be", "youtube-nocookie.c
 
 
 def url_host(url: str) -> str:
-    """The host of a link, lowercased, without port or credentials (``?`` if none)."""
-    host = urlparse(url).netloc.lower().partition(":")[0]
-    if "@" in host:  # user:password@host
-        host = host.rpartition("@")[2]
+    """The host of a link, lowercased, without port or credentials (``?`` if none).
+
+    Credentials are stripped *before* the port: ``user:pass@host:443`` has a colon in
+    the credentials, and splitting on the first one would answer ``user`` — a value
+    no URL ever has as its host.
+    """
+    netloc = urlparse(url).netloc.lower()
+    host = netloc.rpartition("@")[2].partition(":")[0]
     return host or "?"
 
 
@@ -723,6 +769,10 @@ class MediaInfo:
     duration: Optional[int]
     filesize_approx: Optional[int]
     is_live: bool
+    #: The height of the video that was actually produced, when the site reports one.
+    #: It is what makes the caption honest about a quality *tier*: "up to 1080p" on a
+    #: 720p upload is not a lie, but saying 720p is a fact.
+    height: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -800,7 +850,24 @@ def _to_media_info(source_url: str, info: dict[str, Any]) -> MediaInfo:
         duration=info.get("duration"),
         filesize_approx=int(filesize) if filesize else None,
         is_live=bool(info.get("is_live")),
+        height=_reported_height(info),
     )
+
+
+def _reported_height(info: dict[str, Any]) -> Optional[int]:
+    """The real resolution of a download, however yt-dlp reported it.
+
+    A merged download (video+audio) reports the height on the *selected video
+    format*, which lives in ``requested_formats``; older or single-file cases put it
+    on the top-level info. Either way it is a fact, or it is absent.
+    """
+    for candidate in (info, *(info.get("requested_formats") or [])):
+        if not isinstance(candidate, dict):
+            continue
+        height = candidate.get("height")
+        if isinstance(height, (int, float)) and height > 0:
+            return int(height)
+    return None
 
 
 class ExtractorService:
@@ -908,7 +975,12 @@ class ExtractorService:
             return True
 
     def _base_opts(
-        self, *, extract_only: bool, media_format: MediaFormat = "video"
+        self,
+        *,
+        extract_only: bool,
+        media_format: MediaFormat = "video",
+        quality: object = "",
+        allow_cookies: bool = True,
     ) -> dict[str, Any]:
         opts: dict[str, Any] = {
             "quiet": True,
@@ -918,7 +990,7 @@ class ExtractorService:
             "socket_timeout": 15,
             "retries": 3,
             "fragment_retries": 3,
-            "format": format_selector(media_format),
+            "format": format_selector(media_format, quality),
             "merge_output_format": MERGE_OUTPUT_FORMAT,
             # Resolution first, then HEVC on ties — consistent with the selector.
             "format_sort": ["res", "vcodec:hevc"],
@@ -930,10 +1002,12 @@ class ExtractorService:
         if self.using_pot_provider:
             opts["extractor_args"] = self.extractor_args
         # Browser cookies are merged with the jar file by yt-dlp; whichever is
-        # missing is skipped, so both can be configured safely.
-        if self.using_browser_cookies:
+        # missing is skipped, so both can be configured safely. ``allow_cookies=False``
+        # is the second opinion a stale session sometimes needs: the same request
+        # without the jar (see ``_search_attempt``).
+        if allow_cookies and self.using_browser_cookies:
             opts["cookiesfrombrowser"] = parse_browser_spec(self._browser_cookie_spec)
-        if self.cookie_file is not None:
+        if allow_cookies and self.cookie_file is not None:
             writable_jar = self._writable_cookie_file()
             if writable_jar is not None:
                 opts["cookiefile"] = str(writable_jar)
@@ -1225,9 +1299,12 @@ class ExtractorService:
         search that ran somewhere else would answer differently from the download
         and turn one mystery into two.
 
-        One attempt, deliberately: the worker's retry loop already re-runs a whole
-        link — this search included — and a second backoff stacked inside it would
-        multiply the wait the user is having.
+        Retried (and re-tried without the jar) like any other extraction, because a
+        *stale session* refuses a search exactly the way it refuses a download — and
+        this one runs before the user's download has even started, so failing here is
+        the difference between a Spotify link that works and one that never gets a
+        chance. The retry budget is the same ``EXTRACTOR_RETRY_*`` pair the rest of
+        the engine uses, so the extra wait is bounded and predictable.
         """
         return await asyncio.wait_for(
             asyncio.to_thread(self._search_sync, query, limit),
@@ -1235,7 +1312,36 @@ class ExtractorService:
         )
 
     def _search_sync(self, query: str, limit: int) -> list[SearchHit]:
-        opts = self._base_opts(extract_only=True)
+        return self._with_retries(
+            "searching YouTube", lambda: self._search_attempt(query, limit)
+        )
+
+    def _search_attempt(self, query: str, limit: int) -> list[SearchHit]:
+        """One search — and, for a session our jar is the problem in, one without it.
+
+        ``SESSION_STALE`` ("the page needs to be reloaded") and a bot-check refusal
+        are both things yt-dlp's own troubleshooting answers with "retry without the
+        cookies": a rotated or unusable session *is* the trigger, and an anonymous
+        search often succeeds where the jar gets in the way. So when a jar was sent
+        and the failure is one of those two, the search is repeated once with no
+        cookies at all — bounded, logged, and only ever for a search (a download that
+        fails that way keeps its existing behaviour: there the block is the *answer*,
+        and it drives the user's message, the admin alert and the jar refresh).
+        """
+        try:
+            return self._search_with_opts(query, limit, allow_cookies=True)
+        except ExtractionError as exc:
+            if exc.code not in _ANONYMOUS_RETRY_CODES or not self.using_cookies:
+                raise
+            logger.warning(
+                "search failed with %s while a cookie jar was in use — repeating it "
+                "without the jar (an unusable session is a known cause of both).",
+                exc.code,
+            )
+            return self._search_with_opts(query, limit, allow_cookies=False)
+
+    def _search_with_opts(self, query: str, limit: int, *, allow_cookies: bool) -> list[SearchHit]:
+        opts = self._base_opts(extract_only=True, allow_cookies=allow_cookies)
         opts.update({"extract_flat": "in_playlist", "playlistend": limit})
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -1252,20 +1358,26 @@ class ExtractorService:
         self,
         url: str,
         media_format: MediaFormat,
+        quality: object = "",
         progress_hook: ProgressHook | None = None,
     ) -> DownloadResult:
         """Download media to a per-job directory and return the produced file.
 
-        Audio requests are converted to MP3 via ffmpeg post-processing.
+        ``quality`` picks the tier: a height ceiling for video, and for audio the
+        difference between the untouched m4a stream and an MP3 that ffmpeg has to
+        produce (the only case that needs ffmpeg at all).
         """
-        if media_format == "audio" and not self.ffmpeg_available:
+        tier = normalize_quality(quality, media_format)
+        if media_format == "audio" and tier == "mp3" and not self.ffmpeg_available:
             raise ExtractionError(
                 "FFMPEG_REQUIRED",
                 "تبدیل به MP3 نیاز به نصب ffmpeg دارد؛ لطفاً بعداً دوباره تلاش کنید.",
             )
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(self._download_sync, url, media_format, progress_hook),
+                asyncio.to_thread(
+                    self._download_sync, url, media_format, tier, progress_hook
+                ),
                 timeout=self.download_timeout_s,
             )
         except asyncio.TimeoutError:
@@ -1275,26 +1387,31 @@ class ExtractorService:
         self,
         url: str,
         media_format: MediaFormat,
+        quality: str,
         progress_hook: ProgressHook | None,
     ) -> DownloadResult:
         return self._with_retries(
             "downloading",
-            lambda: self._download_attempt(url, media_format, progress_hook),
+            lambda: self._download_attempt(url, media_format, quality, progress_hook),
         )
 
     def _download_attempt(
         self,
         url: str,
         media_format: MediaFormat,
+        quality: str,
         progress_hook: ProgressHook | None,
     ) -> DownloadResult:
         # Each job gets its own directory so concurrent workers never collide.
         target_dir = self.download_dir / f"job-{uuid.uuid4().hex[:10]}"
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        opts = self._base_opts(extract_only=False, media_format=media_format)
+        opts = self._base_opts(
+            extract_only=False, media_format=media_format, quality=quality
+        )
         opts["outtmpl"] = str(target_dir / "%(title).120B [%(id)s].%(ext)s")
-        if media_format == "audio":
+        if media_format == "audio" and quality == "mp3":
+            # Only the MP3 tier re-encodes; m4a is whatever the site already serves.
             opts["postprocessors"] = [
                 {
                     "key": "FFmpegExtractAudio",

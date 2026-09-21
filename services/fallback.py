@@ -161,18 +161,23 @@ async def fetch(
     url: str,
     media_format: MediaFormat,
     *,
+    quality: object = "",
     download_dir: Path,
     max_bytes: int,
     progress_hook: Callable[[dict[str, Any]], None] | None = None,
 ) -> DownloadResult:
     """Resolve ``url`` through the fallback and download it into a fresh job dir.
 
+    ``quality`` rides along to the instance so the tier the user picked survives the
+    hand-over — a 480p ask must not come back as whatever the fallback considers
+    best.
+
     Same directory shape as the yt-dlp path (``job-<id>``) so the worker's cleanup,
     the upload and the stale-job sweep need no special case. Failures raise
     :class:`CobaltError` with its own code; the caller keeps the *original* yt-dlp
     diagnosis for the user, because that one is about their link.
     """
-    media = await service.resolve(url, media_format)
+    media = await service.resolve(url, media_format, quality)
     job_dir = download_dir / f"job-{uuid.uuid4().hex[:10]}"
     # Plural on purpose: a photo album arrives as a *set*, and dropping all but the
     # first picture would look like a working download of a post nobody asked for.
@@ -196,6 +201,11 @@ async def fetch(
         media_format=media_format,
         extra_paths=extra,
     )
+
+
+#: The fallback never reports a resolution, so a caption built from its result says
+#: nothing about quality rather than inventing a number. ``height`` stays ``None``
+#: for the same reason ``duration`` does.
 
 
 def describe(error: Exception) -> str:

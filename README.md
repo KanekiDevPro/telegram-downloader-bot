@@ -43,10 +43,34 @@ sudo bash -c "$(wget -qO- https://raw.githubusercontent.com/KanekiDevPro/telegra
   from the cache (no re-download). Tracking params (`utm_*`, `fbclid`, …) and fragments are
   stripped before hashing, and **the requested format is part of the key** — an MP3 request
   never receives a previously cached video.
+- **Two languages, chosen per user** — every user-facing line lives in
+  `core/catalog.py` as a key with its English and Persian text side by side, and is resolved in
+  the *user's* language (`users.language`), including from background workers that never saw the
+  update. A new user starts in their Telegram client's own language when the bot speaks it and in
+  `DEFAULT_LANGUAGE` otherwise; `/language` or the 🌐 button changes it for good. Plan labels are
+  translated the same way while a plan still carries a seeded name — one you renamed in the database
+  is shown exactly as stored, in either language, because the row is the source of truth. A test
+  renders **every key in both languages**, so a missing translation or a renamed placeholder cannot
+  reach a chat.
+- **Buttons drawn from the link** — `services/content.py` classifies a URL before anything is
+  asked: a YouTube link gets 1080p/720p/480p tiers, a Spotify/SoundCloud link gets MP3 *and* M4A
+  (the untouched stream — no re-encode, and the only audio tier that works without ffmpeg), a photo
+  post gets one “send the media of this post” button, and an ambiguous one (an X/Reddit post) gets
+  “whatever is there” plus the audio formats. The tier is a **ceiling** (`bestvideo[height<=N]`), so
+  a 1080p ask on a 480p video delivers the 480p file instead of failing — and the caption names the
+  real resolution. It is part of the *cache key* too, so a 480p ask never replays a 1080p file, while
+  the default tier keeps the key older rows already own.
 - **A menu, not a command list** — `/start` opens an inline keyboard (profile / VIP upgrade /
-  help), and those buttons call the same handlers as the commands, so the two cannot drift. A link
-  is acknowledged before it is queued (*«🔍 در حال تحلیل و ارسال به صف…»*), because a request that
-  looks ignored gets sent twice, and the same message is then edited through the whole download.
+  help / language), and those buttons call the same handlers as the commands, so the two cannot
+  drift. A link is acknowledged before it is queued (*«🔍 در حال تحلیل و ارسال به صف…»*), because a
+  request that looks ignored gets sent twice, and the same message is then edited through the whole
+  download.
+- **An admin panel** — `/admin` is one message with four screens: stats (users, downloads today,
+  cache rows, 24h failures, pending payments, language mix), health (database, Redis, the fallback
+  engine with its dialect, the PO-token provider and the session server), the queue, and tools that
+  call the *same* callbacks as the cookie-jar alert (`/doctor`, `/refresh`). Admin ids from
+  `ADMIN_IDS` also get **perpetual VIP** without a subscription row: they are never stopped by a
+  quota, and the profile says so.
 - **Quotas & premium** — atomic per-day download counters (reset automatically by local date),
   premium limits, and an always-on expiry sweep.
 - **Subscription & payments (Strategy pattern)** — `PaymentStrategy` interface with a
@@ -703,10 +727,16 @@ in-process queue, losing queued work on restart).
 
 Six tables (auto-created at startup, seeding is one-shot — edit prices later in DB):
 
-- `users` — `telegram_id` PK, username, `is_premium`, `premium_until`, `daily_downloads`, `last_download_date`
+- `users` — `telegram_id` PK, username, `language` (`en`/`fa`, seeded from the Telegram locale on
+  first contact and only ever changed by the user), `is_premium`, `premium_until`, `daily_downloads`,
+  `last_download_date`
 - `subscription_plans` — `id`, `name`, `duration_days`, `price`
 - `transactions` — UUID `id`, user/plan FKs, `amount`, `status` enum (`pending|approved|rejected`), `method` enum (`manual`), `receipt_photo_id`
-- `smart_cache` — `url_hash` (SHA-256 of canonical URL + format) PK, `original_url`, `platform`, `telegram_file_id`, `quality`, `kind` (how to send it again: `video`/`audio`/`photo`/`photo_group`; a `photo_group` keeps a JSON list of ids, and rows from before the column existed are delivered by `quality` as they always were)
+- `smart_cache` — `url_hash` (SHA-256 of canonical URL + *request*: `video`, `audio`,
+  `video:480`, `audio:m4a`) PK, `original_url`, `platform`, `telegram_file_id`, `quality` (the
+  request, i.e. the key's second half), `kind` (how to send it again:
+  `video`/`audio`/`photo`/`photo_group`; a `photo_group` keeps a JSON list of ids, and rows from
+  before the column existed are delivered by `quality` as they always were)`
 - `block_events` — every failed download: `telegram_id`, `url_host`, `code`, `cause` (`login|ip|site|session`), `created_at`; no FK on purpose, telemetry must outlive a user row
 - `bot_state` — small key/value store the bot uses for "when did it last do X" — the weekly digest's
   delivery stamp, the doctor's last fallback verdict, and what the fallback did the last time a real
@@ -719,16 +749,40 @@ answers one command makes people guess at their own quota and status:
 
 ```
 /start
-├── 👤 پروفایل من      → Telegram ID, username, status (رایگان 🪙 / ویژه 💎), today's quota,
-│                        premium expiry, and a 🔙 بازگشت button
-├── 💎 ارتقا به ویژه (VIP) → the plans and the manual-payment flow
-└── ❓ راهنما          → the supported sites, formats and limits
+├── 👤 پروفایل من / 👤 My profile  → Telegram ID, username, status (رایگان 🪙 / ویژه 💎),
+│                                     today's quota, premium expiry, 🔙 Back
+├── 💎 ارتقا به ویژه (VIP)          → the plans and the manual-payment flow
+├── ❓ راهنما / ❓ Help             → the supported sites, tiers, formats and limits
+├── 🌐 زبان / 🌐 Language           → 🇬🇧 English / 🇮🇷 فارسی (also /language en|fa)
+└── (admins, in addition) /admin    → stats, health, queue, tools
 ```
 
-Those buttons are callbacks into the same handlers as `/profile`, `/premium` and `/help` — the menu
-is a shortcut, not a second implementation, so the two can never drift. Status and quota are read
-at tap time (never cached in a keyboard), the labels carry the current state, and every callback
-answers its query, so no button ever leaves a spinner on the user's screen.
+Those buttons are callbacks into the same handlers as `/profile`, `/premium`, `/help` and
+`/language` — the menu is a shortcut, not a second implementation, so the two can never drift.
+Status and quota are read at tap time (never cached in a keyboard), the labels carry the current
+state, and every callback answers its query, so no button ever leaves a spinner on the user's
+screen.
+
+**The language is a property of the user, not of the call site.** The middleware resolves it once
+per update (stored preference first, then the client's locale, then `DEFAULT_LANGUAGE`) and hands
+it to every handler; the *queue task* carries it too, so a progress message, an error message and
+the «فایل ارسال شد» line arrive in the same language as the link that was sent — from a worker
+process that never saw the update. Admin notices are resolved per recipient for the same reason
+(the login-block alert, and each admin's copy of a payment receipt).
+
+**The format menu is drawn from the link.** What a user is offered comes from
+`services/content.py`, which reads the URL's shape before anything is probed:
+
+```
+https://youtu.be/…            → 🎬 best available | 1080p | 720p | 480p
+https://soundcloud.com/…      → 🎧 M4A (untouched stream) | 🎵 MP3 192k
+https://open.spotify.com/…    → the same audio menu (the link is rewritten to YouTube)
+https://www.instagram.com/p/… → 🖼 send the media of this post      (no quality menu)
+https://x.com/u/status/…      → 🖼 the media of this post | 🎧 M4A | 🎵 MP3
+```
+
+A tap that was never offered (an older menu, a forwarded message, a crafted callback) is refused
+with an answer, and the question is asked again — nothing is queued that the user was not shown.
 
 **Feedback starts before the work does.** A link gets its answer immediately — *«🔍 در حال تحلیل و
 ارسال به صف…»* — because the queue can be busy, and a request that looks ignored gets sent twice.

@@ -76,6 +76,13 @@ def test_format_size_for_missing_values() -> None:
     assert format_size(0) == format_size(None)
 
 
+def test_format_size_borrows_the_callers_word_for_unknown() -> None:
+    """The word goes where the number would, in whoever is reading's language."""
+    assert format_size(None, unknown="نامشخص") == "نامشخص"
+    assert format_size(0, unknown="unknown") == "unknown"
+    assert format_size(None) == "?", "the default stays neutral for scripts"
+
+
 def test_sanitize_filename_replaces_illegal_characters() -> None:
     assert sanitize_filename('a/b:c*d?e"f<g>h|i') == "a_b_c_d_e_f_g_h_i"
 

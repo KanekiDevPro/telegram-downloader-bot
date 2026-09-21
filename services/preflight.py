@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from core.i18n import DEFAULT_LANG, t
 from services.extractor import (
     cookie_jar_is_usable,
     is_youtube_url,
@@ -37,34 +38,13 @@ logger = logging.getLogger(__name__)
 #: is still consulted on every call.
 EVIDENCE_TTL_S = 900.0
 
-#: Queued anyway, with the odds named. Most YouTube videos work anonymously, so
-#: refusing on suspicion alone would be wrong.
-RISKY_MESSAGE = (
-    "ℹ️ نکته: کوکی ربات الان لاگین یوتیوب نیست، پس اگر این ویدیو لاگین لازم داشته باشد "
-    "دانلود ممکن است شکست بخورد — در آن صورت به ادمین گزارش می‌شود."
-)
-
-#: Same suspicion, but the link has somewhere else to go (see COBALT_API_URL).
-RISKY_FALLBACK_MESSAGE = (
-    "ℹ️ نکته: کوکی ربات الان لاگین یوتیوب نیست، ولی اگر درخواست رد شود از مسیر جایگزین "
-    "دانلود می‌شود — و اگر آن هم نشد، به ادمین گزارش می‌شود."
-)
-
-#: Not queued: YouTube has already refused an anonymous request on this host
-#: minutes ago, and the cause is known and being worked on.
-BLOCKED_MESSAGE = (
-    "🚧 این لینک یوتیوب همین حالا دانلود نمی‌شود.\n\n"
-    "آخرین تلاش‌ها نشان داده یوتیوب درخواست‌های فعلی ربات را ناشناس می‌بیند و رد می‌کند؛ "
-    "علتش هم پیدا شده (لاگین نبودن کوکی) و به ادمین گزارش شده است.\n"
-    "لطفاً کمی بعد دوباره بفرست — لینک‌های غیر یوتیوب مشکلی ندارند."
-)
-
-#: Queued: the refusal is real, but it is about the primary engine only — the
-#: fallback is configured, so the file may well arrive anyway.
-FALLBACK_QUEUE_MESSAGE = (
-    "ℹ️ نکته: یوتیوب درخواست‌های ناشناس ربات را رد می‌کند؛ اگر لازم شود همین لینک از "
-    "مسیر جایگزین دانلود می‌شود."
-)
+#: Where each verdict's wording lives. A *queued* link may carry one of these as a
+#: note, and a refused one is nothing but its message (see :class:`Preflight`), so the
+#: catalogue keys are the contract between the decision here and what a user reads.
+KEY_RISKY = "preflight.risky"
+KEY_RISKY_FALLBACK = "preflight.risky_fallback"
+KEY_BLOCKED = "preflight.blocked"
+KEY_FALLBACK_QUEUE = "preflight.fallback_queue"
 
 #: When an anonymous YouTube request was last refused (``monotonic`` seconds).
 #: Process-local on purpose: it is a belief about "now", not a fact to persist.
@@ -123,6 +103,7 @@ def youtube_preflight(
     *,
     now: float | None = None,
     fallback_available: bool = False,
+    lang: str = DEFAULT_LANG,
 ) -> Preflight:
     """Whether this link can work, from the jar's state and recent evidence.
 
@@ -142,7 +123,8 @@ def youtube_preflight(
         return OK
     if refusal_is_recent(now=now):
         if fallback_available:
-            return Preflight("risky", FALLBACK_QUEUE_MESSAGE)
-        return Preflight("blocked", BLOCKED_MESSAGE)
-    return Preflight("risky", RISKY_FALLBACK_MESSAGE if fallback_available else RISKY_MESSAGE)
+            return Preflight("risky", t(KEY_FALLBACK_QUEUE, lang))
+        return Preflight("blocked", t(KEY_BLOCKED, lang))
+    key = KEY_RISKY_FALLBACK if fallback_available else KEY_RISKY
+    return Preflight("risky", t(key, lang))
 

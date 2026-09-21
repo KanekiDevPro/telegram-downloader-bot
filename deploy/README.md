@@ -373,6 +373,23 @@ the state of a fresh clone, where the jar is optional. With a directory source a
 simply a missing file inside the container: the bot logs one warning and keeps serving every site
 that does not need cookies.
 
+### Language
+
+The bot speaks English and Persian, and the choice belongs to the *user*, not to the deployment:
+
+* `DEFAULT_LANGUAGE=en|fa` decides only what a brand-new user sees first — a Telegram client set to
+  Persian starts in Persian regardless of it, and `/language` (or the 🌐 button on `/start`) changes
+  it for good. The choice lives in `users.language`, so it survives redeploys and is what the
+  background workers use for progress and error messages.
+* Nothing else is language-specific: no restart, no second image, no per-language compose file. The
+  three plans the installer seeds are translated at display time, and a plan you renamed is shown
+  exactly as you named it in either language.
+* Admin surfaces answer in the admin's own language where they are bilingual (`/admin` and its
+  screens); `/doctor`, the cookie-jar alerts and the failure digest are still Persian-only.
+
+The installer (`install.sh`) asks for the default language while it writes `.env`, so a fresh VPS
+needs no second step.
+
 ### The `telegram-api` service
 
 The cloud Bot API only accepts bot uploads up to 50 MB, so with `MAX_FILE_SIZE_MB=2000`

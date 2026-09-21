@@ -32,13 +32,19 @@ from aiogram.types import (
     Message,
 )
 
+from core.i18n import DEFAULT_LANG, t
+
 #: What one media group may hold — aiogram's own union, spelled out so a list of
 #: ``InputMediaPhoto`` can be handed over without a cast (lists are invariant).
 MediaItem = InputMediaAudio | InputMediaDocument | InputMediaLivePhoto | InputMediaPhoto | InputMediaVideo
 
 logger = logging.getLogger(__name__)
 
-CACHED_CAPTION = "📥 ارسال از حافظهٔ کش (دانلود قبلی) ⚡️"
+#: The replay's caption, resolved in the *user's* language: every real caller passes
+#: its own (the gateway and the worker both know it), and the default is only for a
+#: caller that has nothing to say about language at all.
+def cached_caption(lang: str = DEFAULT_LANG) -> str:
+    return t("work.cache_caption", lang)
 
 #: Telegram's own ceiling on one media group; a larger album is sent in batches.
 MEDIA_GROUP_MAX = 10
@@ -47,7 +53,7 @@ MEDIA_GROUP_MAX = 10
 _LEGACY_KINDS = frozenset({"audio", "video"})
 
 __all__ = [
-    "CACHED_CAPTION",
+    "cached_caption",
     "MEDIA_GROUP_MAX",
     "join_file_ids",
     "send_album",
@@ -124,12 +130,19 @@ async def send_cached_file(
     bot: Bot,
     chat_id: int,
     cached: asyncpg.Record,
-    caption: str = CACHED_CAPTION,
+    caption: str | None = None,
+    *,
+    lang: str = DEFAULT_LANG,
 ) -> bool:
     """Send a cached file, falling back to a document on type mismatch.
 
+    ``caption`` defaults to the catalogue's replay line in ``lang``; callers that
+    know the user's language should pass it (both of them do).
+
     Returns False when the stored ``file_id`` is no longer usable.
     """
+    if caption is None:
+        caption = cached_caption(lang)
     ids = split_file_ids(_field(cached, "telegram_file_id"))
     if not ids:
         logger.info("cache row %s holds no usable file_id — dropping entry", _field(cached, "url_hash"))

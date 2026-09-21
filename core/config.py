@@ -21,6 +21,8 @@ from pydantic_settings import (
 )
 from pydantic_settings.sources.utils import parse_env_vars
 
+from core.i18n import normalize_supported
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 #: The official cloud Bot API refuses bot uploads larger than this. A self-hosted
@@ -230,6 +232,10 @@ class Settings(BaseSettings):
     # ``NoDecode`` keeps the raw env string so the validator below can accept
     # "1,2", "1 2" or "[1, 2]" — pydantic-settings would otherwise require JSON.
     admin_ids: Annotated[list[int], NoDecode] = Field(default_factory=list, alias="ADMIN_IDS")
+    #: What a *new* user gets when their Telegram client does not speak a language
+    #: this bot knows. 'en' (the product default) or 'fa'. A user whose locale is
+    #: ``fa``/``fa-IR`` starts in Persian regardless; a stored choice always wins.
+    default_language: str = Field(default="en", alias="DEFAULT_LANGUAGE")
     bot_mode: Literal["polling", "webhook"] = Field(default="polling", alias="BOT_MODE")
     webhook_url: str = Field(default="", alias="WEBHOOK_URL")
     webhook_path: str = Field(default="/webhook", alias="WEBHOOK_PATH")
@@ -389,6 +395,19 @@ class Settings(BaseSettings):
             except ValueError:
                 pass  # fall back to the tolerant split below
         return [int(part) for part in raw.replace(",", " ").split()]
+
+    @field_validator("default_language", mode="before")
+    @classmethod
+    def _parse_default_language(cls, value: object) -> object:
+        """Accept only what the catalogue has; anything else is English.
+
+        A typo here would otherwise decide which language every new user sees, and
+        the failure mode (English text in a bot deployed for Persian speakers, and
+        silently) is exactly the kind that survives months of uptime.
+        """
+        if value in (None, ""):
+            return "en"
+        return value if normalize_supported(value) else "en"
 
     @field_validator(
         "extractor_retry_attempts",

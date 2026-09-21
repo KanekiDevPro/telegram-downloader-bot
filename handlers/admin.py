@@ -20,17 +20,21 @@ import logging
 
 import asyncpg
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from core.config import get_settings
+from core.i18n import DEFAULT_LANG, t
 from core.utils import escape_html
-from services import cookie_refresh, login_wizard
+from services import cookie_refresh, login_wizard, panel
 from services.cobalt import CobaltService
 from services.cookie_refresh import RefreshOutcome, render_outcome
 from services.cookie_watch import DOCTOR_CALLBACK, REFRESH_CALLBACK
 from services.doctor import DoctorReport, fallback_health, run_youtube_doctor
 from services.extractor import ExtractorService
+from services.queue import TaskQueue
 from services.telemetry import (
     DIGEST_DAYS,
     TREND_DAYS,
@@ -352,3 +356,119 @@ async def on_alert_check(
             cb.from_user.id,
             report.healthy,
         )
+
+
+# ---------------------------------------------------------------------------
+# The panel: /admin, and the four screens behind it
+# ---------------------------------------------------------------------------
+
+#: The panel's own callback namespace (``admin:<screen>``).
+PANEL_HOME = "admin:home"
+_PANEL_SCREENS: frozenset[str] = frozenset(
+    {"home", "stats", "health", "queue", "tools"}
+)
+
+
+def _panel_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """The four screens, and the way back to the user menu."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("admin.btn_stats", lang), callback_data="admin:stats")
+    builder.button(text=t("admin.btn_health", lang), callback_data="admin:health")
+    builder.button(text=t("admin.btn_queue", lang), callback_data="admin:queue")
+    builder.button(text=t("admin.btn_tools", lang), callback_data="admin:tools")
+    builder.button(text=t("menu.back", lang), callback_data="menu:home")
+    builder.adjust(2, 2, 1)
+    return builder.as_markup()
+
+
+def _tools_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """The two actions worth a tap — both of which already exist as commands.
+
+    No new machinery: the buttons call the *same* callbacks the cookie-jar alert
+    uses, so an operator who taps here and one who taps there get the identical
+    behaviour, one implementation and one set of tests.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("admin.btn_doctor", lang), callback_data=DOCTOR_CALLBACK)
+    builder.button(text=t("admin.btn_refresh", lang), callback_data=REFRESH_CALLBACK)
+    builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+async def panel_screen(
+    screen: str,
+    pool: asyncpg.Pool,
+    queue: TaskQueue,
+    cobalt: CobaltService | None,
+    lang: str = DEFAULT_LANG,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """One screen of the panel: its text and its buttons.
+
+    Every screen is built on demand rather than cached: "how deep is the queue" has
+    an answer that is worth one query, precisely because it changes.
+    """
+    settings = get_settings()
+    if screen == "stats":
+        return await panel.stats_text(pool, lang), _panel_keyboard(lang)
+    if screen == "health":
+        text = await panel.health_text(pool, queue, settings, cobalt, lang)
+        return text, _panel_keyboard(lang)
+    if screen == "queue":
+        return await panel.queue_text(queue, settings, lang), _panel_keyboard(lang)
+    if screen == "tools":
+        return panel.tools_text(lang), _tools_keyboard(lang)
+    return await panel.header(pool, lang), _panel_keyboard(lang)
+
+
+@router.message(Command("admin"))
+async def cmd_admin(
+    message: Message,
+    pool: asyncpg.Pool,
+    queue: TaskQueue,
+    cobalt: CobaltService | None = None,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """``/admin`` — the panel, for admins only."""
+    settings = get_settings()
+    user = message.from_user
+    if not settings.is_admin(user.id if user else None):
+        await message.answer(t("admin.only", lang))
+        return
+    text, keyboard = await panel_screen("home", pool, queue, cobalt, lang)
+    await message.answer(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("admin:"))
+async def on_panel_button(
+    cb: CallbackQuery,
+    pool: asyncpg.Pool,
+    queue: TaskQueue,
+    cobalt: CobaltService | None = None,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """A panel button: rewrite the same message with the screen it asked for.
+
+    The admin check is repeated here rather than trusted from the command that drew
+    the keyboard: a forwarded message carries the buttons with it, and a panel anyone
+    can open is a panel whose numbers are not private.
+    """
+    settings = get_settings()
+    if not settings.is_admin(cb.from_user.id):
+        await cb.answer(t("admin.only", lang), show_alert=True)
+        return
+    message = cb.message if isinstance(cb.message, Message) else None
+    screen = (cb.data or "").split(":", 1)[1]
+    if message is None:
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    await cb.answer()
+    text, keyboard = await panel_screen(
+        screen if screen in _PANEL_SCREENS else "home", pool, queue, cobalt, lang
+    )
+    try:
+        await message.edit_text(text, reply_markup=keyboard)
+    except TelegramBadRequest:
+        # Identical content (a tap on the screen already open) is not an error worth
+        # a new message; a message that cannot be edited at all is.
+        logger.debug("panel edit skipped (%s)", screen, exc_info=True)

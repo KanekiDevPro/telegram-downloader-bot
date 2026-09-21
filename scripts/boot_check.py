@@ -27,9 +27,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 os.environ.setdefault("BOT_TOKEN", "123456789:OFFLINE-WIRING-CHECK-TOKEN")
 
 from core import database  # noqa: E402
+from core.catalog import MESSAGES  # noqa: E402
 from core.config import Settings, get_settings, probe_url  # noqa: E402
+from core.i18n import LANGS  # noqa: E402
 from core.logging import setup_logging  # noqa: E402
 from core.telegram_api import session_target  # noqa: E402
+from core.utils import DEFAULT_VIDEO_QUALITY, quality_key  # noqa: E402
 from handlers import admin as admin_service  # noqa: E402
 from main import build_app, shutdown  # noqa: E402
 from services import (
@@ -253,9 +256,68 @@ async def main() -> int:
             for handler in (admin_router.message.handlers if admin_router else ())
         }
         check(
-            "the admin commands for fixes and trends are registered",
-            {"cmd_refresh", "cmd_trend", "cmd_fixlogin"} <= handlers,
-            "/refresh (on-demand export), /trend (did the fix help), /fixlogin (the guide)",
+            "the admin panel and its commands are registered",
+            {"cmd_admin", "cmd_refresh", "cmd_trend", "cmd_fixlogin"} <= handlers,
+            "/admin (panel), /refresh (on-demand export), /trend (did the fix help), "
+            "/fixlogin (the guide)",
+        )
+
+        # The bilingual layer: a key without one of its two languages is a user
+        # reading a raw identifier, and it is invisible until someone switches.
+        incomplete = [
+            key
+            for key, entry in MESSAGES.items()
+            if any(not entry.get(lang) for lang in LANGS)
+        ]
+        check(
+            "every message exists in every language",
+            not incomplete,
+            f"{len(MESSAGES)} keys x {len(LANGS)} languages"
+            if not incomplete
+            else f"missing: {incomplete[:3]}",
+        )
+
+        # Quality tiers: they must exist in the *cache key* space (so a 480p ask
+        # cannot replay a 1080p file) without moving the default tier's key — moving
+        # it would orphan every row written before tiers existed.
+        from services import cache as cache_service
+
+        probe_url_key = "https://youtu.be/probe"
+        default_key = cache_service.cache_key(probe_url_key, "video")
+        check(
+            "quality tiers separate cache entries without orphaning the old ones",
+            default_key
+            == cache_service.cache_key(probe_url_key, "video", DEFAULT_VIDEO_QUALITY)
+            and len(
+                {
+                    cache_service.cache_key(probe_url_key, "video", tier)
+                    for tier in ("best", "1080", "720", "480")
+                }
+            )
+            == 4
+            and quality_key("video", "480") == "video:480",
+            "default key unchanged; best/1080/720/480 distinct",
+        )
+
+        # The welcome screen's service list is the first thing a new user reads, and
+        # the *only* place a platform is named before a link is sent — a translation
+        # that dropped one would look like the bot no longer supports it.
+        from core.i18n import t as translate
+
+        expected = {
+            "en": ("YouTube", "Instagram", "TikTok", "Spotify", "SoundCloud", "Reddit"),
+            "fa": ("یوتیوب", "اینستاگرام", "تیک‌تاک", "اسپاتیفای", "ساندکلاود", "ریدیت"),
+        }
+        welcome_missing = [
+            f"{lang}/{name}"
+            for lang, names in expected.items()
+            for name in names
+            if name not in translate("start.welcome", lang, name="x")
+        ]
+        check(
+            "the welcome screen names the supported services in both languages",
+            not welcome_missing,
+            ", ".join(welcome_missing) or "YouTube/Instagram/TikTok/Spotify/SoundCloud/Reddit",
         )
         user_router = next((r for r in dp.sub_routers if r.name == "user"), None)
         user_commands = {
@@ -263,10 +325,10 @@ async def main() -> int:
             for handler in (user_router.message.handlers if user_router else ())
         }
         check(
-            "the user frontend is wired (profile, premium, help, status)",
-            {"cmd_start", "cmd_profile", "cmd_premium", "cmd_help", "cmd_status"}
+            "the user frontend is wired (profile, premium, help, status, language)",
+            {"cmd_start", "cmd_profile", "cmd_premium", "cmd_help", "cmd_status", "cmd_language"}
             <= user_commands,
-            "/profile، /premium، /help — the menu's three screens plus /status",
+            "/profile، /premium، /help — the menu's screens plus /status and /language",
         )
         user_callbacks = {
             getattr(handler.callback, "__name__", "")
@@ -274,9 +336,15 @@ async def main() -> int:
         }
         check(
             "every menu button has a handler registered",
-            {"on_menu_profile", "on_menu_premium", "on_menu_help", "on_menu_home"}
+            {
+                "on_menu_profile",
+                "on_menu_premium",
+                "on_menu_help",
+                "on_menu_language",
+                "on_menu_home",
+            }
             <= user_callbacks,
-            "👤 پروفایل من، 💎 ارتقا به ویژه (VIP)، ❓ راهنما، 🔙 بازگشت",
+            "👤 پروفایل من، 💎 ارتقا به ویژه (VIP)، ❓ راهنما، 🌐 زبان، 🔙 بازگشت",
         )
         check(
             "the cookie alert's export button reaches the same path as /refresh",

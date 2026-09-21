@@ -35,11 +35,15 @@ from services.extractor import (
 from services.fallback import FallbackUse
 from services.queue import DownloadTask
 
+#: ``lang="fa"`` on purpose: these tasks pin what a Persian user reads, which is
+#: the wording the bot shipped before it spoke two languages. The English side has
+#: its own tests (``tests/test_i18n.py``), so neither language rides on the other.
 TASK = DownloadTask(
     chat_id=5,
     telegram_id=5,
     url="https://www.youtube.com/watch?v=abc",
     media_format="video",
+    lang="fa",
 )
 
 INFO = MediaInfo(
@@ -145,6 +149,9 @@ class FakeExtractor:
         #: reach it as the video it was rewritten *to*.
         self.extracted: list[str] = []
         self.downloaded: list[str] = []
+        #: The tiers the worker asked for, in order — a quality choice has to survive
+        #: the queue, the cache key and both engines without being dropped anywhere.
+        self.qualities: list[str] = []
 
     async def extract(self, url: str) -> MediaInfo:
         self.extracted.append(url)
@@ -152,9 +159,16 @@ class FakeExtractor:
             raise self.extract_error
         return self.info
 
-    async def download(self, url: str, media_format: str, progress_hook: Any = None) -> DownloadResult:
+    async def download(
+        self,
+        url: str,
+        media_format: str,
+        quality: str = "",
+        progress_hook: Any = None,
+    ) -> DownloadResult:
         self.downloads += 1
         self.downloaded.append(url)
+        self.qualities.append(quality)
         if self.download_error is not None:
             raise self.download_error
         job = self.download_dir / "job-primary"
@@ -186,10 +200,12 @@ class FakeCobalt:
         self.media = media or CobaltMedia(url="https://cdn.example/v.mp4")
         self.files = files or ["Big Buck Bunny [aqz-KE-bpKQ].mp4"]  # cobalt's "nerd" naming
         self.resolved: list[str] = []
+        self.qualities: list[str] = []
         self.downloads = 0
 
-    async def resolve(self, url: str, media_format: str) -> CobaltMedia:
+    async def resolve(self, url: str, media_format: str, quality: str = "") -> CobaltMedia:
         self.resolved.append(url)
+        self.qualities.append(quality)
         if self.failure is not None:
             raise self.failure
         return self.media
@@ -237,7 +253,9 @@ def _install(
     memorized: list[dict[str, Any]] = []
     claims = 0
 
-    async def get_cached(pool: Any, url: str, media_format: str) -> None:
+    async def get_cached(
+        pool: Any, url: str, media_format: str = "video", quality: str = ""
+    ) -> None:
         return None
 
     async def memorize(pool: Any, **fields: Any) -> None:
@@ -326,7 +344,7 @@ async def test_a_blocked_extraction_is_served_by_the_fallback(
             "url": TASK.url,
             "platform": "youtube",
             "telegram_file_id": "file-1",
-            "quality": "video",
+            "request": "video",
             "kind": "video",
         }
     ]
@@ -363,6 +381,7 @@ IMAGE_TASK = DownloadTask(
     telegram_id=5,
     url="https://x.com/user/status/12345",
     media_format="video",
+    lang="fa",
 )
 IMAGE_ERROR = ExtractionError("IMAGE_ONLY", "No video could be found in this tweet")
 
@@ -399,7 +418,7 @@ async def test_an_image_post_is_sent_as_a_photo(
             "url": IMAGE_TASK.url,
             "platform": "twitter",
             "telegram_file_id": "photo-1",
-            "quality": "video",
+            "request": "video",
             "kind": "photo",
         }
     ]
@@ -428,7 +447,7 @@ async def test_a_post_with_several_pictures_arrives_as_one_album(
             "url": IMAGE_TASK.url,
             "platform": "twitter",
             "telegram_file_id": join_file_ids(["photo-1", "photo-2"]),
-            "quality": "video",
+            "request": "video",
             "kind": "photo_group",
         }
     ]
@@ -508,7 +527,7 @@ async def test_an_image_arrives_as_a_photo_even_when_mp3_was_asked(
     await _run_image_task(env, audio_task)
 
     assert [upload["kind"] for upload in env.bot.uploads] == ["photo"]
-    assert env.memorized[0]["quality"] == "audio", "the key is still what was asked for"
+    assert env.memorized[0]["request"] == "audio", "the key is still what was asked for"
     assert env.memorized[0]["kind"] == "photo"
 
 
@@ -522,6 +541,7 @@ SPOTIFY_TASK = DownloadTask(
     telegram_id=5,
     url="https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
     media_format="video",
+    lang="fa",
 )
 MAPPED_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
@@ -574,7 +594,7 @@ async def test_a_spotify_link_is_rewritten_before_anything_is_tried(
             "url": SPOTIFY_TASK.url,  # the user's link, not the stand-in
             "platform": "youtube",
             "telegram_file_id": "file-1",
-            "quality": "video",
+            "request": "video",
             "kind": "video",
         }
     ]

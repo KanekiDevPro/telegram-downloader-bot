@@ -151,13 +151,21 @@ async def main() -> int:
     url = "https://www.youtube.com/watch?v=aqz-KE-bpKQ&utm_source=test&utm_medium=bot"
     key = cache_service.cache_key(url, "video")
     await cache_service.memorize(
-        pool, url=url, platform="youtube", telegram_file_id="AgAC_TEST_FILE_ID", quality="video"
+        pool,
+        url=url,
+        platform="youtube",
+        telegram_file_id="AgAC_TEST_FILE_ID",
+        request=cache_service.request_key("video"),
     )
     hit = await cache_service.get_cached(pool, url, "video")
     same_key = cache_service.cache_key("https://www.youtube.com/watch?v=aqz-KE-bpKQ", "video")
     ok &= verdict("cache store + canonical-key hit", hit is not None and key == same_key)
     audio_miss = await cache_service.get_cached(pool, url, "audio")
     ok &= verdict("cache is per format (audio misses the video entry)", audio_miss is None)
+    # A quality *tier* is part of the key too: a 480p ask must not replay the 1080p
+    # file (and the default tier keeps the key older rows already own).
+    tier_miss = await cache_service.get_cached(pool, url, "video", "480")
+    ok &= verdict("cache is per quality tier (480p misses the default entry)", tier_miss is None)
     await cache_service.forget(pool, url, "video")
     gone = await cache_service.get_cached(pool, url, "video")
     ok &= verdict("cache forget", gone is None)
@@ -170,7 +178,7 @@ async def main() -> int:
         url=album_url,
         platform="twitter",
         telegram_file_id=join_file_ids(["AgAC_PHOTO_1", "AgAC_PHOTO_2"]),
-        quality="video",
+        request=cache_service.request_key("video"),
         kind="photo_group",
     )
     album = await cache_service.get_cached(pool, album_url, "video")

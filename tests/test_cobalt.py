@@ -133,7 +133,9 @@ async def test_the_request_is_the_documented_one() -> None:
     assert request["url"] == f"{URL}/api/json"
     assert request["json"] == {
         "url": "https://youtu.be/abc",
-        "vQuality": "1080",
+        # ``max`` is Cobalt's own word for the no-ceiling request yt-dlp gets as
+        # ``bestvideo``: the two engines must not disagree about what was asked for.
+        "vQuality": "max",
         "filenamePattern": "nerd",
     }
     assert request["headers"]["Accept"] == "application/json"
@@ -150,6 +152,19 @@ async def test_an_audio_request_asks_for_mp3_server_side() -> None:
 
     assert session.posts[0]["json"]["isAudioOnly"] is True
     assert session.posts[0]["json"]["aFormat"] == "mp3"
+
+
+async def test_a_quality_tier_reaches_the_instance_unchanged() -> None:
+    """The tier is the user's choice, not the fallback's: a 480p ask that lands on
+    the other engine must still come back as 480p."""
+    session = FakeSession(post_responses=[_stream(), _stream()])
+
+    service = _service(session)
+    await service.resolve("https://youtu.be/abc", "video", "480")
+    await service.resolve("https://youtu.be/abc", "audio", "m4a")
+
+    assert session.posts[0]["json"]["vQuality"] == "480"
+    assert session.posts[1]["json"]["aFormat"] == "best", "M4A means the untouched stream"
 
 
 async def test_an_api_key_is_sent_only_when_there_is_one() -> None:
@@ -177,8 +192,8 @@ async def test_a_schema_rejection_is_replayed_in_the_newer_schema() -> None:
     # The path moved too, not just the field names: v10 serves the API at the root.
     assert first["url"] == f"{URL}/api/json"
     assert second["url"] == URL
-    assert first["json"]["vQuality"] == "1080"
-    assert second["json"]["videoQuality"] == "1080"
+    assert first["json"]["vQuality"] == "max"
+    assert second["json"]["videoQuality"] == "max"
     # ``pretty``, not ``nerd``: the live v10 instance rejects the latter outright
     # (`error.api.invalid_body`), and it is the same API the stack now embeds.
     assert second["json"]["filenameStyle"] == "pretty"

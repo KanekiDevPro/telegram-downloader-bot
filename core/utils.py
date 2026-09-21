@@ -12,8 +12,52 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from core.config import get_settings
 
-#: What a user can ask for: the full video, or just the MP3 audio track.
+#: What a user can ask for: the full video, or just the audio track.
 MediaFormat = Literal["video", "audio"]
+
+#: How good. A video tier is a *ceiling* (``bestvideo[height<=N]``), never an
+#: upscale — asking for 1080p on a 480p video gets the 480p file, which is what
+#: "up to 1080p" means on the button. ``m4a`` is the untouched audio stream
+#: (no re-encode, faster, plays everywhere Telegram does); ``mp3`` is ffmpeg's.
+Quality = Literal["best", "1080", "720", "480", "mp3", "m4a"]
+VIDEO_QUALITIES: tuple[Quality, ...] = ("best", "1080", "720", "480")
+AUDIO_QUALITIES: tuple[Quality, ...] = ("mp3", "m4a")
+
+#: What a request means when the user did not pick a tier: today's behaviour, and
+#: therefore also the cache key an existing row already owns.
+DEFAULT_VIDEO_QUALITY: Quality = "best"
+DEFAULT_AUDIO_QUALITY: Quality = "mp3"
+
+
+def default_quality(media_format: str) -> Quality:
+    """The tier a request falls back to for that media type."""
+    return DEFAULT_AUDIO_QUALITY if media_format == "audio" else DEFAULT_VIDEO_QUALITY
+
+
+def normalize_quality(value: object, media_format: str = "video") -> Quality:
+    """Coerce a tier (a button tap, a queue payload, a DB value) to a valid one.
+
+    An unknown or absent quality is the default for the *format*, never an error:
+    an old queued task carries no tier at all, and re-downloading it at "best" is
+    exactly what it asked for.
+    """
+    text = str(value or "").strip().lower()
+    allowed = AUDIO_QUALITIES if media_format == "audio" else VIDEO_QUALITIES
+    for candidate in allowed:
+        if text == candidate:
+            return candidate
+    return default_quality(media_format)
+
+
+def quality_key(media_format: str, quality: object) -> str:
+    """The part of a cache key that names the *request*.
+
+    The default tier has to keep producing the key older rows already have
+    (``url|video``), otherwise a redeploy would silently orphan the whole cache and
+    re-download everything once. Only a deliberate tier adds a suffix.
+    """
+    tier = normalize_quality(quality, media_format)
+    return media_format if tier == default_quality(media_format) else f"{media_format}:{tier}"
 
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
@@ -62,10 +106,15 @@ def today_local() -> date:
     return datetime.now(tz).date()
 
 
-def format_size(num_bytes: int | None) -> str:
-    """Human-readable size, e.g. 245.1 MB."""
+def format_size(num_bytes: int | None, *, unknown: str = "?") -> str:
+    """Human-readable size, e.g. 245.1 MB.
+
+    ``unknown`` is what a caller with no number gets, in the caller's own terms:
+    the worker passes the word in the user's language, while a command-line script
+    keeps the neutral default.
+    """
     if not num_bytes:
-        return "نامشخص"
+        return unknown
     size = float(num_bytes)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if size < 1024 or unit == "TB":

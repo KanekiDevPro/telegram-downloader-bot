@@ -36,7 +36,7 @@ from urllib.parse import unquote, urlparse
 
 import aiohttp
 
-from core.utils import MediaFormat, sanitize_filename
+from core.utils import MediaFormat, normalize_quality, sanitize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +50,15 @@ logger = logging.getLogger(__name__)
 LEGACY_RESOLVE_PATH = "/api/json"
 MODERN_RESOLVE_PATH = ""
 
-#: Video quality requested from the fallback. yt-dlp tries HEVC-1080 first, so the
-#: fallback aims at the same rung: the two engines should not disagree about what
-#: the user asked for.
-DEFAULT_QUALITY = "1080"
+#: Cobalt's own word for "no ceiling" — what this bot's ``best`` tier means. The two
+#: engines have to agree about the request: yt-dlp is asked for ``bestvideo`` with no
+#: height filter, so the fallback must not quietly answer with a rung of its own
+#: choosing (which is what a fixed ``1080`` did before tiers existed).
+MAX_QUALITY = "max"
+
+#: What a *probe* asks for: enough to prove an instance resolves a link, without the
+#: metadata of a 4K one. Never used for a download a user is waiting on.
+PROBE_QUALITY = "1080"
 
 #: How much bigger than the ceiling we may download before giving up. The point is
 #: to stop early rather than to be exact: the worker re-checks the finished file.
@@ -238,22 +243,48 @@ class CobaltMedia:
         )
 
 
-def _legacy_payload(url: str, media_format: MediaFormat) -> dict[str, Any]:
+def video_quality_param(quality: object) -> str:
+    """The tier this bot offers, in Cobalt's vocabulary (``max`` / ``1080`` / …).
+
+    Same scale on purpose: both engines count in pixels, and "max" is what both call
+    "no ceiling". A tier Cobalt does not know would be a silent fallback to its own
+    default, which is why only known values are mapped — anything else becomes the
+    configured default rather than a guess.
+    """
+    tier = normalize_quality(quality, "video")
+    return MAX_QUALITY if tier == "best" else tier
+
+
+def audio_format_param(media_format: MediaFormat, quality: object) -> str:
+    """Which audio format to ask Cobalt for.
+
+    ``mp3`` is Cobalt's own re-encode (the tier the user picked). ``m4a`` means "the
+    original stream, untouched" — Cobalt spells that ``best``, and it never
+    re-encodes then, which is exactly the promise the M4A button makes. The file may
+    come back as ``.opus`` instead of ``.m4a``; it is still the untouched stream, and
+    Telegram plays it as audio.
+    """
+    if media_format != "audio":
+        return ""
+    return "best" if normalize_quality(quality, "audio") == "m4a" else "mp3"
+
+
+def _legacy_payload(url: str, media_format: MediaFormat, quality: object = "") -> dict[str, Any]:
     """The request shape Cobalt documents (and older instances require)."""
     payload: dict[str, Any] = {
         "url": url,
-        "vQuality": DEFAULT_QUALITY,
+        "vQuality": video_quality_param(quality),
         "filenamePattern": "nerd",
     }
     if media_format == "audio":
         # Server-side audio extraction: it also means the fallback needs no ffmpeg,
         # which matters when the primary path just lost its only extractor.
         payload["isAudioOnly"] = True
-        payload["aFormat"] = "mp3"
+        payload["aFormat"] = audio_format_param(media_format, quality)
     return payload
 
 
-def _modern_payload(url: str, media_format: MediaFormat) -> dict[str, Any]:
+def _modern_payload(url: str, media_format: MediaFormat, quality: object = "") -> dict[str, Any]:
     """The same request in the newer schema, for instances that renamed the fields.
 
     ``pretty`` rather than ``nerd``: the current API validates this field against a
@@ -264,12 +295,12 @@ def _modern_payload(url: str, media_format: MediaFormat) -> dict[str, Any]:
     """
     payload: dict[str, Any] = {
         "url": url,
-        "videoQuality": DEFAULT_QUALITY,
+        "videoQuality": video_quality_param(quality),
         "filenameStyle": "pretty",
         "downloadMode": "auto",
     }
     if media_format == "audio":
-        payload["audioFormat"] = "mp3"
+        payload["audioFormat"] = audio_format_param(media_format, quality)
         payload["downloadMode"] = "audio"
     return payload
 
@@ -277,7 +308,7 @@ def _modern_payload(url: str, media_format: MediaFormat) -> dict[str, Any]:
 #: Every API shape we know, in the order they are tried on a fresh instance:
 #: the documented v7 request first (older self-hosted instances speak only that),
 #: then the current one, where v10 moved the API to the root of the instance.
-_ENDPOINTS: tuple[tuple[str, Callable[[str, MediaFormat], dict[str, Any]]], ...] = (
+_ENDPOINTS: tuple[tuple[str, Callable[..., dict[str, Any]]], ...] = (
     (LEGACY_RESOLVE_PATH, _legacy_payload),
     (MODERN_RESOLVE_PATH, _modern_payload),
 )
@@ -460,8 +491,15 @@ class CobaltService:
     # Resolve
     # ------------------------------------------------------------------
 
-    async def resolve(self, url: str, media_format: MediaFormat) -> CobaltMedia:
+    async def resolve(
+        self, url: str, media_format: MediaFormat, quality: object = ""
+    ) -> CobaltMedia:
         """Ask the instance for a direct download link for ``url``.
+
+        ``quality`` is the tier the user picked, in Cobalt's own vocabulary (see
+        :func:`video_quality_param`): a 480p request that lands on the fallback must
+        not come back as the 1080p file, or the fallback would quietly override the
+        choice the menu offered.
 
         Tries each known API shape until one answers as an API; the shape that
         worked is remembered, so this is only ever expensive once per process. An
@@ -481,7 +519,7 @@ class CobaltService:
         for index in self._endpoint_order():
             path, build = _ENDPOINTS[index]
             try:
-                status, body = await self._post(path, build(url, media_format))
+                status, body = await self._post(path, build(url, media_format, quality))
             except CobaltError as exc:
                 self._quarantine(exc)
                 raise
