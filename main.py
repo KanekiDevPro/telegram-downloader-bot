@@ -244,6 +244,11 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         pot_provider_url=pot_provider,
         cookies_from_browser=settings.cookies_from_browser,
         js_runtime=settings.ytdlp_js_runtime,
+        # What YouTube is allowed to *see*: a client list that avoids the PO-token
+        # half of yt-dlp's table, and IPv4-only through the tunnel (see the two
+        # settings for the measurement behind both).
+        youtube_clients=settings.ytdlp_youtube_clients,
+        force_ipv4=settings.ytdlp_force_ipv4,
         retry_attempts=settings.extractor_retry_attempts,
         retry_backoff_s=settings.extractor_retry_backoff_s,
     )
@@ -302,6 +307,17 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         )
     else:
         logger.info("yt-dlp JavaScript runtime: %s", extractor.js_runtime_name)
+    # The evasion posture, in one line at boot: it is the difference between
+    # "extraction works" and "extraction works while claiming to be a TV", and a
+    # client name this yt-dlp does not know is skipped silently otherwise.
+    if extractor.youtube_clients:
+        logger.info(
+            "yt-dlp YouTube clients: %s (ipv4_only=%s)",
+            ", ".join(extractor.youtube_clients),
+            extractor.force_ipv4,
+        )
+    else:
+        logger.info("yt-dlp YouTube clients: yt-dlp's own default (ipv4_only=%s)", extractor.force_ipv4)
     if extractor.using_pot_provider:
         if pot_plugin_installed():
             logger.info("PO token provider: %s", pot_provider)

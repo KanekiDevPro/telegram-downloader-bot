@@ -320,6 +320,10 @@ async def main() -> int:
         timeout_s=45,
         cookie_file=settings.cookie_file,
         proxy=settings.ytdlp_proxy,
+        # The same clients and address family the bot uses, so this probe answers
+        # about the bot's path rather than about yt-dlp's defaults.
+        youtube_clients=settings.ytdlp_youtube_clients,
+        force_ipv4=settings.ytdlp_force_ipv4,
         # One attempt only: this probe is a diagnosis, not a download.
         retry_attempts=0,
     )

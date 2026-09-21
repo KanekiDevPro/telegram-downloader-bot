@@ -93,6 +93,10 @@ def build_extractor(settings: Settings, jar: Path, *, pot_provider_url: str = ""
         proxy=settings.ytdlp_proxy,
         pot_provider_url=pot_provider_url,
         js_runtime=settings.ytdlp_js_runtime,
+        # The same evasion the bot runs with: a probe that saw a different set of
+        # clients than the download path would answer about a different bot.
+        youtube_clients=settings.ytdlp_youtube_clients,
+        force_ipv4=settings.ytdlp_force_ipv4,
         retry_attempts=0,  # a diagnosis, not a download
     )
 

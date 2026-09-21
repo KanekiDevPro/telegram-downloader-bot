@@ -59,6 +59,7 @@ from services.extractor import (
     missing_youtube_login_cookies,
     pot_plugin_installed,
     pot_plugin_version,
+    youtube_client_facts,
 )
 from services.fallback import FallbackUse, last_use
 from services.proxy_health import TunnelHealth
@@ -90,6 +91,11 @@ SESSION_RELOAD_NOTE = "کوبالت هر ۵ دقیقه خودش دوباره م�
 #: The browser's route, one row — its own name, because "the server answers" and
 #: "the browser is on the tunnel" are different questions with different fixes.
 ROUTE_CHECK_NAME = "مرورگر سشن"
+
+#: What the engine claims to be: the YouTube clients, and the forced address family.
+#: Its own row because a wrong name in the list is silently skipped by yt-dlp, which
+#: reads exactly like the block it was meant to dodge.
+CLIENTS_CHECK_NAME = "کلاینت‌های یوتیوب"
 
 #: The generator relaunches Chromium every ``--update-interval`` (300s by default, and
 #: configurable) and the route file is rewritten on every launch — so a two-hour-old
@@ -1193,6 +1199,54 @@ def _tunnel_check(settings: Settings, tunnel: TunnelHealth | None) -> Check:
     )
 
 
+def _clients_check(extractor: ExtractorService) -> Check:
+    """What YouTube is told to believe: the clients, and the address family.
+
+    Both are evasion settings, and both fail *quietly* when they are wrong: a client
+    name yt-dlp does not know is skipped with a one-line warning in a log nobody
+    reads, and a client that wants a PO token is simply refused — which then looks
+    like "YouTube is blocking us again" rather than "the list is wrong". The names
+    are therefore checked against the installed yt-dlp (see
+    ``youtube_client_facts``), and the ones that require a token are named rather
+    than counted.
+    """
+    clients = extractor.youtube_clients
+    ipv4 = (
+        "فقط IPv4 (source_address=0.0.0.0)"
+        if extractor.force_ipv4
+        else "IPv4/IPv6 — اگر IPv6 تونل فلگ شده، YTDLP_FORCE_IPV4 را روشن کنید"
+    )
+    if not clients:
+        return Check(CLIENTS_CHECK_NAME, "ok", f"yt-dlp خودش انتخاب می‌کند؛ {ipv4}", icon="🎬")
+
+    listed = "، ".join(clients)
+    unknown, required, free = youtube_client_facts(clients)
+    if unknown:
+        return Check(
+            CLIENTS_CHECK_NAME,
+            "warn",
+            f"{listed} — yt-dlp این‌ها را نمی‌شناسد و بی‌صدا رد می‌کند: {'، '.join(unknown)} "
+            f"(نام کلاینت‌ها بین نسخه‌های yt-dlp عوض می‌شود)؛ در این نسخه معتبرند: "
+            f"{'، '.join(free) or '—'}. {ipv4}",
+            icon="🎬",
+        )
+    if required:
+        return Check(
+            CLIENTS_CHECK_NAME,
+            "warn",
+            f"{listed} — {'، '.join(required)} در این نسخهٔ yt-dlp *نیاز* به PO token دارد "
+            "(بدون provider همان کلاینت‌ها رد می‌شوند)؛ بی‌توکن‌ها: "
+            f"{'، '.join(free) or '—'}. {ipv4}",
+            icon="🎬",
+        )
+    return Check(
+        CLIENTS_CHECK_NAME,
+        "ok",
+        f"{listed} — هیچ‌کدام PO token لازم ندارند؛ {ipv4}",
+        icon="🎬",
+    )
+
+
 def _runtime_check(extractor: ExtractorService) -> Check:
     name = extractor.js_runtime_name
     if name == "none":
@@ -1218,6 +1272,7 @@ def _base_checks(
         _cookie_check(settings, extractor),
         _cookie_storage_check(extractor),
         _runtime_check(extractor),
+        _clients_check(extractor),
         _provider_check(settings, provider, plugin_version),
         _session_server_check(settings, server),
     ]

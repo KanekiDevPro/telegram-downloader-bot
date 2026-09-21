@@ -55,6 +55,8 @@ async def main(argv: list[str] | None = None) -> int:
         download_timeout_s=settings.download_timeout_s,
         cookie_file=settings.cookie_file,
         proxy=settings.ytdlp_proxy,
+        youtube_clients=settings.ytdlp_youtube_clients,
+        force_ipv4=settings.ytdlp_force_ipv4,
         # The reachable address, like the bot's own engine gets: this is a host
         # process, where a compose service name does not resolve — an extractor
         # here holding `pot-provider:4416` would probe *without* a token and blame

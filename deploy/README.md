@@ -101,6 +101,8 @@ real video, and prints one verdict plus the single next step:
 ✅ منبع کوکی: /cookies/cookies.txt — mount /cookies (9p، فقط-خواندنی)، مسیر میزبان:
    /Users/mo/bot، 31 کوکی، اکسپورت 4 دقیقه پیش؛ از همین اکسپورت استفاده می‌شود
 ✅ JS runtime: deno
+🎬 کلاینت‌های یوتیوب: visionos، web_embedded، tv_downgraded، web — web در این نسخهٔ yt-dlp *نیاز* به PO token دارد
+   (بدون provider همان کلاینت‌ها رد می‌شوند)؛ بی‌توکن‌ها: visionos، web_embedded، tv_downgraded. فقط IPv4 (source_address=0.0.0.0)
 ✅ PO token: http://pot-provider:4416 — v2.0.0
 🎫 سرور سشن یوتیوب: http://yt-session-generator:8080 — توکن آماده، ساخته‌شده 6 دقیقه پیش؛ کوبالت هر ۵ دقیقه خودش دوباره می‌خواند
 ⛔️ تست زنده: SESSION_STALE: یوتیوب این درخواست را نپذیرفت (سشن کهنه است)…
@@ -312,6 +314,19 @@ first one, and its own tunnel probe answers the second half of the same question
 The image also ships the **Deno** JavaScript runtime, because yt-dlp degrades YouTube
 extraction without one ("some formats may be missing"). Host deployments pick up whatever
 runtime is installed via `YTDLP_JS_RUNTIME=auto`.
+
+**What YouTube is told to believe (`YTDLP_YOUTUBE_CLIENTS`, `YTDLP_FORCE_IPV4`).** The tunnel
+changes the address, not the request — so the engine also picks the clients that do not demand a
+token and stays on IPv4. Both defaults come from measurement, not folklore: in the installed
+yt-dlp's own client table `web`, `web_safari`, `mweb`, `android`, `android_vr`, `ios` and
+`tv_simply` **require** a GVS PO token while `visionos`, `web_embedded`, `tv` and `tv_downgraded`
+do not — which makes the usual "spoof Android/iOS" advice the opposite of a bypass here. The
+default list is the token-free set with `web` last (so the PO-token provider still has its route,
+and a refused token costs the last client rather than every extraction), and `YTDLP_FORCE_IPV4=1`
+pins the family to IPv4 exactly as `--force-ipv4` does — yt-dlp filters resolved addresses by that
+family inside its own socket layer, so IPv6 is never tried at all. That last part is aimed at
+WARP's flagged IPv6 ranges. Neither setting touches the jar or the proxy; the `🎬` row in
+`/doctor` shows the list in effect and names any client this yt-dlp version would silently skip.
 
 Regenerate cookies whenever downloads start failing again:
 

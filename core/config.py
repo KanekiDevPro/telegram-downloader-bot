@@ -102,6 +102,29 @@ COMPOSE_LOOPBACK_PORTS: dict[str, int] = {
     "warp": 1080,
 }
 
+#: The YouTube clients yt-dlp is asked for, in this order, unless ``.env`` says
+#: otherwise. ``web`` is last on purpose: it is the client whose *visitor binding*
+#: produces the "the page needs to be reloaded" (``SESSION_STALE``) failure this
+#: deployment keeps meeting, and the only one of these four that wants a PO token —
+#: which the bgutil provider supplies. The other three are the token-free half of
+#: yt-dlp's own table, and (except ``visionos``) all of them carry cookies, so a
+#: signed-in jar keeps working.
+#:
+#: Measured from the installed yt-dlp (2026.08.19) rather than from folklore: in its
+#: ``INNERTUBE_CLIENTS`` table ``web``, ``web_safari``, ``mweb``, ``android``,
+#: ``android_vr``, ``ios`` and ``tv_simply`` all have ``GVS_PO_TOKEN_POLICY``
+#: marked ``required``, while ``visionos``, ``web_embedded``, ``tv`` and
+#: ``tv_downgraded`` do not. A device-spoofing list of ``android,ios`` is therefore
+#: the *opposite* of a bypass in this version — those two are the clients that
+#: demand the token. ``services.extractor.youtube_client_facts`` reads that same
+#: table at runtime, and ``/doctor`` reports what it finds.
+DEFAULT_YOUTUBE_CLIENTS: tuple[str, ...] = (
+    "visionos",
+    "web_embedded",
+    "tv_downgraded",
+    "web",
+)
+
 #: The setting each compose helper is reached through. A report that says
 #: "unreachable" is only actionable if it also names the variable to look at.
 COMPOSE_SERVICE_ENV: dict[str, str] = {
@@ -390,6 +413,23 @@ class Settings(BaseSettings):
     #: ``none``, or ``node[:/path/to/node]`` / ``deno`` / ``bun`` / ``quickjs``.
     #: YouTube extraction degrades without one.
     ytdlp_js_runtime: str = Field(default="auto", alias="YTDLP_JS_RUNTIME")
+    #: YouTube clients to ask for, in order (``YTDLP_YOUTUBE_CLIENTS``, written the
+    #: way a list usually is: ``visionos,web_embedded,tv_downgraded,web``). Empty =
+    #: yt-dlp picks (its own default is ``visionos``+``web`` for an anonymous
+    #: session and ``web_embedded``+``tv_downgraded``+``web`` with a jar). See
+    #: ``DEFAULT_YOUTUBE_CLIENTS`` for why the shipped default looks like this.
+    ytdlp_youtube_clients: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_YOUTUBE_CLIENTS),
+        alias="YTDLP_YOUTUBE_CLIENTS",
+    )
+    #: Force IPv4 for every yt-dlp connection — the same thing as ``--force-ipv4``
+    #: (yt-dlp implements both as ``source_address = 0.0.0.0``). On by default
+    #: because of the tunnel: Cloudflare WARP's *IPv6* ranges are the ones YouTube
+    #: flags hardest, and the family filter is applied inside yt-dlp's socket layer
+    #: (``yt_dlp/networking/_helper.py``), so IPv6 candidates are never attempted
+    #: rather than attempted and refused. Turn it off only when a source in the
+    #: deployment has no IPv4 address at all.
+    ytdlp_force_ipv4: bool = Field(default=True, alias="YTDLP_FORCE_IPV4")
     worker_count: int = Field(default=2, alias="WORKER_COUNT")
 
     # --- Fallback extractor (Cobalt) ----------------------------------------
@@ -580,7 +620,7 @@ class Settings(BaseSettings):
             return 0
         return value
 
-    @field_validator("telegram_api_local", mode="before")
+    @field_validator("telegram_api_local", "ytdlp_force_ipv4", mode="before")
     @classmethod
     def _parse_bool_flag(cls, value: object) -> object:
         """Accept 1/0, true/false, yes/no — and a blank value meaning "off"."""
@@ -613,6 +653,31 @@ class Settings(BaseSettings):
         if not isinstance(value, str):
             return value
         return value.strip().rstrip("/")
+
+    @field_validator("ytdlp_youtube_clients", mode="before")
+    @classmethod
+    def _parse_youtube_clients(cls, value: object) -> object:
+        """``a,b`` / ``a b`` / ``[a, b]`` — lower-cased, because yt-dlp lower-cases.
+
+        A blank value means "let yt-dlp decide", which is why it maps to an empty
+        list and *not* to the default: the default is a choice this deployment makes,
+        and an operator who writes an empty value is making a different one.
+        """
+        if value is None:
+            return []
+        if not isinstance(value, str):
+            return value
+        raw = value.strip().strip("'\"").strip()
+        if not raw:
+            return []
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item).strip().lower() for item in parsed if str(item).strip()]
+        return [part.lower() for part in _ADMIN_SPLIT.split(raw) if part]
 
     @field_validator("cobalt_fallback_urls", mode="before")
     @classmethod

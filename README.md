@@ -282,6 +282,8 @@ and the single next step worth taking:
 ✅ کوکی: /cookies/cookies.txt — لاگین یوتیوب کامل است
 ✅ منبع کوکی: /cookies/cookies.txt — mount /cookies (9p، فقط-خواندنی)، مسیر میزبان:
    /Users/mo/bot، 31 کوکی، اکسپورت 4 دقیقه پیش؛ از همین اکسپورت استفاده می‌شود
+🎬 کلاینت‌های یوتیوب: visionos، web_embedded، tv_downgraded، web — web در این نسخهٔ yt-dlp *نیاز* به PO token
+   دارد (بدون provider همان کلاینت‌ها رد می‌شوند)؛ بی‌توکن‌ها: visionos، web_embedded، tv_downgraded. فقط IPv4
 ⚠️ PO token: http://pot-provider:4416 پاسخ نمی‌دهد — دانلودها بدون توکن ادامه پیدا می‌کنند …
 🎫 سرور سشن یوتیوب: http://yt-session-generator:8080 — توکن آماده، ساخته‌شده 6 دقیقه پیش؛ کوبالت هر ۵ دقیقه خودش دوباره می‌خواند
 ⛔️ تست زنده: SESSION_STALE: یوتیوب این درخواست را نپذیرفت (سشن کهنه است)…
@@ -743,6 +745,19 @@ The bot also picks a JavaScript runtime automatically (`YTDLP_JS_RUNTIME=auto`):
 one to solve YouTube's player challenge, and without it warns that formats may be missing.
 The Docker image ships Deno; host installs use whichever of deno/node/bun/qjs is present.
 
+**Application-layer evasion, where the network layer stops helping.** A tunnel changes the address
+but not what YouTube is asked to *believe*, so two settings travel with every request.
+`YTDLP_YOUTUBE_CLIENTS` picks the clients, token-free first: yt-dlp's own table (2026.08.19) marks
+`web`, `web_safari`, `mweb`, `android`, `android_vr`, `ios` and `tv_simply` as **requiring** a GVS
+PO token, while `visionos`, `web_embedded`, `tv` and `tv_downgraded` do not — so the widespread
+"spoof Android/iOS to skip the token" advice is the *opposite* of a bypass in this version, and the
+default here is the token-free set with `web` kept last (the provider route). `YTDLP_FORCE_IPV4=1`
+adds `source_address=0.0.0.0` (exactly `--force-ipv4`; yt-dlp filters the resolved addresses by that
+family in its own socket layer, so IPv6 is never attempted) — the point being that WARP's IPv6
+ranges are the ones YouTube flags hardest. Neither touches the cookie jar or the tunnel: they are
+merged in beside them, and `/doctor` reports what is actually in effect, including a client name
+this yt-dlp would silently skip.
+
 **Local Bot API server:** the cloud API refuses bot uploads over 50 MB, so a self-hosted
 `telegram-bot-api` is what makes `MAX_FILE_SIZE_MB=2000` real. It needs `TELEGRAM_API_ID` and
 `TELEGRAM_API_HASH` from my.telegram.org, so it sits behind the `local-api` profile and starts
@@ -805,6 +820,9 @@ in-process queue, losing queued work on restart).
 | `COOKIES_FROM_BROWSER` | — | `BROWSER[+KEYRING][:PROFILE]`; probed at startup and ignored when unreachable |
 | `COOKIE_AUTO_EXPORT` | — | same syntax; re-export the jar from that profile after a login-shaped block (once per 30 min, never overwriting a working login), then probe it and report |
 | `YTDLP_JS_RUNTIME` | `auto` | JS runtime for yt-dlp (`auto`/`none`/`node`/`deno`/`bun`/`quickjs`) |
+| `YTDLP_YOUTUBE_CLIENTS` | `visionos,web_embedded,tv_downgraded,web` | which YouTube clients yt-dlp asks for, in order. The default is the token-free half of 
+yt-dlp's own client table, with `web` last (the one client that wants a PO token, which the provider above supplies); empty = let yt-dlp decide. `/doctor` checks the names against the installed yt-dlp and flags any that require a token or would be skipped |
+| `YTDLP_FORCE_IPV4` | `1` | force IPv4 for every yt-dlp connection (identical to `--force-ipv4`, applied as a family filter inside yt-dlp so IPv6 is never attempted). On by default because the tunnel's *IPv6* ranges are the flagged ones |
 | `YTDLP_POT_PROVIDER_URL` | `http://pot-provider:4416` | PO-token provider base URL (the service compose runs); empty = off |
 | `YOUTUBE_SESSION_SERVER` | `http://yt-session-generator:8080` | YouTube session server for the fallback engine; empty = off |
 | `YT_SESSION_ROUTE_FILE` | `/runtime/browser-route.json` (set by compose) | where that server's own browser reports which route it took; `/doctor` reads it so "the session server answers" and "its Chromium is on the tunnel" are separate answers. Empty = the row is not shown |

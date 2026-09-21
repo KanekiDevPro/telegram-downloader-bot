@@ -20,7 +20,7 @@ import time
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, TypeVar
+from typing import Any, Callable, Literal, Optional, Sequence, TypeVar
 from urllib.parse import urlparse
 
 import yt_dlp
@@ -37,6 +37,12 @@ T = TypeVar("T")
 #: the retry costs one round trip instead of a user-visible failure. Blocks are
 #: deliberately *not* here: retrying a flagged IP just wastes the user's time.
 RETRYABLE_EXTRACTION_CODES: frozenset[str] = frozenset({"SESSION_STALE"})
+
+#: What yt-dlp's ``--force-ipv4`` writes into ``source_address``. Not a local
+#: interface choice: yt-dlp's own socket layer reads the *family* of this address
+#: and filters the resolved candidates down to it (``yt_dlp/networking/_helper.py``),
+#: so IPv6 is never attempted — which is the point, with a WARP exit.
+IPV4_ANY = "0.0.0.0"
 
 # ---------------------------------------------------------------------------
 # Format selection (Telegram-optimised output)
@@ -465,6 +471,44 @@ def missing_youtube_login_cookies(path: Path | None) -> tuple[str, ...]:
     return tuple(missing)
 
 
+def youtube_client_facts(
+    clients: Sequence[str],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """``(unknown, token_required, token_free)`` for a configured client list.
+
+    Read from the *installed* yt-dlp, because that is what decides it: every client
+    in its ``INNERTUBE_CLIENTS`` table carries a GVS PO-token policy, and the clients
+    that require one are precisely the ones a "spoof another device" list is usually
+    trying to escape (in 2026.08.19 that is ``android``, ``android_vr``, ``ios``,
+    ``web``, ``web_safari``, ``web_music``, ``web_creator``, ``mweb``, ``tv_simply``).
+    A name yt-dlp does not know is skipped by yt-dlp itself with a warning, so
+    reporting it beats applying it.
+
+    Never raises: a yt-dlp that moved its table is a report that says "cannot say",
+    not a bot that stops diagnosing YouTube.
+    """
+    if not clients:
+        return (), (), ()
+    try:
+        from yt_dlp.extractor.youtube._base import INNERTUBE_CLIENTS
+    except Exception:  # noqa: BLE001 — an import that moved is not a crash
+        return (), (), ()
+    unknown: list[str] = []
+    required: list[str] = []
+    free: list[str] = []
+    for client in clients:
+        config = INNERTUBE_CLIENTS.get(client)
+        # Names starting with ``_`` exist for yt-dlp's internal use and cannot be
+        # requested by a user, so they count as unknown in a configured list.
+        if not isinstance(config, dict) or client.startswith("_"):
+            unknown.append(client)
+            continue
+        policies = config.get("GVS_PO_TOKEN_POLICY") or {}
+        needs_token = any(getattr(policy, "required", False) for policy in policies.values())
+        (required if needs_token else free).append(client)
+    return tuple(unknown), tuple(required), tuple(free)
+
+
 def youtube_login_hint(path: Path | None) -> str | None:
     """Advice for a jar that carries cookies but cannot sign YouTube in.
 
@@ -884,6 +928,13 @@ class ExtractorService:
         pot_provider_url: str = "",
         cookies_from_browser: str = "",
         js_runtime: str = "auto",
+        #: YouTube clients to ask for, in order. Empty = yt-dlp's own choice, which is
+        #: the honest default for a caller that has not thought about it (a probe, a
+        #: test); the app passes ``settings.ytdlp_youtube_clients``.
+        youtube_clients: Sequence[str] = (),
+        #: Force IPv4 for every request (yt-dlp's ``--force-ipv4``). Off by default
+        #: here for the same reason: the app passes ``settings.ytdlp_force_ipv4``.
+        force_ipv4: bool = False,
         #: Retries are opt-in here (the app passes ``settings.extractor_retry_*``)
         #: so a caller that just wants one attempt — a diagnostic probe, a test —
         #: does not inherit a sleeping retry loop.
@@ -902,6 +953,22 @@ class ExtractorService:
         self.proxy = proxy.strip()
         self.pot_provider_url = pot_provider_url.strip().rstrip("/")
         self.js_runtimes = detect_js_runtimes(js_runtime)
+        #: Lower-cased like yt-dlp will read them, and de-duplicated in order: a
+        #: repeated client costs a second player request for nothing.
+        self.youtube_clients = tuple(
+            dict.fromkeys(
+                client.strip().lower() for client in youtube_clients if client and client.strip()
+            )
+        )
+        unknown, _required, _free = youtube_client_facts(self.youtube_clients)
+        if unknown:
+            logger.warning(
+                "yt-dlp does not know these YouTube clients (they will be skipped): %s — "
+                "the names change between yt-dlp versions; `/doctor` lists what is in effect.",
+                ", ".join(unknown),
+            )
+        #: IPv4-only when the app says so; see ``IPV4_ANY``.
+        self.force_ipv4 = force_ipv4
         #: Retries after a retryable failure, and the base of the exponential
         #: backoff between them (0 disables both).
         self.retry_attempts = max(0, retry_attempts)
@@ -953,15 +1020,25 @@ class ExtractorService:
 
     @property
     def extractor_args(self) -> dict[str, dict[str, list[str]]]:
-        """yt-dlp ``extractor_args`` for the optional PO-token provider.
+        """yt-dlp ``extractor_args``: the optional PO-token provider, and the clients.
 
         The bgutil plugin reads ``youtubepot-bgutilhttp:base_url`` — the same key
         as ``--extractor-args "youtubepot-bgutilhttp:base_url=…"``. Without the
         plugin installed the key is simply ignored.
+
+        Two settings share this one yt-dlp option, so they are *merged* here rather
+        than each writing it: an assignment that dropped the other would be the
+        worst kind of misconfiguration — one that reads as configured.
         """
-        if not self.pot_provider_url:
-            return {}
-        return {"youtubepot-bgutilhttp": {"base_url": [self.pot_provider_url]}}
+        args: dict[str, dict[str, list[str]]] = {}
+        if self.pot_provider_url:
+            args["youtubepot-bgutilhttp"] = {"base_url": [self.pot_provider_url]}
+        if self.youtube_clients:
+            # ``player_client`` is the key yt-dlp reads (``_configuration_arg``);
+            # anything else — ``client``, for instance — is never looked at, so it
+            # would look like a spoof and change nothing.
+            args["youtube"] = {"player_client": list(self.youtube_clients)}
+        return args
 
     @staticmethod
     def is_url_supported(url: str) -> bool:
@@ -999,8 +1076,12 @@ class ExtractorService:
             opts["proxy"] = self.proxy
         if self.js_runtimes:
             opts["js_runtimes"] = self.js_runtimes
-        if self.using_pot_provider:
-            opts["extractor_args"] = self.extractor_args
+        if args := self.extractor_args:
+            opts["extractor_args"] = args
+        if self.force_ipv4:
+            # yt-dlp's ``--force-ipv4``: its socket layer filters resolved addresses
+            # by this family, so IPv6 is never attempted (see ``IPV4_ANY``).
+            opts["source_address"] = IPV4_ANY
         # Browser cookies are merged with the jar file by yt-dlp; whichever is
         # missing is skipped, so both can be configured safely. ``allow_cookies=False``
         # is the second opinion a stale session sometimes needs: the same request
