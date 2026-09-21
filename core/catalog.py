@@ -68,6 +68,7 @@ MESSAGES: Final[Catalog] = {
     "cmd.help": {"en": "Help and supported sites", "fa": "راهنما و سایت‌های پشتیبانی‌شده"},
     "cmd.admin": {"en": "Admin panel", "fa": "پنل مدیریت"},
     "cmd.doctor": {"en": "Diagnose YouTube", "fa": "عیب‌یابی یوتیوب"},
+    "cmd.oauth": {"en": "YouTube TV login (OAuth)", "fa": "لاگین یوتیوب با TV"},
     "cmd.blocks": {"en": "Block digest", "fa": "گزارش بلاک‌ها"},
     "cmd.trend": {"en": "Failures per day", "fa": "روند خطاها"},
     "cmd.refresh": {"en": "Re-export the cookie jar", "fa": "ساخت دوبارهٔ کوکی"},

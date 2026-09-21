@@ -43,6 +43,7 @@ from services.extractor import (
     youtube_login_hint,
 )
 from services.helper_watch import run_helper_watch
+from services.oauth import OAuthService
 from services.payments import build_payment_service
 from services.proxy_health import TunnelHealth
 from services.queue import BLOCK_TIMEOUT_S, create_queue, create_redis_client
@@ -249,11 +250,22 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         # settings for the measurement behind both).
         youtube_clients=settings.ytdlp_youtube_clients,
         force_ipv4=settings.ytdlp_force_ipv4,
+        use_oauth2=settings.ytdlp_use_oauth2,
+        cache_dir=settings.ytdlp_cache_dir,
         retry_attempts=settings.extractor_retry_attempts,
         retry_backoff_s=settings.extractor_retry_backoff_s,
     )
     # The admin /doctor command reads the extractor straight from the dispatcher.
     dp["extractor"] = extractor
+
+    # The interactive OAuth2 device flow (``/oauth``): one login at a time, its
+    # child process sharing the tunnel the extractor uses so the token exchange
+    # never depends on this host's own address. Probed lazily — the service is
+    # cheap until an admin asks for a login.
+    oauth = OAuthService(
+        cache_dir=settings.ytdlp_cache_dir, proxy=proxy_health.for_ytdlp(tunnel)
+    )
+    dp["oauth"] = oauth
 
     # The fallback engine: only engaged when yt-dlp comes back *blocked*, so a
     # configured instance costs nothing until the primary route is refused. A
@@ -307,6 +319,24 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         )
     else:
         logger.info("yt-dlp JavaScript runtime: %s", extractor.js_runtime_name)
+    if extractor.use_oauth2:
+        # One honest line per boot, either way. The flow's history is exactly why
+        # this is measured and not assumed: yt-dlp gained OAuth2 in 2024.10.22
+        # and YouTube revoked it, so the knob on stock yt-dlp today buys a clear
+        # refusal — only a plugin (in the mounted plugin directory) makes it live.
+        oauth_supported, oauth_evidence = await oauth.supported()
+        if oauth_supported:
+            logger.info(
+                "yt-dlp OAuth2 login enabled — the installed yt-dlp implements the "
+                "device flow; run /oauth to cache a TV token."
+            )
+        else:
+            logger.warning(
+                "YTDLP_USE_OAUTH2=1 but this yt-dlp does not implement the OAuth2 "
+                "device flow (%s) — requests carrying username=oauth2 will be refused; "
+                "a reviving plugin in the mounted plugin directory re-enables it.",
+                oauth_evidence[:120],
+            )
     # The evasion posture, in one line at boot: it is the difference between
     # "extraction works" and "extraction works while claiming to be a TV", and a
     # client name this yt-dlp does not know is skipped silently otherwise.
@@ -490,6 +520,11 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
 async def shutdown(app: dict[str, Any]) -> None:
     """Graceful teardown: let workers drain briefly, then cancel and close clients."""
     app["stop_event"].set()
+    oauth = app.get("oauth")
+    if oauth is not None:
+        # No login child may outlive the bot that started it — an orphaned
+        # yt-dlp process would keep polling Google with nobody watching.
+        await oauth.cancel()
     tasks = app["workers"]
     if tasks:
         # Workers notice the stop event at the next queue read (BLOCK_TIMEOUT_S),

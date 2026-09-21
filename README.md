@@ -758,6 +758,24 @@ ranges are the ones YouTube flags hardest. Neither touches the cookie jar or the
 merged in beside them, and `/doctor` reports what is actually in effect, including a client name
 this yt-dlp would silently skip.
 
+**The TV login, when cookies are not enough (OAuth2 device flow).** A browser jar is hostage to
+YouTube's cookie rotation; a Smart-TV login is not — TVs sit on datacenter/NAT addresses by the
+million, so the device flow historically tolerated hosts a browser session would not. The flow is
+wired end to end: an admin runs `/oauth`, the bot starts one `yt-dlp --username oauth2 --password ''`
+child (through the same tunnel as the extractor), catches the device code from its stderr the
+moment it appears, and answers with the code and a button to `https://www.google.com/device`.
+When the code is entered, the child finishes, the token lands in yt-dlp's cache (the `yt-cache`
+volume, so it survives recreation), and every later extraction passes `username: oauth2` with no
+interaction (`YTDLP_USE_OAUTH2=1`).
+
+The caveat is measured, not folklore: yt-dlp gained OAuth2 in 2024.10.22 and YouTube later
+**revoked** the flow — the installed yt-dlp (2026.08.19) refuses `username=oauth2` outright, and
+so does the `/doctor` row and the boot log when the switch is on. The command reports that refusal
+instead of hanging on a code that will never be issued, and points at the jar as the working route.
+A plugin that revives the flow, installed into a mounted plugin directory (`/app/config/yt-dlp`),
+re-enables everything with no further code — the probe, the command and the cache behaviour are
+its contract too. The switch is off by default: on stock yt-dlp it only buys the clear error.
+
 **Local Bot API server:** the cloud API refuses bot uploads over 50 MB, so a self-hosted
 `telegram-bot-api` is what makes `MAX_FILE_SIZE_MB=2000` real. It needs `TELEGRAM_API_ID` and
 `TELEGRAM_API_HASH` from my.telegram.org, so it sits behind the `local-api` profile and starts
@@ -823,6 +841,8 @@ in-process queue, losing queued work on restart).
 | `YTDLP_YOUTUBE_CLIENTS` | `visionos,web_embedded,tv_downgraded,web` | which YouTube clients yt-dlp asks for, in order. The default is the token-free half of 
 yt-dlp's own client table, with `web` last (the one client that wants a PO token, which the provider above supplies); empty = let yt-dlp decide. `/doctor` checks the names against the installed yt-dlp and flags any that require a token or would be skipped |
 | `YTDLP_FORCE_IPV4` | `1` | force IPv4 for every yt-dlp connection (identical to `--force-ipv4`, applied as a family filter inside yt-dlp so IPv6 is never attempted). On by default because the tunnel's *IPv6* ranges are the flagged ones |
+| `YTDLP_USE_OAUTH2` | `0` | log YouTube in with the Smart-TV OAuth2 device flow (`username: oauth2`); `/oauth` runs the interactive login and the token is cached in `YTDLP_CACHE_DIR`. **The flow is revoked upstream** — stock yt-dlp refuses it, `/oauth` reports that refusal, and a reviving plugin in the mounted plugin directory re-enables it |
+| `YTDLP_CACHE_DIR` | `/app/cache/yt-dlp` | yt-dlp's persistent cache (client ids, signatures, the OAuth token); compose mounts the `yt-cache` volume here so a token survives recreation |
 | `YTDLP_POT_PROVIDER_URL` | `http://pot-provider:4416` | PO-token provider base URL (the service compose runs); empty = off |
 | `YOUTUBE_SESSION_SERVER` | `http://yt-session-generator:8080` | YouTube session server for the fallback engine; empty = off |
 | `YT_SESSION_ROUTE_FILE` | `/runtime/browser-route.json` (set by compose) | where that server's own browser reports which route it took; `/doctor` reads it so "the session server answers" and "its Chromium is on the tunnel" are separate answers. Empty = the row is not shown |

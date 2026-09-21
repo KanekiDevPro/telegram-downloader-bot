@@ -44,6 +44,14 @@ RETRYABLE_EXTRACTION_CODES: frozenset[str] = frozenset({"SESSION_STALE"})
 #: so IPv6 is never attempted — which is the point, with a WARP exit.
 IPV4_ANY = "0.0.0.0"
 
+#: The credentials yt-dlp's OAuth2 flow is keyed on. ``oauth2`` is what the
+#: extractor checks (``username.startswith('oauth')``), and the empty password is
+#: the contract from its own docs — the device flow authenticates the device, not
+#: an account. Kept here so the extractor and the interactive flow in
+#: ``services/oauth.py`` cannot drift apart.
+OAUTH2_USERNAME = "oauth2"
+OAUTH2_PASSWORD = ""
+
 # ---------------------------------------------------------------------------
 # Format selection (Telegram-optimised output)
 # ---------------------------------------------------------------------------
@@ -935,6 +943,15 @@ class ExtractorService:
         #: Force IPv4 for every request (yt-dlp's ``--force-ipv4``). Off by default
         #: here for the same reason: the app passes ``settings.ytdlp_force_ipv4``.
         force_ipv4: bool = False,
+        #: Log YouTube in with OAuth2 (yt-dlp's ``username: 'oauth2'`` — the Smart-TV
+        #: device flow; the token is prompted once and cached). Only meaningful when
+        #: the installed yt-dlp (or a plugin) still implements the flow: current core
+        #: refuses it by policy, and this flag then buys a clear error, not a login.
+        use_oauth2: bool = False,
+        #: Persistent yt-dlp cache directory (client ids, signatures, OAuth tokens).
+        #: Empty = yt-dlp's own default. The container mounts a named volume at the
+        #: configured path so a device-flow token survives recreation.
+        cache_dir: str = "",
         #: Retries are opt-in here (the app passes ``settings.extractor_retry_*``)
         #: so a caller that just wants one attempt — a diagnostic probe, a test —
         #: does not inherit a sleeping retry loop.
@@ -969,6 +986,8 @@ class ExtractorService:
             )
         #: IPv4-only when the app says so; see ``IPV4_ANY``.
         self.force_ipv4 = force_ipv4
+        self.use_oauth2 = use_oauth2
+        self.cache_dir = cache_dir.strip()
         #: Retries after a retryable failure, and the base of the exponential
         #: backoff between them (0 disables both).
         self.retry_attempts = max(0, retry_attempts)
@@ -1082,6 +1101,29 @@ class ExtractorService:
             # yt-dlp's ``--force-ipv4``: its socket layer filters resolved addresses
             # by this family, so IPv6 is never attempted (see ``IPV4_ANY``).
             opts["source_address"] = IPV4_ANY
+        if self.cache_dir:
+            # ``--cache-dir``: where client ids, signatures — and, under an OAuth
+            # plugin, the device-flow token — are kept. Pointless without the flag
+            # on a stock install; cheap either way.
+            opts["cache_dir"] = self.cache_dir
+        if self.use_oauth2:
+            # The Smart-TV device flow: yt-dlp prompts ``go to
+            # https://www.google.com/device and enter code XXX-YYY-ZZZ`` on its
+            # progress reporter, then polls until the code is entered. The
+            # password is empty *by contract* — the flow authenticates the
+            # device, not an account. The plugin's own guidance is to avoid
+            # running it *with* a cookie jar (the jar's anonymous identifiers can
+            # trip the token exchange), so a deployment with both configured gets
+            # one loud warning rather than a silent conflict.
+            if allow_cookies and (self.cookie_file is not None or self.using_browser_cookies):
+                logger.warning(
+                    "OAuth2 login is enabled alongside a cookie jar — yt-dlp's OAuth "
+                    "flow is documented to misbehave when account/anonymous cookies "
+                    "are sent in the same request. If logins fail, unset COOKIE_FILE "
+                    "or turn YTDLP_USE_OAUTH2 off."
+                )
+            opts["username"] = OAUTH2_USERNAME
+            opts["password"] = OAUTH2_PASSWORD
         # Browser cookies are merged with the jar file by yt-dlp; whichever is
         # missing is skipped, so both can be configured safely. ``allow_cookies=False``
         # is the second opinion a stale session sometimes needs: the same request

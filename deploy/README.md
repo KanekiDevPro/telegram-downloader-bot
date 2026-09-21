@@ -103,6 +103,7 @@ real video, and prints one verdict plus the single next step:
 ✅ JS runtime: deno
 🎬 کلاینت‌های یوتیوب: visionos، web_embedded، tv_downgraded، web — web در این نسخهٔ yt-dlp *نیاز* به PO token دارد
    (بدون provider همان کلاینت‌ها رد می‌شوند)؛ بی‌توکن‌ها: visionos، web_embedded، tv_downgraded. فقط IPv4 (source_address=0.0.0.0)
+📺 لاگین OAuth: خاموش (YTDLP_USE_OAUTH2=0) — کوکی مسیر اصلی است؛ /oauth برای لاگین TV
 ✅ PO token: http://pot-provider:4416 — v2.0.0
 🎫 سرور سشن یوتیوب: http://yt-session-generator:8080 — توکن آماده، ساخته‌شده 6 دقیقه پیش؛ کوبالت هر ۵ دقیقه خودش دوباره می‌خواند
 ⛔️ تست زنده: SESSION_STALE: یوتیوب این درخواست را نپذیرفت (سشن کهنه است)…
@@ -327,6 +328,23 @@ pins the family to IPv4 exactly as `--force-ipv4` does — yt-dlp filters resolv
 family inside its own socket layer, so IPv6 is never tried at all. That last part is aimed at
 WARP's flagged IPv6 ranges. Neither setting touches the jar or the proxy; the `🎬` row in
 `/doctor` shows the list in effect and names any client this yt-dlp version would silently skip.
+
+**The TV login (`YTDLP_USE_OAUTH2`, `/oauth`, `YTDLP_CACHE_DIR`).** The one credential that is not
+hostage to cookie rotation is a Smart-TV login: TVs live on datacenter/NAT addresses by the
+million, so YouTube's device flow historically tolerated hosts a browser session would not. The
+flow is wired end to end — an admin runs `/oauth`, the bot starts one
+`yt-dlp --username oauth2 --password ''` child through the same tunnel, catches the device code
+from stderr as it appears, and replies with the code and a button to `https://www.google.com/device`;
+once the code is entered the token is written to yt-dlp's cache (the `yt-cache` named volume, so it
+survives recreation) and later extractions pass `username: oauth2` with no interaction.
+
+Be clear about what it can do *today*, because the bot is: YouTube revoked the flow upstream, and
+the installed yt-dlp (2026.08.19) refuses `username=oauth2` outright. The probe in
+`services/oauth.py` reads that refusal from the real extractor, so `/oauth` answers with it
+instead of hanging on a code that will never be issued, the boot log says so once when the switch
+is on, and the `📺` row in `/doctor` shows the state either way. A plugin that revives the flow,
+installed into a mounted plugin directory (`/app/config/yt-dlp`), re-enables the whole path with
+no code changes. Off by default — on stock yt-dlp the switch only buys the clear error.
 
 Regenerate cookies whenever downloads start failing again:
 

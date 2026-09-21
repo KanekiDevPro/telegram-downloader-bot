@@ -16,6 +16,7 @@ receives is not a dead end.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -43,8 +44,16 @@ from services import broadcast, cookie_refresh, login_wizard, panel
 from services.cobalt import CobaltService
 from services.cookie_refresh import RefreshOutcome, render_outcome
 from services.cookie_watch import DOCTOR_CALLBACK, REFRESH_CALLBACK
-from services.doctor import DoctorReport, fallback_health, run_youtube_doctor
+from services.doctor import DEFAULT_PROBE_URL, DoctorReport, fallback_health, run_youtube_doctor
 from services.extractor import ExtractorService
+from services.oauth import (
+    DEVICE_URL,
+    FlowRunning,
+    OAuthOutcome,
+    OAuthService,
+    cache_state_line,
+    wait_for_code,
+)
 from services.queue import TaskQueue
 from services.telemetry import (
     DIGEST_DAYS,
@@ -84,6 +93,7 @@ ADMIN_COMMANDS: tuple[tuple[str, str], ...] = (
     ("trend", "cmd.trend"),
     ("refresh", "cmd.refresh"),
     ("fixlogin", "cmd.fixlogin"),
+    ("oauth", "cmd.oauth"),
     ("broadcast", "cmd.broadcast"),
     ("status", "cmd.status"),
 )
@@ -204,13 +214,15 @@ async def run_doctor_into(
     return report
 
 
-async def _say(edit: Message | None, bot: Bot, chat_id: int, text: str) -> None:
+async def _say(
+    edit: Message | None, bot: Bot, chat_id: int, text: str, **kwargs: Any
+) -> None:
     """Tell the admin something went wrong, in whichever message is ours."""
     try:
         if edit is not None:
-            await edit.edit_text(text)
+            await edit.edit_text(text, **kwargs)
         else:
-            await bot.send_message(chat_id, text)
+            await bot.send_message(chat_id, text, **kwargs)
     except Exception:
         logger.debug("could not report the doctor failure", exc_info=True)
 
@@ -643,6 +655,128 @@ async def on_panel_button(
         # Identical content (a tap on the screen already open) is not an error worth
         # a new message; a message that cannot be edited at all is.
         logger.debug("panel edit skipped (%s)", screen, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# The OAuth2 device flow: a YouTube login with no browser and no cookies
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command("oauth"))
+async def cmd_oauth(
+    message: Message, bot: Bot, oauth: OAuthService | None = None
+) -> None:
+    """``/oauth`` — log YouTube in through the Smart-TV device flow.
+
+    One admin command, three honest outcomes: the device code arrives *here* the
+    moment the child prints it (the handler does not wait for the flow to finish
+    to show it — the code expires in half an hour and the admin is already
+    waiting), the refusal arrives when the installed yt-dlp cannot do the flow at
+    all (revoked upstream; a reviving plugin re-enables it), and the failure
+    arrives with the child's own last words. A second command while one is live
+    is answered, not queued.
+    """
+    settings = get_settings()
+    user = message.from_user
+    if not settings.is_admin(user.id if user else None):
+        await message.answer("⛔️ فقط ادمین می‌تونه.")
+        return
+    if oauth is None:
+        await message.answer("❌ سرویس OAuth در دسترس نیست.")
+        return
+
+    supported, evidence = await oauth.supported()
+    if not supported:
+        await message.answer(
+            "❌ این yt-dlp امکان لاگین OAuth را ندارد — یوتیوب این مسیر را بسته و پاسخ "
+            "سمت yt-dlp این است:\n\n"
+            f"<code>{escape_html(evidence[:300])}</code>\n\n"
+            "🔒 مسیر درست همین حالا: کوکی لاگین‌شده (<code>/fixlogin</code>). "
+            "اگر پلاگینی که OAuth را برمی‌گرداند نصب شود، همین دستور خودکار کار می‌کند.",
+        )
+        return
+
+    try:
+        sink: asyncio.Queue[str] = asyncio.Queue()
+        flow = await oauth.start(DEFAULT_PROBE_URL, code_sink=sink)
+    except FlowRunning:
+        await message.answer(
+            "⏳ یک لاگین OAuth همین حالا در جریان است — کدش را وارد کنید یا صبر کنید "
+            "تا تمام شود؛ همزمان دو لاگین ممکن نیست."
+        )
+        return
+
+    status = await message.answer(
+        "📺 در حال شروع لاگین Smart TV… (کد تا چند دقیقه می‌رسد)"
+    )
+
+    # The child prints the code to stderr; the sink is how it crosses into this
+    # handler *while the flow is still running*. A silent child (a refusal the
+    # probe could not have seen, a network error) ends the wait with no code —
+    # and then the flow's own outcome explains why.
+    code = await wait_for_code(sink, timeout_s=30.0)
+    if code is None:
+        await flow.cancel()
+        await oauth.finish(flow)
+        outcome = OAuthOutcome("failed", detail="no device code was ever printed")
+        await _say(status, bot, message.chat.id, _oauth_failure_text(outcome))
+        return
+
+    keyboard = InlineKeyboardBuilder().button(text="🔓 باز کردن صفحهٔ ورود", url=DEVICE_URL).as_markup()
+    await _say(
+        status,
+        bot,
+        message.chat.id,
+        "📺 <b>لاگین Smart TV یوتیوب</b>\n\n"
+        f"1. روی دکمهٔ زیر بزنید ({DEVICE_URL})\n"
+        f"2. این کد را وارد کنید: <code>{escape_html(code)}</code>\n"
+        "3. دسترسی را تأیید کنید — بقیه‌اش خودکار است.\n\n"
+        "⏳ تا وقتی این پنجره باز است، منتظر تأیید شما می‌مانم…",
+        reply_markup=keyboard,
+    )
+
+    outcome = await flow.run(DEFAULT_PROBE_URL)
+    await oauth.finish(flow)
+    logger.info("OAuth device flow finished: %s (code=%s)", outcome.status, outcome.code)
+    if outcome.status == "success":
+        await _say(
+            None,
+            bot,
+            message.chat.id,
+            "✅ <b>OAuth2 لاگین شد!</b> توکن TV در کش yt-dlp ذخیره شد — یوتیوب دیگر "
+            "بدون کوکی و بدون IP تمیز هم جواب می‌دهد.\n\n"
+            f"🔑 کد استفاده‌شده: <code>{escape_html(outcome.code or '—')}</code>\n"
+            f"🗂 {escape_html(cache_state_line(settings.ytdlp_cache_dir))}"
+            + _oauth_off_note(settings),
+        )
+    else:
+        await _say(None, bot, message.chat.id, _oauth_failure_text(outcome))
+
+
+def _oauth_off_note(settings: Any) -> str:
+    """The one nudge a successful login still needs: turn the switch on."""
+    if settings.ytdlp_use_oauth2:
+        return ""
+    return (
+        "\n\n⚠️ در <code>.env</code> مقدار <code>YTDLP_USE_OAUTH2=1</code> نیست — "
+        "تا وقتی که روشنش نکنید، دانلودها از این لاگین استفاده نمی‌کنند."
+    )
+
+
+def _oauth_failure_text(outcome: OAuthOutcome) -> str:
+    """What a failed flow says, in the words of *why* it failed."""
+    if outcome.status == "unsupported":
+        return (
+            "❌ لاگین OAuth از سمت yt-dlp رد شد — یوتیوب این مسیر را بسته است:\n\n"
+            f"<code>{escape_html(outcome.detail[:300])}</code>"
+        )
+    if outcome.status == "expired":
+        return (
+            "⌛️ کد وارد نشد و مهلتش تمام شد — دوباره <code>/oauth</code> بزنید و کد را "
+            "در همان نیم ساعت وارد کنید."
+        )
+    detail = f"\n\n<code>{escape_html(outcome.detail[:300])}</code>" if outcome.detail else ""
+    return f"❌ لاگین OAuth تمام نشد ({outcome.status}).{detail}"
 
 
 # ---------------------------------------------------------------------------

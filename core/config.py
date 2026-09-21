@@ -430,6 +430,30 @@ class Settings(BaseSettings):
     #: rather than attempted and refused. Turn it off only when a source in the
     #: deployment has no IPv4 address at all.
     ytdlp_force_ipv4: bool = Field(default=True, alias="YTDLP_FORCE_IPV4")
+    #: Log YouTube in with OAuth2 (yt-dlp's ``username: 'oauth2'``), the Smart-TV
+    #: device flow: an admin runs ``/oauth``, opens the link, types the code, and
+    #: yt-dlp stores the token in its cache. A TV login is not tied to a browser
+    #: session, so it is the one credential that is *not* hostage to YouTube's
+    #: cookie rotation — and TVs sit on datacenter/NAT addresses by the million,
+    #: which is why the flow is friendlier to a VPS than a browser jar is.
+    #:
+    #: **The caveat that decides whether this can work at all:** the official
+    #: support landed in yt-dlp 2024.10.22 and was *revoked* by YouTube later
+    #: (``_perform_login`` raises "Login with OAuth is no longer supported" on
+    #: current core; see the wiki). The flow is wired so a plugin that revives it
+    #: (installed into the plugin directory mounted at ``/app/config/yt-dlp``)
+    #: works with no further code — and the bot *measures* which world it is in
+    #: before promising anything: the Telegram command answers with the device
+    #: code when the child process emits one, and with the refusal when it does
+    #: not. Off by default: on stock yt-dlp this knob only buys a clear error.
+    ytdlp_use_oauth2: bool = Field(default=False, alias="YTDLP_USE_OAUTH2")
+    #: Where yt-dlp keeps its persistent cache — client ids, signatures, and (if
+    #: an OAuth plugin is active) the OAuth token written at login time. An empty
+    #: value means yt-dlp's own default, which inside the container is ephemeral:
+    #: every recreation would lose the token and every ``/oauth`` would start the
+    #: device flow from zero. ``docker-compose.yml`` mounts the ``yt-cache`` volume
+    #: here for exactly that reason; the default path matches its mount.
+    ytdlp_cache_dir: str = Field(default="/app/cache/yt-dlp", alias="YTDLP_CACHE_DIR")
     worker_count: int = Field(default=2, alias="WORKER_COUNT")
 
     # --- Fallback extractor (Cobalt) ----------------------------------------

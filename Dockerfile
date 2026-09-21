@@ -27,9 +27,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Run as a non-root user. Two directories are written to: downloads/ (job files)
-# and cobalt/ (the cookies.json generated for the fallback engine from the bot's
-# own jar).
+# Run as a non-root user. Three directories are written to: downloads/ (job
+# files), cobalt/ (the cookies.json generated for the fallback engine from the
+# bot's own jar), and cache/yt-dlp (yt-dlp's persistent cache — client ids,
+# signatures and, under an OAuth plugin, the device-flow token a /oauth login
+# wrote; the compose file mounts the yt-cache volume here so a token survives
+# recreation).
 #
 # cobalt/ is world-writable on purpose. docker-compose mounts a *host* directory
 # over it, and a bind mount keeps the host's ownership, so the mode set here only
@@ -38,7 +41,7 @@ COPY . .
 # PermissionError this line exists to prevent. The bot also checks it at boot and
 # says what to fix when the mounted directory is not writable by uid 10001.
 RUN useradd --create-home --uid 10001 bot \
-    && mkdir -p /app/downloads /app/cobalt \
+    && mkdir -p /app/downloads /app/cobalt /app/cache/yt-dlp \
     && chown -R bot:bot /app \
     && chmod 0777 /app/cobalt
 USER bot

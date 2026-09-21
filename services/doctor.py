@@ -62,6 +62,7 @@ from services.extractor import (
     youtube_client_facts,
 )
 from services.fallback import FallbackUse, last_use
+from services.oauth import cache_state_line, probe_oauth_support
 from services.proxy_health import TunnelHealth
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,12 @@ ROUTE_CHECK_NAME = "مرورگر سشن"
 #: Its own row because a wrong name in the list is silently skipped by yt-dlp, which
 #: reads exactly like the block it was meant to dodge.
 CLIENTS_CHECK_NAME = "کلاینت‌های یوتیوب"
+
+#: The OAuth2 device-flow login, one row: "the switch is on" and "the installed
+#: yt-dlp can actually do the flow" are different facts — YouTube revoked the
+#: flow upstream, so the honest default state of this row on stock yt-dlp is the
+#: refusal, and only a reviving plugin (or a restored core) turns it green.
+OAUTH_CHECK_NAME = "لاگین OAuth"
 
 #: The generator relaunches Chromium every ``--update-interval`` (300s by default, and
 #: configurable) and the route file is rewritten on every launch — so a two-hour-old
@@ -1199,6 +1206,46 @@ def _tunnel_check(settings: Settings, tunnel: TunnelHealth | None) -> Check:
     )
 
 
+def _oauth_check(
+    settings: Settings, supported: bool | None, evidence: str
+) -> Check:
+    """The OAuth2 login as a report row: switch, capability, and cache.
+
+    Four states, each with its own action: off (the honest default), on and
+    impossible (the upstream refusal, quoted), on and possible (with the cache
+    the token will land in), and unknown (probing failed — reported, not
+    guessed). Deliberately never ``fail``: the flow is one credential among
+    several, and a working cookie jar makes the whole question moot.
+    """
+    if not settings.ytdlp_use_oauth2:
+        return Check(
+            OAUTH_CHECK_NAME,
+            "ok",
+            "خاموش (YTDLP_USE_OAUTH2=0) — کوکی مسیر اصلی است؛ /oauth برای لاگین TV",
+            icon="📺",
+        )
+    if supported is None:
+        return Check(
+            OAUTH_CHECK_NAME, "warn", "امکان‌سنجی ناموفق — دوباره /doctor بزنید", icon="📺"
+        )
+    if not supported:
+        detail = evidence[:220] if evidence else "پاسخی از yt-dlp خوانده نشد"
+        return Check(
+            OAUTH_CHECK_NAME,
+            "warn",
+            f"روشن است ولی این yt-dlp جریان OAuth را ندارد — یوتیوب مسیر را بسته: "
+            f"{detail}؛ یک پلاگین احیاگر در /app/config/yt-dlp دوباره فعالش می‌کند",
+            icon="📺",
+        )
+    return Check(
+        OAUTH_CHECK_NAME,
+        "ok",
+        "فعال و پشتیبانی‌شده — با /oauth توکن TV را در کش ذخیره کنید؛ "
+        + cache_state_line(settings.ytdlp_cache_dir),
+        icon="📺",
+    )
+
+
 def _clients_check(extractor: ExtractorService) -> Check:
     """What YouTube is told to believe: the clients, and the address family.
 
@@ -1262,6 +1309,8 @@ def _base_checks(
     server: SessionServer | None,
     tunnel: TunnelHealth | None = None,
     route: SessionRoute | None = None,
+    oauth_supported: bool | None = None,
+    oauth_evidence: str = "",
 ) -> list[Check]:
     checks = [
         Check(
@@ -1273,6 +1322,7 @@ def _base_checks(
         _cookie_storage_check(extractor),
         _runtime_check(extractor),
         _clients_check(extractor),
+        _oauth_check(settings, oauth_supported, oauth_evidence),
         _provider_check(settings, provider, plugin_version),
         _session_server_check(settings, server),
     ]
@@ -1445,8 +1495,23 @@ async def run_youtube_doctor(
     # Read (never written) here: the generator's own account of which route its
     # browser took, which is the one fact no setting of ours can state.
     route = read_session_route(settings.session_route_file)
+    # The OAuth flow's capability — asked only when someone has turned the switch
+    # on, because on stock yt-dlp the answer is a known refusal and the probe is
+    # an import+login call that has nothing to say to a deployment not using it.
+    oauth_supported: bool | None = None
+    oauth_evidence = ""
+    if settings.ytdlp_use_oauth2:
+        oauth_supported, oauth_evidence = await probe_oauth_support()
     checks = _base_checks(
-        settings, extractor, provider, pot_plugin_version(), server, tunnel, route
+        settings,
+        extractor,
+        provider,
+        pot_plugin_version(),
+        server,
+        tunnel,
+        route,
+        oauth_supported,
+        oauth_evidence,
     )
 
     if settings.cookies_from_browser:

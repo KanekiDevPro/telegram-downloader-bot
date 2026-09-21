@@ -514,10 +514,20 @@ services:
       # through a mount so `/doctor` can answer "is the token browser on the tunnel?"
       # with a measurement rather than with the setting the operator wrote.
       - ${RUNTIME_HOST_DIR:-./runtime}:/runtime:ro
+      # yt-dlp's persistent cache: client ids and signatures — and, when an OAuth
+      # plugin is active, the device-flow token a `/oauth` login wrote. A named
+      # volume (not a bind mount): the token is machine-managed secret material
+      # with no reason to be browsable on the host, and a named volume is owned by
+      # the container's user (a bind mount would keep the host's — the cobalt/
+      # trap). Without this, every `docker compose up --build` would throw the
+      # token away and every /oauth would start the device flow from zero.
+      - yt-cache:/app/cache
 
 volumes:
   pgdata:
   downloads:
+  # Where yt-dlp's cache lives across recreations (see the bot's mounts).
+  yt-cache:
   telegram-api-data:
   # WARP's registration state (its device identity and licence). Persisted so a
   # restart keeps the same exit instead of registering a new one every time.
