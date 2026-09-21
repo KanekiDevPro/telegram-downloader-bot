@@ -1,0 +1,35 @@
+# systemd unit — Linux VPS / dedicated server.
+#
+#   sudo cp deploy/telegram-downloader-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now telegram-downloader-bot
+#   journalctl -u telegram-downloader-bot -f
+#
+# Adjust User/Group/WorkingDirectory to match your install path.
+[Unit]
+Description=Telegram Downloader Bot
+Documentation=https://github.com/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+Group=bot
+WorkingDirectory=/opt/telegram-downloader-bot
+EnvironmentFile=/opt/telegram-downloader-bot/.env
+ExecStart=/opt/telegram-downloader-bot/.venv/bin/python main.py
+
+Restart=always
+RestartSec=5
+# The bot traps SIGTERM, drains in-flight work and requeues interrupted tasks.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

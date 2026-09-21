@@ -1,0 +1,297 @@
+# Full stack: bot + Postgres + Redis + the embedded Cobalt fallback extractor,
+# plus an optional self-hosted Bot API server.
+#
+#   docker compose up -d --build                      # bot + db + redis + cobalt
+#   docker compose --profile local-api up -d --build  # + telegram-bot-api (2000 MB)
+#   docker compose logs -f bot                        # follow the bot
+#
+# Dev alternative (infra in Docker, bot on the host):
+#   docker compose up -d postgres redis cobalt
+#
+# The local Bot API server needs TELEGRAM_API_ID and TELEGRAM_API_HASH from
+# https://my.telegram.org, so it lives behind the `local-api` profile: without
+# credentials it exits immediately and would restart-loop forever. If
+# TELEGRAM_API_BASE_URL in .env points at it while the profile is off, the bot
+# logs the failure and falls back to the official cloud API (50 MB uploads).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: downloader
+      POSTGRES_PASSWORD: downloader
+      POSTGRES_DB: downloader
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U downloader -d downloader"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # YouTube "trusted session" server: a real Chromium that generates a po_token
+  # bound to this host's public IP — which is the one thing that gets the fallback
+  # engine past YouTube's bot check *without* a login (cobalt itself has none, and
+  # YOUTUBE_SESSION_SERVER below points it here). On by default, and worth knowing
+  # what that costs: it runs Chromium under Xvfb, and its first token can take a few
+  # minutes.
+  #
+  # It has to run on the same public IP as the blocked host (that is the whole
+  # requirement), which the embedded instance already does. Published on loopback
+  # only, like the other helpers: `/update` is unauthenticated.
+  #
+  # Turns out it cannot produce a token on every host (the browser has to play a
+  # real YouTube embed from this IP). When it will not, /doctor says so instead of
+  # promising a session, and the login jar or the PO-token provider above are the
+  # other two routes.
+  yt-session-generator:
+    image: ghcr.io/imputnet/yt-session-generator:webserver
+    init: true
+    restart: unless-stopped
+    # Chromium needs more shared memory than Docker's 64 MB default, and this is
+    # not a tuning detail: with the default it starts, dies, and takes the whole
+    # helper down with it — `Failed to connect to browser`, at which point the
+    # generator process exits and `restart` brings it back **every 13 seconds**,
+    # forever. A loop like that is invisible in the report (the port is up in
+    # between) and costs CPU until someone reads these logs. 1 GB is the usual
+    # figure for a browser container; one page is all this ever renders.
+    shm_size: "1g"
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      # The server is listening long before it has a token (/token answers 503 with
+      # "not yet generated" while the browser works), so readiness is the doctor's
+      # job — this only says "up", and the image's wget is enough for that.
+      test:
+        - CMD-SHELL
+        - "wget -q -S -O /dev/null http://127.0.0.1:8080/token 2>&1 | grep -q 'HTTP/'"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Self-hosted Bot API server. Raises the bot's upload ceiling from 50 MB
+  # (cloud) to 2000 MB and, with TELEGRAM_LOCAL=1, serves files straight from
+  # disk. This is what makes MAX_FILE_SIZE_MB=2000 actually deliverable.
+  telegram-api:
+    image: aiogram/telegram-bot-api:latest
+    profiles: ["local-api"]
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      TELEGRAM_LOCAL: ${TELEGRAM_API_LOCAL:-1}
+    volumes:
+      - telegram-api-data:/var/lib/telegram-bot-api
+    ports:
+      - "8081:8081"
+    healthcheck:
+      # The server binds IPv4 only, so probe 127.0.0.1 (busybox wget resolves
+      # `localhost` to ::1 first and reports a bogus "connection refused").
+      # The root path answers 404, so accept any HTTP response line rather than
+      # wget's exit code, which is non-zero for 4xx.
+      test:
+        - CMD-SHELL
+        - "wget -q -S -O /dev/null http://127.0.0.1:8081/ 2>&1 | grep -q 'HTTP/'"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # YouTube PO-token provider (bgutil). YouTube refuses downloads from flagged IPs;
+  # a PO token makes the traffic look like a real player — and it is the one fix
+  # that needs no login at all. On by default: the bot's YTDLP_POT_PROVIDER_URL
+  # points here, so `docker compose up -d` is the whole setup.
+  #
+  # The server executes BotGuard scripts, so it is unauthenticated on purpose: its
+  # port is published on the host's loopback only, for a host-run bot to reach it —
+  # never expose it.
+  #
+  # Not wanted? Start only the services you do want (`docker compose up -d bot db
+  # redis cobalt`): the bot keeps working without this one — yt-dlp rejects the
+  # unreachable provider and downloads continue untokened, with one warning in the
+  # log — and /doctor says which helper is missing.
+  pot-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:4416:4416"
+    healthcheck:
+      # The image ships node and nothing else — and /ping is the endpoint yt-dlp's
+      # own plugin asks before it trusts the server, so this checks the same thing
+      # a download does.
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:4416/ping', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # Embedded fallback extractor. This is the safety net for links the primary
+  # engine (yt-dlp) is refused on — and it is why COBALT_API_URL needs no
+  # configuration at all: the default in core/config.py points here.
+  #
+  # Worth knowing what it does and does not fix: this instance shares the host's
+  # network address, so it CANNOT serve a link that YouTube refused *because of the
+  # IP* — for that (and only for that) give it its own way out:
+  #
+  #   COBALT_HTTP_PROXY=socks5h://user:pass@host:1080   # in .env, then restart
+  #
+  # What it does fix: an extractor that broke, a site that refuses yt-dlp's
+  # requests, and a dead public instance — plus YouTube's per-client bot check,
+  # once it has a session (see COBALT_COOKIES_HOST_DIR below). Its port is
+  # published on the host's loopback only, never on the public interface: the
+  # instance is unauthenticated and nothing outside this stack should reach it.
+  cobalt:
+    image: ghcr.io/imputnet/cobalt:10
+    restart: unless-stopped
+    init: true
+    environment:
+      # Used to build the tunnel URLs the bot downloads from, so it has to be the
+      # address the *bot container* resolves — not the public one.
+      API_URL: http://cobalt:9000/
+      API_PORT: 9000
+      # No browser origin calls this instance; the bot is the only client.
+      CORS_WILDCARD: 0
+      # The bot can legitimately ask for several files a minute (queued tasks and
+      # repeat links). The instance is private, so the public limits (20/min, and
+      # 40/min for the tunnel that carries the bytes) are raised rather than being
+      # paid for by a user whose download is refused at the last step.
+      RATELIMIT_MAX: ${COBALT_RATELIMIT_MAX:-120}
+      TUNNEL_RATELIMIT_MAX: ${COBALT_TUNNEL_RATELIMIT_MAX:-120}
+      # YouTube needs a *session* here too (cobalt has no built-in login). The file
+      # below is generated from the bot's own jar (`services/cobalt_cookies.py`),
+      # so one export signs both engines in; a po-token/visitor-data server is the
+      # other route (YOUTUBE_SESSION_SERVER).
+      COOKIE_PATH: /cookies/cookies.json
+      # The other route past the same check, for an IP that a login does not save
+      # either. On by default (the service above); empty = off. Cobalt re-reads it
+      # every 5 minutes on its own, so a fresh token needs no restart.
+      YOUTUBE_SESSION_SERVER: ${YOUTUBE_SESSION_SERVER:-http://yt-session-generator:8080}
+      # The proxy cobalt's *own* requests take (player, media) — and the env var
+      # name is not a guess: `HTTP_PROXY`/`HTTPS_PROXY` are ignored (cobalt's
+      # undici dispatcher does not read them), so setting them here is the same as
+      # setting nothing. cobalt looks exactly for `API_EXTERNAL_PROXY`
+      # (`api.js`: `if (env.externalProxy) setGlobalDispatcher(new ProxyAgent(…))`).
+      # A proxy set for the bot (`YTDLP_PROXY`) does not carry cobalt's requests:
+      # each engine has its own outbound, so both need the value.
+      API_EXTERNAL_PROXY: ${COBALT_HTTP_PROXY:-}
+    ports:
+      - "127.0.0.1:9000:9000"
+    # So a proxy running on the host is reachable by that name on Linux too, not
+    # only on Docker Desktop.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # The one deliberately read-*write* mount in this file: the bot generates
+      # the file from its jar, and cobalt rewrites it with the cookies it refreshes
+      # (its own write-back loop). The source is a *directory* that always exists,
+      # so a missing cookie file is an absent file — not a Docker-created directory
+      # where a file was expected. `COBALT_COOKIES_HOST_DIR` moves it.
+      - ${COBALT_COOKIES_HOST_DIR:-./cobalt}:/cookies
+    healthcheck:
+      # wget is what the image ships (no curl); the API answers JSON on `/`.
+      test:
+        - CMD-SHELL
+        - "wget -q -S -O /dev/null http://127.0.0.1:9000/ 2>&1 | grep -q 'HTTP/'"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  bot:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # Started, not healthy: the fallback is optional by design, and a bot that
+      # refuses to boot because a helper is missing is worse than one that says so.
+      cobalt:
+        condition: service_started
+    # No depends_on telegram-api: it is behind a profile, and the bot survives
+    # (and reports) an unreachable API server rather than waiting for one.
+    # `.env` supplies BOT_TOKEN, ADMIN_IDS, limits, card details, ...
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Service names beat the localhost defaults from .env inside the network.
+      DATABASE_URL: postgresql://downloader:downloader@postgres:5432/downloader
+      REDIS_URL: redis://redis:6379/0
+      DOWNLOAD_DIR: /app/downloads
+      # Empty = official cloud API (see .env: TELEGRAM_API_BASE_URL).
+      TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:-}
+      TELEGRAM_API_LOCAL: ${TELEGRAM_API_LOCAL:-1}
+      # Optional yt-dlp helpers (empty = off); see .env.example.
+      YTDLP_PROXY: ${YTDLP_PROXY:-}
+      # On by default: the pot-provider service above is part of this stack, and a
+      # PO token is what a flagged IP needs. A missing provider is survivable —
+      # yt-dlp rejects it and continues.
+      YTDLP_POT_PROVIDER_URL: ${YTDLP_POT_PROVIDER_URL:-http://pot-provider:4416}
+      # Cobalt reads the session server itself; the bot holds the same value only so
+      # /doctor can probe the route the fallback will take.
+      YOUTUBE_SESSION_SERVER: ${YOUTUBE_SESSION_SERVER:-http://yt-session-generator:8080}
+      # The jar is read from the read-only mount below, so a fresh export is
+      # live after `docker compose restart bot` (no rebuild). Overridden here
+      # rather than in .env because it is a container path.
+      COOKIE_FILE: /cookies/cookies.txt
+      # The embedded instance (default in core/config.py). Overridable so a
+      # deployment can point at an instance elsewhere — or empty to switch the
+      # fallback off entirely.
+      COBALT_API_URL: ${COBALT_API_URL:-http://cobalt:9000}
+      # Where the cobalt-format cookie file is generated — a container path, like
+      # COOKIE_FILE above, because it is the mount below that makes it shared.
+      COBALT_COOKIES_DIR: /app/cobalt
+    # So `YTDLP_PROXY=http://host.docker.internal:10808` (a proxy on the host)
+    # resolves on Linux hosts as well as Docker Desktop.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - downloads:/app/downloads
+      # The cookie jar is read through a read-only mount, not baked into the image:
+      # a fresh export takes effect with `docker compose restart bot` instead of a
+      # rebuild, and the container can never overwrite (or leak into an image
+      # layer) the file that holds your YouTube login. yt-dlp *rewrites* its
+      # cookiefile when a download ends, so the bot hands it a writable copy from
+      # downloads/.cookies instead of this mount.
+      #
+      # The mounted source is a *directory*, deliberately: bind-mounting the file
+      # itself (`./cookies.txt:/app/cookies.txt:ro`) makes Docker create a
+      # directory when the host file is missing — the state a fresh clone is in —
+      # and the container then refuses to start ("not a directory"). A directory
+      # source always exists, so an absent jar is simply a missing file inside the
+      # container: the bot says so in one warning and keeps serving everything that
+      # does not need cookies. `COOKIES_HOST_DIR` moves the mount (e.g. a secrets
+      # directory elsewhere on the host) as long as the jar is named cookies.txt.
+      - ${COOKIES_HOST_DIR:-./}:/cookies:ro
+      # The cobalt-format file generated from that jar (the same host directory the
+      # cobalt service reads), so the fallback engine gets the same login. Writable
+      # because *this* is where it comes from; an empty COBALT_COOKIES_DIR turns
+      # the generation off and the fallback runs without cookies.
+      - ${COBALT_COOKIES_HOST_DIR:-./cobalt}:/app/cobalt
+
+volumes:
+  pgdata:
+  downloads:
+  telegram-api-data:

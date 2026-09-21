@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+downloads/
+
+# Never commit credentials or the cookie jar
+cookies.txt
+*.session
+
+# tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# The cobalt-format cookie file generated from the jar above (`cobalt/`): a
+# login in another shape is still a login.
+cobalt/

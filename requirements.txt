@@ -1,0 +1,9 @@
+aiogram>=3.7,<4.0
+aiohttp>=3.9
+asyncpg>=0.29
+pydantic>=2.7
+pydantic-settings>=2.3
+redis>=5.0
+# yt-dlp plugin: fetches YouTube PO tokens from a provider (see YTDLP_POT_PROVIDER_URL).
+yt-dlp>=2024.12.13
+bgutil-ytdlp-pot-provider>=2.0.0

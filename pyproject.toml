@@ -1,0 +1,38 @@
+# Tooling configuration for the bot (lint, types, tests).
+# Runtime dependencies live in requirements.txt — this file is not a build manifest.
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+exclude = [".venv", "downloads", "__pycache__"]
+src = ["."]
+
+[tool.ruff.lint]
+# Deliberately focused on correctness signals: unused imports/variables, import
+# order, syntax-adjacent problems. Stylistic churn is not the goal here.
+select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+# The smoke script and boot check import after adjusting sys.path on purpose.
+"scripts/*.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+disallow_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+show_error_codes = true
+ignore_missing_imports = true
+exclude = ["^\\.venv/", "^downloads/"]
+
+[[tool.mypy.overrides]]
+# yt-dlp's inline types are heavy and version-specific; don't crawl them.
+module = ["yt_dlp", "yt_dlp.*"]
+follow_imports = "skip"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q"
