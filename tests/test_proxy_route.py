@@ -274,18 +274,34 @@ def test_an_engine_without_a_proxy_says_so(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_session_generator_has_no_proxy_setting_to_wire() -> None:
-    """The one route a proxy does not fix, stated in code rather than in prose.
+def test_the_session_generator_has_no_proxy_variable_to_wire() -> None:
+    """It is routed *without* one, and that is a measured fact, not a preference.
 
-    The generator drives a real Chromium from the host's own address (that is the
-    whole point of a *trusted* session — its token is bound to the IP that created
-    it), and its image takes no proxy variable. So a proxy cannot move it: if a host
-    needs a proxy for YouTube, the token route is unavailable and the login jar
-    (exported through that same proxy) is what remains.
+    The generator drives a real Chromium, and Chromium does not read
+    ``HTTP_PROXY``/``HTTPS_PROXY`` — the image takes no proxy flag either. A variable
+    here would look like routing and route nothing, which is the worst kind of
+    configuration: it reads as done. What actually moves the browser's traffic is
+    sharing the tunnel container's network namespace, and the alias on that container
+    is what keeps the name the bot is configured with resolvable (a process in
+    another container's namespace has no name of its own).
     """
     compose = (Path(__file__).resolve().parent.parent / "docker-compose.yml").read_text(
         encoding="utf-8"
     )
-    generator = compose.split("yt-session-generator:", 1)[1].split("\n  telegram-api:", 1)[0]
+    # Split on the *service keys* (two-space indent), not on the bare name: the name
+    # also appears in the comments that explain this wiring, and a slice that starts
+    # mid-comment would assert about prose instead of about configuration.
+    warp = compose.split("\n  warp:", 1)[1].split("\n  yt-session-generator:", 1)[0]
+    generator = compose.split("\n  yt-session-generator:", 1)[1].split("\n  telegram-api:", 1)[0]
+    # Comments are stripped first: this asserts what Compose is *told*, and the
+    # block's own comments explain at length why the variable is absent.
+    directives = "\n".join(
+        line for line in generator.splitlines() if not line.lstrip().startswith("#")
+    )
 
-    assert "PROXY" not in generator.upper()
+    assert "PROXY" not in directives.upper()
+    assert 'network_mode: "service:warp"' in generator
+    # The other half of the same wiring: the tunnel answers to the generator's name,
+    # so `YOUTUBE_SESSION_SERVER=http://yt-session-generator:8080` stays valid for
+    # the bot *and* for the embedded fallback.
+    assert "yt-session-generator" in warp

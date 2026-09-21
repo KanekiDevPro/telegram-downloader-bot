@@ -39,6 +39,7 @@ from services import (
     cobalt_cookies,  # noqa: E402
     cookie_refresh,  # noqa: E402
     login_wizard,  # noqa: E402
+    proxy_health,  # noqa: E402
 )
 from services import doctor as doctor_service  # noqa: E402
 from services import fallback as fallback_service  # noqa: E402
@@ -915,9 +916,52 @@ async def main() -> int:
                 "a cloud one is what the check itself targets, and neither helper "
                 "substitutes for either"
             )
+        # The tunnel itself, asked live — this is the one route that, when it is
+        # wrong, makes *every* download fail or silently keeps the address YouTube
+        # already refused. Three different failures, three checks: it must answer,
+        # the running engine must be carrying it, and it must leave from somewhere
+        # other than this host.
+        if settings.ytdlp_proxy:
+            tunnel = await proxy_health.probe_with_retries(
+                probe_url(settings.ytdlp_proxy), attempts=2, delay_s=1.0
+            )
+            check(
+                "the yt-dlp tunnel answers",
+                tunnel.reachable,
+                tunnel.describe(),
+            )
+            check(
+                "the running engine goes through the tunnel",
+                extractor.using_proxy and extractor.proxy == probe_url(settings.ytdlp_proxy),
+                _mask_credentials(settings.ytdlp_proxy)
+                if extractor.using_proxy
+                else "the engine is running direct (the boot probe dropped it)",
+            )
+            if tunnel.on_warp:
+                direct = await proxy_health.direct_exit_ip()
+                check(
+                    "downloads leave from a different address than this host",
+                    bool(direct) and direct != tunnel.exit_ip,
+                    f"tunnel exit {tunnel.exit_ip}"
+                    + (f" vs this host {direct}" if direct else " (host address unreadable)"),
+                )
+            elif tunnel.reachable and tunnel.traced:
+                warn(
+                    "the tunnel answers but is not on WARP",
+                    f"warp={tunnel.warp or 'unknown'} — traffic still leaves from this "
+                    "host's address; `docker compose logs warp` says why (and a WARP "
+                    "licence key, WARP_LICENSE_KEY, changes the exit on some hosts)",
+                )
+            else:
+                print(
+                    "  note  the tunnel could not be asked where it goes (a SOCKS5 "
+                    "proxy: aiohttp does not speak it) — reachability is all that was "
+                    "verified; use http://warp:1080 for the full check"
+                )
         print(
-            "  note  the session server cannot be proxied: its token is bound to the "
-            "public IP its browser ran on (that is what makes it *trusted*)"
+            "  note  the session server cannot be proxied by a *variable*: its token is "
+            "bound to the public IP its browser ran on (that is what makes it "
+            "*trusted*), which is why it shares the tunnel's network namespace instead"
         )
 
         # Workers must survive their blocking queue reads. redis-py's implicit

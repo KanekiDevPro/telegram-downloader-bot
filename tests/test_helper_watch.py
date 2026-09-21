@@ -1,4 +1,4 @@
-"""The permanent watch over the two helpers: what it records, and when it pages.
+"""The permanent watch over the three helpers: what it records, and when it pages.
 
 ``/doctor`` is a human asking a question. This is the machine asking it every few
 minutes, and the difference is what these tests are about: a state is written down
@@ -27,6 +27,7 @@ from services.helper_watch import (
     DOWN_SINCE_KEY,
     POT_HELPER,
     SESSION_HELPER,
+    TUNNEL_HELPER,
     HelperState,
     Outage,
     WatchResult,
@@ -39,9 +40,11 @@ from services.helper_watch import (
     summary,
     watch,
 )
+from services.proxy_health import TunnelHealth
 
 POT_URL = "http://pot-provider:4416"
 SESSION_URL = "http://yt-session-generator:8080"
+TUNNEL_URL = "http://warp:1080"
 
 #: Every query these tests reach goes through ``FakeStore``, which ignores it.
 POOL: Any = object()
@@ -58,6 +61,7 @@ def _both_wired(monkeypatch: pytest.MonkeyPatch) -> Settings:
         monkeypatch,
         YTDLP_POT_PROVIDER_URL=POT_URL,
         YOUTUBE_SESSION_SERVER=SESSION_URL,
+        YTDLP_PROXY=TUNNEL_URL,
         COOKIE_FILE="",
     )
 
@@ -153,6 +157,13 @@ def _session(monkeypatch: pytest.MonkeyPatch, server: SessionServer) -> None:
     monkeypatch.setattr(doctor_service, "probe_session_server", probe)
 
 
+def _tunnel(monkeypatch: pytest.MonkeyPatch, health: TunnelHealth) -> None:
+    async def probe(url: str, timeout: float = 5.0) -> TunnelHealth:
+        return health
+
+    monkeypatch.setattr(doctor_service, "probe_tunnel", probe)
+
+
 def _state(states: tuple[HelperState, ...], helper: str) -> HelperState:
     return next(state for state in states if state.helper == helper)
 
@@ -165,11 +176,18 @@ def _state(states: tuple[HelperState, ...], helper: str) -> HelperState:
 async def test_a_helper_nobody_configured_is_off_not_broken(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = _settings(monkeypatch, YTDLP_POT_PROVIDER_URL="", YOUTUBE_SESSION_SERVER="")
+    settings = _settings(
+        monkeypatch,
+        YTDLP_POT_PROVIDER_URL="",
+        YOUTUBE_SESSION_SERVER="",
+        YTDLP_PROXY="",
+    )
 
     states = await observe(settings)
 
-    assert [state.state for state in states] == ["off", "off"]
+    # Three helpers, and "off" is not "broken": a deployment that never configured
+    # a route has nothing to be down, and it must not fill the history with rows.
+    assert [state.state for state in states] == ["off", "off", "off"]
     assert all(state.gone for state in states)
     assert not any(state.failing for state in states)
 
@@ -216,6 +234,50 @@ async def test_a_token_that_came_back_short_is_said_so(
     assert "100" in state.reason and "کوتاه" in state.reason
 
 
+async def test_a_tunnel_that_answers_without_warp_is_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The case the tunnel exists for: it is up, and it is still the flagged IP.
+
+    A watch that read "port open" as 🟢 would report a healthy tunnel on exactly the
+    deployment whose downloads are blocked — which is why ``drift`` is a *failing*
+    state here, like the plugin/server version mismatch above.
+    """
+    settings = _both_wired(monkeypatch)
+    _provider_up(monkeypatch)
+    _session(monkeypatch, SessionServer(True, ready=True, token_length=200))
+    _tunnel(
+        monkeypatch,
+        TunnelHealth(url=TUNNEL_URL, reachable=True, traced=True, warp="off"),
+    )
+
+    state = _state(await observe(settings), TUNNEL_HELPER)
+
+    assert state.state == "drift"
+    assert state.failing
+    assert "warp=off" in state.reason, "the reason is what makes the page actionable"
+
+
+async def test_a_tunnel_that_does_not_answer_is_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _both_wired(monkeypatch)
+    _provider_up(monkeypatch)
+    _session(monkeypatch, SessionServer(True, ready=True, token_length=200))
+    _tunnel(
+        monkeypatch,
+        TunnelHealth(url=TUNNEL_URL, reachable=False, detail="ConnectionRefusedError"),
+    )
+
+    state = _state(await observe(settings), TUNNEL_HELPER)
+
+    assert state.state == "down"
+    assert "ConnectionRefusedError" in state.reason
+    assert TUNNEL_HELPER in [state.helper for state in (await observe(settings))], (
+        "and the watcher has something to page about"
+    )
+
+
 # ---------------------------------------------------------------------------
 # The history: a row per change, not per sweep
 # ---------------------------------------------------------------------------
@@ -231,8 +293,8 @@ async def test_the_same_state_twice_is_one_row(
     first = await _sweep(settings, now=1000.0)
     second = await _sweep(settings, now=1300.0)
 
-    assert len(first.transitions) == 2 and len(second.transitions) == 0
-    assert len(store.rows) == 2, "a healthy helper is one row in the history"
+    assert len(first.transitions) == 3 and len(second.transitions) == 0
+    assert len(store.rows) == 3, "a healthy helper is one row in the history"
 
 
 async def test_a_failure_is_recorded_with_its_reason(
@@ -442,6 +504,7 @@ async def test_the_loop_sweeps_then_stops_on_shutdown(
     settings.helper_watch_interval_s = 0.01
     _provider_up(monkeypatch)
     _session(monkeypatch, SessionServer(True, ready=True, token_length=200))
+    _tunnel(monkeypatch, TunnelHealth(url=TUNNEL_URL, reachable=True, traced=True, warp="on"))
     stop = asyncio.Event()
 
     task = asyncio.create_task(run_helper_watch(stop, POOL, settings=settings))
@@ -450,7 +513,7 @@ async def test_the_loop_sweeps_then_stops_on_shutdown(
     await asyncio.wait_for(task, timeout=2)
 
     assert store.rows, "a sweep ran and wrote its first sighting"
-    assert len(store.rows) == 2, "and only the *change* is a row, however many sweeps ran"
+    assert len(store.rows) == 3, "and only the *change* is a row, however many sweeps ran"
 
 
 async def test_the_loop_costs_nothing_when_it_is_off(

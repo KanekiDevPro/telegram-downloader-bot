@@ -1,4 +1,8 @@
-"""A permanent watch over the two helper servers, and the report it feeds.
+"""A permanent watch over the helper servers, and the report it feeds.
+
+The helpers are the three things this stack runs *for* the extractors: the PO-token
+provider and session server that YouTube routes need, and the WARP tunnel the primary
+engine leaves from. Each is optional and each has one failure mode worth paging on.
 
 ``/doctor`` answers "what is wrong right now", asked by a human who already suspects
 something. This module answers the other half of the question: *when* did a helper
@@ -8,7 +12,7 @@ that the link failed, which looks exactly like a blocked IP.
 
 What it does, once per ``HELPER_WATCH_INTERVAL_S``:
 
-* asks both helpers the same cheap questions ``/doctor`` does (local traffic, no
+* asks every helper the same cheap questions ``/doctor`` does (local traffic, no
   extraction),
 * writes a row **only when a state changes**, with the reason — so the table is a
   history, not a log,
@@ -34,21 +38,26 @@ import asyncpg
 from aiogram import Bot
 
 from core import database
-from core.config import Settings, get_settings
+from core.config import Settings, get_settings, probe_url
 from core.utils import utcnow
 from services import doctor
 from services.doctor import PotProvider, SessionServer
 from services.extractor import pot_plugin_version
+from services.proxy_health import TunnelHealth
 
-logger = logging.getLogger(__name__)
-
-#: The helper as it is stored in ``helper_events`` and keyed in messages.
+logger = logging.getLogger(__name__)#: The helper as it is stored in ``helper_events`` and keyed in messages.
 POT_HELPER = "pot"
 SESSION_HELPER = "session"
+#: Not an HTTP helper like the other two, but watched the same way for the same
+#: reason: the tunnel is what the *primary* extractor sends every byte through, so a
+#: tunnel that dies is the one helper whose failure changes how every other failure
+#: is explained (see ``services/proxy_health.py``).
+TUNNEL_HELPER = "tunnel"
 
 HELPER_LABELS: dict[str, str] = {
     POT_HELPER: "provider توکن (PO token)",
     SESSION_HELPER: "سرور سشن یوتیوب",
+    TUNNEL_HELPER: "تونل (WARP)",
 }
 
 #: What a helper being down costs a user — the first question an admin asks, and the
@@ -56,13 +65,22 @@ HELPER_LABELS: dict[str, str] = {
 HELPER_LOSS: dict[str, str] = {
     POT_HELPER: "دانلودها بدون توکن ادامه پیدا میکنند، پس یوتیوب روی IP فلگشده سختتر رد میکند",
     SESSION_HELPER: "موتور جایگزین یوتیوب را بدون سشن میبیند، پس لینکهای بلاکشده از آن هم رد نمیشوند",
+    TUNNEL_HELPER: (
+        "دانلودها دیگر از IP اشتراکی WARP بیرون نمیروند؛ اگر IP این هاست فلگ شده باشد، "
+        "یوتیوب همان بلاک قبلی را برمیگرداند"
+    ),
 }
+
 
 HELPER_FIXES: dict[str, str] = {
     POT_HELPER: "docker compose up -d pot-provider",
     SESSION_HELPER: (
         "docker compose up -d yt-session-generator — و اگر بالا بود، لاگش میگوید "
         "چرا توکن نمیسازد (docker compose logs yt-session-generator)"
+    ),
+    TUNNEL_HELPER: (
+        "docker compose up -d warp — و اگر بالا بود، `docker compose logs warp`؛ "
+        "WARP چند ثانیه بعد از استارت ثبت میشود، پس یک بار ریاستارت هم امتحان کنید"
     ),
 }
 
@@ -164,6 +182,20 @@ async def observe(settings: Settings) -> tuple[HelperState, ...]:
                 )
             else:
                 states.append(HelperState(POT_HELPER, "ok", provider.version))
+
+    if not settings.ytdlp_proxy.strip():
+        # Nothing to watch: without a proxy there is no route to be down, and a
+        # permanent 🟢 for a setting nobody wrote is noise in the history.
+        states.append(HelperState(TUNNEL_HELPER, "off"))
+    else:
+        # Translated like every other helper address: the sweep runs in the same
+        # process as the bot, so it has to ask the tunnel the bot actually uses.
+        tunnel: TunnelHealth = await doctor.probe_tunnel(probe_url(settings.ytdlp_proxy))
+        # ``TunnelHealth.state`` already speaks this vocabulary (off | ok | drift |
+        # down), and its ``drift`` is the honest one: a proxy that answers but is not
+        # on WARP is not broken — it is the same flagged address, which is a different
+        # fix, and a watch that called it 🟢 would hide exactly the case it exists for.
+        states.append(HelperState(TUNNEL_HELPER, tunnel.state, tunnel.describe()))
 
     if not settings.wants_session_server:
         states.append(HelperState(SESSION_HELPER, "off"))

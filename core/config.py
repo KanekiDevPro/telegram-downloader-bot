@@ -89,16 +89,27 @@ def _admin_id(value: object, source: str) -> int:
 #: ``127.0.0.1:9000:9000``), so a process on the host reaches the *same* instance.
 COMPOSE_LOOPBACK_PORTS: dict[str, int] = {
     "cobalt": 9000,
+    # The tunneled fallback instance. Published for the same reason as the others:
+    # a bot running on the host must be able to reach the *same* instance, and
+    # `cobalt-warp` does not resolve outside the compose network.
+    "cobalt-warp": 9002,
     "pot-provider": 4416,
     "yt-session-generator": 8080,
+    # The WARP tunnel. Its port is not published (nothing outside the network should
+    # dial it), but a *host-run* bot reaches the published half of the same container
+    # as 127.0.0.1:1080 — which is what makes a YTDLP_PROXY of `http://warp:1080`
+    # usable from `python main.py` during development.
+    "warp": 1080,
 }
 
 #: The setting each compose helper is reached through. A report that says
 #: "unreachable" is only actionable if it also names the variable to look at.
 COMPOSE_SERVICE_ENV: dict[str, str] = {
     "cobalt": "COBALT_API_URL",
+    "cobalt-warp": "COBALT_FALLBACK_URLS",
     "pot-provider": "YTDLP_POT_PROVIDER_URL",
     "yt-session-generator": "YOUTUBE_SESSION_SERVER",
+    "warp": "YTDLP_PROXY",
 }
 
 
@@ -337,7 +348,27 @@ class Settings(BaseSettings):
     )
     #: Optional proxy for yt-dlp. YouTube's bot check is IP-based, so a valid
     #: cookie jar is not always enough on a flagged host.
+    #:
+    #: Empty by default *here*, and set to the embedded WARP tunnel *there*: the
+    #: default belongs to the deployment, not to the library — `docker-compose.yml`
+    #: writes `http://warp:1080` (see the bot service), while a host run or a test
+    #: starts with no proxy at all. When it is set, the bot probes it before use and
+    #: goes direct if it does not answer (``services/proxy_health.py``), because
+    #: every download goes through it.
     ytdlp_proxy: str = Field(default="", alias="YTDLP_PROXY")
+    #: How hard to try before deciding the tunnel is down. WARP registers a few
+    #: seconds *after* its container starts, so one probe would report a tunnel that
+    #: is merely still coming up as broken — and the bot would spend that window
+    #: downloading from the address the tunnel exists to escape. Bounded, because
+    #: boot waits for this and a tunnel that never comes up is handled (downloads run
+    #: direct, an admin is told), not waited on forever.
+    tunnel_probe_attempts: int = Field(
+        default=6, ge=1, le=60, alias="TUNNEL_PROBE_ATTEMPTS"
+    )
+    #: Seconds between those attempts.
+    tunnel_probe_delay_s: float = Field(
+        default=2.0, ge=0, le=60, alias="TUNNEL_PROBE_DELAY_S"
+    )
     #: Base URL of a PO-token provider (bgutil HTTP server). Defaults to the one
     #: `docker-compose.yml` runs, because a PO token is the only fix for YouTube's
     #: bot check that needs no login at all. Empty = off.

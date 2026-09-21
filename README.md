@@ -122,6 +122,7 @@ services/
   delivery.py                re-send cached file_ids (shared by gateway + workers)
   subscription.py            premium status + effective daily limits
   worker.py                  background download/upload workers + maintenance loop
+  proxy_health.py            the yt-dlp tunnel: is it usable, and is it a *tunnel*?
   payments/
     base.py                  PaymentStrategy / PaymentService (registry)
     manual.py                ManualPaymentStrategy (receipt + admin approval)
@@ -132,11 +133,13 @@ middlewares/
   user_middleware.py         auto-create users row on every update
 scripts/smoke.py             integration smoke test (needs Postgres + Redis)
 scripts/boot_check.py        offline wiring check (needs Postgres only)
+install.sh                   installer + control center (install/update/start/stop/…)
 tests/                       unit tests (no infrastructure required)
 deploy/                      install.sh, run.sh, systemd unit, supervisor conf, guide
 Dockerfile                   bot image (python:3.11-slim + ffmpeg)
-docker-compose.yml           bot + Postgres 16 + Redis 7 + cobalt + pot-provider +
-                             yt-session-generator (+ telegram-api behind a profile)
+docker-compose.yml           bot + Postgres 16 + Redis 7 + cobalt + cobalt-warp +
+                             pot-provider + yt-session-generator + warp (the tunnel they
+                             leave through) (+ telegram-api behind a profile)
 pyproject.toml               ruff / mypy / pytest configuration
 ```
 
@@ -145,8 +148,10 @@ pyproject.toml               ruff / mypy / pytest configuration
 ```bash
 # 1. Stack (Docker): bot + Postgres + Redis, on the official cloud API — plus the
 #    two YouTube helpers that need no login (a PO-token provider for yt-dlp and a
-#    session server for the fallback engine). Each is optional at runtime, so the
-#    bot works without them; naming services skips the ones you do not want.
+#    session server for the fallback engine) plus the WARP tunnel both engines
+#    leave through. Each is optional at runtime, so the bot works without them;
+#    naming services skips the ones you do not want — leave out `warp` and every
+#    download goes out from this host's own address.
 docker compose up -d --build
 docker compose logs -f bot
 
@@ -231,6 +236,34 @@ YTDLP_PROXY=socks5://user:pass@host:1080
 #    also reported by /doctor (YOUTUBE_SESSION_SERVER).
 
 ```
+
+**A different address, out of the box (`warp`).** A flagged *VPS* address is the one thing a
+cookie jar, a PO token and a session server all answer from — so the stack runs a Cloudflare
+WARP container and yt-dlp leaves through it by default (`YTDLP_PROXY=http://warp:1080`, set by
+`docker-compose.yml`; nothing in `.env` to fill in). WARP's exit is a *shared* address that is
+not yours, which is free, is often enough, and is deliberately not sold as more than that: an
+ordinary cloud exit was measured here and changed nothing, and a hard block still wants a
+residential exit. Three things follow, and each is visible rather than surprising:
+
+* **it is one address for both engines.** `cobalt-warp` (the fallback's second node, so the
+  pool has one instance per address) is given the same tunnel, and the session generator shares
+  the tunnel's *network namespace* — its token is bound to the IP its browser ran on, so a token
+  minted anywhere else is refused for a download taken here. That is also why no proxy variable
+  is set on it: Chromium ignores `HTTP(S)_PROXY` (measured from the image's source), so setting
+  one would look like routing and route nothing.
+* **a tunnel that is down does not break the bot.** It is probed at boot (a few tries, because
+  WARP registers seconds after its container starts); if it never answers, yt-dlp is given *no*
+  proxy — direct, with one log line, one admin message naming the one command, and a `/doctor`
+  row. A dead proxy is worse than none: it would fail every link with a connection error, which
+  is a failure you invented. The tunnel is then watched like the other helpers, so it cannot die
+  quietly at 3am.
+* **"the tunnel is up" and "the tunnel is useful" are different answers.** `/doctor` shows the
+  exit it saw, because a proxy that answers with `warp=off` is still the address YouTube refused
+  — 🟡, not 🟢, with the fix. To run direct instead, write `YTDLP_PROXY=` (the compose default is
+  `${YTDLP_PROXY-…}` with a single dash, so *empty means empty*), and to use your own proxy, set
+  it the usual way: `YTDLP_PROXY=socks5://user:pass@host:1080` (PySocks is installed for that;
+  a SOCKS5 URL is reported as reachable with its exit *unknown*, since aiohttp cannot dial it to
+  ask).
 
 **Ask the bot instead of guessing.** `/doctor` (admin-only) and
 `python scripts/youtube_doctor.py` run the same checks — cookie login, JavaScript runtime,
@@ -719,7 +752,12 @@ BOT_MODE=webhook WEBHOOK_URL=https://bot.example.com WEBHOOK_SECRET=... .venv/bi
 
 See **[deploy/README.md](deploy/README.md)** for the full guide:
 
-- **VPS with Docker** — `docker compose up -d --build` (bot + Postgres + Redis).
+- **VPS with Docker, in one command** — `./install.sh` (or `curl -fsSL <raw-url>/install.sh | bash`
+  on a bare server). It installs on the first run and opens a **control center** on every run
+  after that: update (`git pull` + rebuild), start/restart, stop, status with logs, uninstall.
+  Nothing is decided for you that matters — the menu shows the state it detected first — and it
+  is safe to re-run, which is the point: it is the same file before and after the bot exists.
+- **VPS with Docker, by hand** — `docker compose up -d --build` (bot + Postgres + Redis).
 - **Shared Python host / bare VPS** — `bash deploy/install.sh`, then systemd
   (`deploy/telegram-downloader-bot.service`) or supervisor (`deploy/supervisor.conf`).
 
@@ -752,13 +790,14 @@ in-process queue, losing queued work on restart).
 | `COOKIE_FILE` | `cookies.txt` | cookie jar for YouTube / age-restricted content (empty = disabled); needs `LOGIN_INFO` + a SAPISID cookie to count as a login, checked at startup. Read-only is fine — yt-dlp is given a writable copy |
 | `COOKIES_HOST_DIR` | `./` | compose-only: host directory mounted read-only at `/cookies` (jar must be `cookies.txt` inside it); a fresh export needs `docker compose restart bot`, not a rebuild |
 | `COOKIE_WATCH_INTERVAL_S` | `60` | how often the running bot checks whether a fresh export is still waiting, and messages the admins once per export; `0` disables the watcher |
-| `HELPER_WATCH_INTERVAL_S` | `300` | how often the two YouTube helpers are probed: one `helper_events` row per *change*, a page once a helper has been down 10 minutes (then at most hourly), a recovery message, and a paragraph in the weekly digest; `0` disables it |
+| `HELPER_WATCH_INTERVAL_S` | `300` | how often the YouTube helpers are probed: one `helper_events` row per *change*, a page once a helper has been down 10 minutes (then at most hourly), a recovery message, and a paragraph in the weekly digest; `0` disables it |
+| `TUNNEL_PROBE_ATTEMPTS` / `TUNNEL_PROBE_DELAY_S` | `6` / `2` | how hard the boot probe tries before deciding the tunnel (`YTDLP_PROXY`) is down: a few tries, then downloads run *direct* with one warning instead of failing every link |
 | `COOKIES_FROM_BROWSER` | — | `BROWSER[+KEYRING][:PROFILE]`; probed at startup and ignored when unreachable |
 | `COOKIE_AUTO_EXPORT` | — | same syntax; re-export the jar from that profile after a login-shaped block (once per 30 min, never overwriting a working login), then probe it and report |
 | `YTDLP_JS_RUNTIME` | `auto` | JS runtime for yt-dlp (`auto`/`none`/`node`/`deno`/`bun`/`quickjs`) |
 | `YTDLP_POT_PROVIDER_URL` | `http://pot-provider:4416` | PO-token provider base URL (the service compose runs); empty = off |
 | `YOUTUBE_SESSION_SERVER` | `http://yt-session-generator:8080` | YouTube session server for the fallback engine; empty = off |
-| `YTDLP_PROXY` | — | optional proxy for yt-dlp, e.g. `socks5://user:pass@host:1080`; worth it only with a login in the jar and a *residential* exit |
+| `YTDLP_PROXY` | `http://warp:1080` (set by compose) | the tunnel yt-dlp leaves through, e.g. `socks5://user:pass@host:1080`; write it *empty* to run direct. Probed at boot (unreachable ⇒ direct + a notice) and reported by `/doctor` with the exit it saw, because "the proxy is up" and "the proxy is useful" are different answers |
 | `COBALT_API_URL` | `http://cobalt:9000` (the instance compose runs) | primary fallback instance, used only when yt-dlp comes back *blocked*; empty = off |
 | `COBALT_FALLBACK_URLS` | — | extra instances to rotate through, in order (your own mirrors; comma/space separated) |
 | `COBALT_TRY_PUBLIC_INSTANCES` | `1` | append `api.cobalt.tools` as the *last* resort; `0` keeps every link inside your network |

@@ -16,6 +16,31 @@ Python host / bare VPS without Docker**. Pick one; both run the same code.
 
 ## Option A — Docker (recommended for a VPS)
 
+### The one-command way: `install.sh`
+
+```bash
+# on a bare server (no clone needed — the script clones for you)
+curl -fsSL <raw-url>/install.sh | bash
+
+# or from a checkout
+./install.sh
+```
+
+It installs on the first run, and every run after that opens a **control center**:
+`[1]` install `[2]` update (`git pull` + rebuild) `[3]` start/restart `[4]` stop
+`[5]` status + logs `[6]` uninstall `[0]` exit. It detects whether the project is already
+there and shows that state before you choose anything; the uninstall asks twice (containers
+and volumes first, the directory second, and only then) and never deletes a directory it did
+not name on screen. Re-running is the design, not a side effect — the same file is the
+installer on a fresh box and the dashboard afterwards.
+
+The prompts take the four settings that have no safe default (bot token, admin ids, card
+number, default language) and can be answered from the environment instead, which is what
+makes `BOT_TOKEN=… ./install.sh` usable from a provisioning script with no terminal to type
+at. Everything else — including the tunnel — has a working default.
+
+### The by-hand way
+
 ```bash
 git clone <your-repo> telegram-downloader-bot
 cd telegram-downloader-bot
@@ -34,14 +59,19 @@ cp .env.example .env
 # bot also checks at startup and names the fix if it is missing.
 mkdir -p cobalt && chmod 777 cobalt
 
-docker compose up -d --build          # bot + postgres + redis + cobalt + the two YouTube helpers
+docker compose up -d --build          # bot + postgres + redis + cobalt + the YouTube helpers + the warp tunnel
 docker compose --profile local-api up -d --build   # + telegram-bot-api, 2000 MB uploads
 docker compose logs -f bot
 
-# The two YouTube helpers (a PO-token provider and a session server) run by default:
-# they are the login-free routes past YouTube's bot check, and neither is required
-# for the bot to work. To leave them out, name the services you do want:
-#   docker compose up -d --build bot db redis cobalt
+# The two YouTube helpers (a PO-token provider and a session server) and the
+# Cloudflare WARP tunnel run by default: the helpers are the login-free routes past
+youtube's bot check, and the tunnel is what makes the downloads leave from an
+# address that is not this host's own. None of the three is required for the bot to
+# work — leave one out by naming the services you do want:
+#   docker compose up -d --build bot postgres redis cobalt
+# (no `warp` = yt-dlp goes direct; a tunnel that is down is handled the same way at
+# boot: downloads run direct, and one admin message says so. Prove it with
+# `scripts/boot_check.py`, whose proxy section now asks the tunnel live.)
 ```
 
 ### YouTube: bot checks, PO tokens and JavaScript
@@ -211,7 +241,7 @@ survivable rather than fatal (the bot drops the URL at startup only when the ser
 does not answer, and yt-dlp skips an unreachable provider either way).
 
 Neither helper has to start before the bot: both are optional at runtime, so a stack started
-without them (name the services you want: `docker compose up -d bot db redis cobalt`) keeps
+without them (name the services you want: `docker compose up -d bot postgres redis cobalt`) keeps
 serving links, and the doctor reports which route is missing instead of failing a download.
 
 **Both are watched, not just probed on request.** ``/doctor` is one admin asking one question at one
@@ -227,9 +257,38 @@ The measured answer to "which proxy fixes YouTube?": with `YTDLP_PROXY` set, yt-
 (a bogus port fails with *Connection refused* instead of the bot check), and an Azure exit got the
 identical bot check — a datacenter address is what the check is for. Same for the fallback, once
 its own proxy is wired correctly: `COBALT_HTTP_PROXY` reaches the cobalt container as
-`API_EXTERNAL_PROXY`, which is the only name cobalt reads (`HTTP_PROXY`/`HTTPS_PROXY` are ignored
-by its dispatcher — setting those was a no-op), and with a cloud exit it answers the same login
-error as without one. Order of fixes stands: a jar that signs in, then a residential exit.
+`API_EXTERNAL_PROXY`, which is the name the pinned tag reads — `HTTP_PROXY`/`HTTPS_PROXY` were
+the no-op there, which is why the *tunneled* instance above sets all three (the pinned tag and
+current `main` disagree about which one is honoured, and guessing wrong is silent). Order of
+fixes stands: a jar that signs in, then an exit that is not yours.
+
+**The tunnel (`warp`), and why it is on by default.** The one thing a cookie jar, a PO token and a
+session server all answer from is this host's address — so the stack runs a Cloudflare WARP
+container and `YTDLP_PROXY=http://warp:1080` is set by `docker-compose.yml`, not by you. WARP's
+address is *shared*: free, usually not flagged, and honestly not a residential exit — a hard block
+still wants one. What it buys is that a fresh VPS stops paying for whatever its neighbours did with
+the same /24. Three details are load-bearing:
+
+* **one address for every engine that can have one.** `cobalt-warp` is a second Cobalt node on the
+  same tunnel, so the fallback pool has one instance per *address* rather than two names for the
+  blocked one, and the session generator shares the tunnel's network namespace (its token is bound
+  to the IP the browser ran on). No proxy variable is set on the generator on purpose: Chromium
+  ignores `HTTP(S)_PROXY` — measured from the image's source — so one would look like routing and
+  route nothing.
+* **a dead tunnel is a degraded route, never a dead bot.** The bot probes it at boot
+  (`TUNNEL_PROBE_ATTEMPTS`×`TUNNEL_PROBE_DELAY_S`, 6×2s by default, because WARP registers seconds
+  after its container starts) and hands yt-dlp *no* proxy if it never answers — one log line, one
+  message to the admins naming `docker compose up -d warp`, one `/doctor` row. `depends_on: warp` is
+  `required: false` for the same reason, and `helper_watch` then watches the tunnel like the other
+  helpers, so a tunnel that dies at 3am is a recorded outage rather than the next user's mystery.
+* **"up" and "useful" are separate answers.** `/doctor` and `/boot_check.py` report the exit they
+  saw, because a proxy that answers with `warp=off` is still the flagged address: 🟡 with the fix,
+  not 🟢. `boot_check.py` asks the tunnel live and compares its exit with this host's own address —
+  equal means the tunnel is up and changing nothing, which is a different problem from "down" and
+  has a different fix. To run direct instead, write `YTDLP_PROXY=` (the compose default is
+  `${YTDLP_PROXY-…}`, single dash: *empty means empty*); to use your own exit, set it as usual
+  (`socks5://user:pass@host:1080` — PySocks ships for it, and a SOCKS5 URL is reported as reachable
+  with its exit *unknown*, because aiohttp cannot dial it to ask).
 
 The image also ships the **Deno** JavaScript runtime, because yt-dlp degrades YouTube
 extraction without one ("some formats may be missing"). Host deployments pick up whatever
@@ -571,6 +630,10 @@ Terminate TLS in the panel/nginx and proxy `POST /webhook` to
 9. Quotes/limits: `DEFAULT_DAILY_LIMIT`, `PREMIUM_DAILY_LIMIT`, and the plan
    prices seeded in `subscription_plans` (edit them in the DB after the first
    start — seeding is one-shot).
+10. The exit your downloads leave from: `warp` runs by default and `boot_check.py`
+    prints whether it answers *and* whether its address differs from this host's. If
+    it does not, fix that before blaming the cookie jar — they produce the same bot
+    check, and only one of them is an export away from working.
 
 ## Backups
 

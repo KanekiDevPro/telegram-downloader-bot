@@ -1,5 +1,5 @@
-# Full stack: bot + Postgres + Redis + the embedded Cobalt fallback extractor,
-# plus an optional self-hosted Bot API server.
+# Full stack: bot + Postgres + Redis + the Cloudflare WARP tunnel + the two embedded
+# Cobalt fallback instances, plus an optional self-hosted Bot API server.
 #
 #   docker compose up -d --build                      # bot + db + redis + cobalt
 #   docker compose --profile local-api up -d --build  # + telegram-bot-api (2000 MB)
@@ -43,6 +43,68 @@ services:
       timeout: 3s
       retries: 10
 
+  # Cloudflare WARP as a local tunnel: the cheapest way out of a datacenter IP that
+  # YouTube has flagged, and the reason a banned VPS can still download at all.
+  #
+  # On by default, because the deployment whose IP is *not* flagged loses nothing by
+  # it — the bot probes the tunnel at startup and goes direct when it does not
+  # answer (see services/proxy_health.py), so a WARP outage cannot break downloads.
+  #
+  # What it is: the official Cloudflare WARP client plus gost, which serves HTTP and
+  # SOCKS5 on the *same* port 1080 (`GOST_ARGS=-L :1080`). That matters twice over:
+  #   • yt-dlp reaches it with an HTTP proxy (`http://warp:1080`) and needs no SOCKS
+  #     dependency; `socks5h://warp:1080` also works (requirements.txt installs
+  #     PySocks), for anyone who prefers it;
+  #   • cobalt's proxy setting is HTTP(S)-only (undici), so a mixed port is what makes
+  #     the *fallback* able to use the same tunnel (`cobalt-warp` below).
+  #
+  # No `ports:` — it is dialled as `warp:1080` from inside this network and by nobody
+  # else. The image ships its own HEALTHCHECK (the WARP client's own status), which is
+  # what `docker compose ps` reports; nothing here depends on it being *healthy*,
+  # only on it being started, so a slow WARP registration cannot hold up the bot.
+  warp:
+    image: caomingjun/warp
+    init: true
+    restart: unless-stopped
+    # `c 10:200 rwm` is the tun device: containerd ≥ 1.7.24 stopped passing it
+    # implicitly (github.com/opencontainers/runc/pull/3468), and without it the
+    # client fails with "Operation not permitted" when it opens the tun.
+    device_cgroup_rules:
+      - "c 10:200 rwm"
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      # Both are required by the WARP client itself: the first so its own outbound
+      # packets are not re-routed into the tunnel it is building, the second so it
+      # can create the IPv6 route it wants.
+      - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv6.conf.all.disable_ipv6=0
+    environment:
+      # The client registers before gost starts listening; 2s is the image default
+      # and enough on a normal VPS.
+      WARP_SLEEP: ${WARP_SLEEP:-2}
+      # Optional: a WARP+ (or Zero Trust) licence, which routes better than the free
+      # tier. Empty = free WARP, which is what this deployment needs.
+      WARP_LICENSE_KEY: ${WARP_LICENSE_KEY:-}
+    volumes:
+      # A *named* volume, not `./warp:/var/lib/cloudflare-warp`: the client runs as a
+      # non-root user, and a bind mount keeps the host directory's ownership — the
+      # same trap the cobalt cookie directory has, and the one thing that would make
+      # WARP re-register (and change its exit IP) on every restart.
+      - warp-data:/var/lib/cloudflare-warp
+    networks:
+      default:
+        # The session generator shares this container's network namespace (see
+        # below), so the name it is configured under has to resolve *here* — this is
+        # what keeps `YOUTUBE_SESSION_SERVER=http://yt-session-generator:8080` valid
+        # for both the bot and the fallback engine.
+        aliases:
+          - yt-session-generator
+    ports:
+      # Published on the host's loopback for the *session generator* (which lives in
+      # this network namespace now) so a host-run bot reaches it exactly as before.
+      - "127.0.0.1:8080:8080"
+
   # YouTube "trusted session" server: a real Chromium that generates a po_token
   # bound to this host's public IP — which is the one thing that gets the fallback
   # engine past YouTube's bot check *without* a login (cobalt itself has none, and
@@ -50,9 +112,10 @@ services:
   # what that costs: it runs Chromium under Xvfb, and its first token can take a few
   # minutes.
   #
-  # It has to run on the same public IP as the blocked host (that is the whole
-  # requirement), which the embedded instance already does. Published on loopback
-  # only, like the other helpers: `/update` is unauthenticated.
+  # It has to mint the token on the *same* address the downloads go out from — the
+  # generator's own documentation is explicit that a token made on a clean IP is
+  # refused for the blocked one — so it is placed behind the tunnel, exactly like
+  # yt-dlp. `network_mode` is how: see the note below.
   #
   # Turns out it cannot produce a token on every host (the browser has to play a
   # real YouTube embed from this IP). When it will not, /doctor says so instead of
@@ -62,6 +125,25 @@ services:
     image: ghcr.io/imputnet/yt-session-generator:webserver
     init: true
     restart: unless-stopped
+    # Why a shared namespace and not `HTTP_PROXY`/`HTTPS_PROXY`: measured from the
+    # image's own source (imputnet/yt-session-generator), the generator has no proxy
+    # flag and Chromium does not read proxy environment variables — so setting them
+    # here would look like routing and route nothing. Sharing the tunnel container's
+    # network namespace routes it at the packet level, whatever the app believes, and
+    # puts its Chromium on the *same* WARP exit as yt-dlp, which is the requirement
+    # above.
+    #
+    # Two consequences, both deliberate: the published port moves to `warp` (a
+    # namespace owns its ports), and the name this service is reached by is the
+    # `yt-session-generator` alias on `warp`. An operator who would rather keep the
+    # generator out of the tunnel can delete this line and restore the `ports:`
+    # entry below it — the bot then downloads through WARP while the token comes
+    # from the host IP, which YouTube may refuse.
+    network_mode: "service:warp"
+    depends_on:
+      warp:
+        condition: service_started
+        required: false
     # Chromium needs more shared memory than Docker's 64 MB default, and this is
     # not a tuning detail: with the default it starts, dies, and takes the whole
     # helper down with it — `Failed to connect to browser`, at which point the
@@ -70,8 +152,6 @@ services:
     # between) and costs CPU until someone reads these logs. 1 GB is the usual
     # figure for a browser container; one page is all this ever renders.
     shm_size: "1g"
-    ports:
-      - "127.0.0.1:8080:8080"
     healthcheck:
       # The server is listening long before it has a token (/token answers 503 with
       # "not yet generated" while the browser works), so readiness is the doctor's
@@ -223,6 +303,60 @@ services:
       retries: 5
       start_period: 10s
 
+  # The *second* node of the fallback pool, and the one that exists for the single
+  # failure the embedded instance cannot fix: the host's own address.
+  #
+  # `cobalt` above talks to YouTube from this machine's IP — fine for an extractor
+  # that broke, useless when YouTube flagged the IP. This instance takes the same
+  # route yt-dlp does (the WARP tunnel), so when the primary engine is refused and
+  # the direct instance fails on the same IP, the third attempt leaves from a
+  # different address entirely. That is the whole reason the pool beat a single
+  # instance on a flagged VPS.
+  cobalt-warp:
+    image: ghcr.io/imputnet/cobalt:10
+    restart: unless-stopped
+    init: true
+    depends_on:
+      warp:
+        condition: service_started
+        required: false
+    environment:
+      API_URL: http://cobalt-warp:9000/
+      API_PORT: 9000
+      CORS_WILDCARD: 0
+      RATELIMIT_MAX: ${COBALT_RATELIMIT_MAX:-120}
+      TUNNEL_RATELIMIT_MAX: ${COBALT_TUNNEL_RATELIMIT_MAX:-120}
+      # The two current names (undici's EnvHttpProxyAgent), plus the deprecated
+      # `API_EXTERNAL_PROXY` that the pinned :10 tag is known to read. Setting both is
+      # deliberate belt-and-braces: the pinned tag and current `main` disagree about
+      # which one is honoured, and the failure mode of guessing wrong is silent —
+      # cobalt would just serve YouTube from the blocked address again. HTTP(S) only:
+      # undici cannot dial SOCKS, which is why the tunnel serves HTTP on port 1080.
+      HTTP_PROXY: ${WARP_HTTP_PROXY:-http://warp:1080}
+      HTTPS_PROXY: ${WARP_HTTP_PROXY:-http://warp:1080}
+      API_EXTERNAL_PROXY: ${WARP_HTTP_PROXY:-http://warp:1080}
+      # Nothing internal should ever be dialled through the tunnel.
+      NO_PROXY: localhost,127.0.0.1,postgres,redis,cobalt,cobalt-warp,pot-provider,yt-session-generator
+      # cobalt needs a YouTube *session* to serve it, and the cookies file is not an
+      # option here: it is generated once and rewritten by whichever instance refreshes
+      # it, so a second writer would race the first (see the mount note above). The
+      # session generator is the route that needs no file — and it sits on this same
+      # WARP exit (`network_mode: service:warp`), which is exactly what makes its token
+      # valid for downloads taken from here.
+      YOUTUBE_SESSION_SERVER: ${YOUTUBE_SESSION_SERVER:-http://yt-session-generator:8080}
+    ports:
+      - "127.0.0.1:9002:9000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "wget -q -S -O /dev/null http://127.0.0.1:9000/ 2>&1 | grep -q 'HTTP/'"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   bot:
     build: .
     restart: unless-stopped
@@ -231,6 +365,15 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # `required: false` is what makes this safe to ask for: the tunnel is a *route*,
+      # not a prerequisite. Without it Compose refuses to start a stack whose profile
+      # or service was left out (`service required by service but is disabled`), and
+      # with it Compose only warns, the bot boots, and its own probe decides whether
+      # to use the tunnel (see services/proxy_health.py). `service_started`, not
+      # `service_healthy`: WARP's registration must not hold up the boot.
+      warp:
+        condition: service_started
+        required: false
       # Started, not healthy: the fallback is optional by design, and a bot that
       # refuses to boot because a helper is missing is worse than one that says so.
       cobalt:
@@ -249,8 +392,17 @@ services:
       # Empty = official cloud API (see .env: TELEGRAM_API_BASE_URL).
       TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:-}
       TELEGRAM_API_LOCAL: ${TELEGRAM_API_LOCAL:-1}
-      # Optional yt-dlp helpers (empty = off); see .env.example.
-      YTDLP_PROXY: ${YTDLP_PROXY:-}
+      # The tunnel yt-dlp goes through, on by default (see the `warp` service).
+      #
+      # Note the *single* dash in `${YTDLP_PROXY-…}`: with the usual `:-`, an
+      # explicitly empty `YTDLP_PROXY=` in .env would be read as "unset" and silently
+      # replaced by the tunnel — making "run direct" impossible to express. The single
+      # dash honours an empty value, so switching the tunnel off is one blank line.
+      #
+      # Every yt-dlp request goes through it, YouTube or not; the bot probes it at
+      # startup and goes direct (with a log line, an admin notice and a /doctor row) if
+      # it does not answer, because a dead proxy would otherwise fail every download.
+      YTDLP_PROXY: ${YTDLP_PROXY-http://warp:1080}
       # On by default: the pot-provider service above is part of this stack, and a
       # PO token is what a flagged IP needs. A missing provider is survivable —
       # yt-dlp rejects it and continues.
@@ -266,6 +418,10 @@ services:
       # deployment can point at an instance elsewhere — or empty to switch the
       # fallback off entirely.
       COBALT_API_URL: ${COBALT_API_URL:-http://cobalt:9000}
+      # ...and the tunneled instance as the second node, so one blocked address is not
+      # the end of the pool. Single dash again: `COBALT_FALLBACK_URLS=` in .env means
+      # "no second node", not "use the default".
+      COBALT_FALLBACK_URLS: ${COBALT_FALLBACK_URLS-http://cobalt-warp:9000}
       # Where the cobalt-format cookie file is generated — a container path, like
       # COOKIE_FILE above, because it is the mount below that makes it shared.
       COBALT_COOKIES_DIR: /app/cobalt
@@ -301,3 +457,6 @@ volumes:
   pgdata:
   downloads:
   telegram-api-data:
+  # WARP's registration state (its device identity and licence). Persisted so a
+  # restart keeps the same exit instead of registering a new one every time.
+  warp-data:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from collections.abc import Iterable
 from contextlib import suppress
 from typing import Any, Optional
 
@@ -30,7 +31,7 @@ from handlers.admin import router as admin_router
 from handlers.payment import router as payment_router
 from handlers.user import router as user_router
 from middlewares.user_middleware import UserMiddleware
-from services import cobalt_cookies
+from services import cobalt_cookies, proxy_health
 from services.cobalt import CobaltService
 from services.cookie_watch import CookieJarWatcher, run_cookie_watch
 from services.doctor import http_reachable
@@ -43,6 +44,7 @@ from services.extractor import (
 )
 from services.helper_watch import run_helper_watch
 from services.payments import build_payment_service
+from services.proxy_health import TunnelHealth
 from services.queue import BLOCK_TIMEOUT_S, create_queue, create_redis_client
 from services.worker import run_maintenance, run_worker
 
@@ -145,6 +147,44 @@ async def resolve_pot_provider(settings: Settings) -> str:
     return ""
 
 
+async def resolve_tunnel(settings: Settings) -> TunnelHealth:
+    """Probe the tunnel every download will leave through, before any does.
+
+    ``YTDLP_PROXY`` is the one setting here that can break *all* downloads at once,
+    so it is asked before the workers start rather than discovered by the first user
+    whose link dies. Three outcomes, and all three are decisions rather than errors:
+
+    * no tunnel configured — nothing to ask, downloads go direct;
+    * it answers — handed to yt-dlp (and the log says whether WARP is really in the
+      path, which is the difference between "the tunnel is up" and "the tunnel is
+      useful");
+    * it does not — yt-dlp is given *no* proxy. A dead proxy is worse than none: the
+      bot would answer every link with a connection error, a failure the operator
+      invented, and the admins hear about it once at boot with the one command.
+
+    The address is translated through :func:`core.config.probe_url` for the same
+    reason the other helpers are: `warp:1080` resolves inside the compose network and
+    `127.0.0.1:1080` is what a host run has to dial, and one setting has to work for
+    both.
+    """
+    if not settings.ytdlp_proxy.strip():
+        return TunnelHealth()
+    return await proxy_health.probe_with_retries(
+        probe_url(settings.ytdlp_proxy),
+        attempts=settings.tunnel_probe_attempts,
+        delay_s=settings.tunnel_probe_delay_s,
+    )
+
+
+async def notify_admins(bot: Bot, admin_ids: Iterable[int], text: str) -> None:
+    """Best-effort operator notice — one unreachable admin is not an incident."""
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception:  # noqa: BLE001 — a notice must never break a boot
+            logger.warning("could not send an admin notice to %s", admin_id)
+
+
 async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict[str, Any]:
     """Create every component and wire them together.
 
@@ -192,12 +232,15 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
     dp.include_routers(user_router, payment_router, admin_router)
 
     pot_provider = await resolve_pot_provider(settings)
+    # Asked here, before the workers exist: the answer decides whether *anything*
+    # goes through a proxy at all (see resolve_tunnel).
+    tunnel = await resolve_tunnel(settings)
     extractor = ExtractorService(
         settings.download_dir,
         timeout_s=settings.extractor_timeout_s,
         download_timeout_s=settings.download_timeout_s,
         cookie_file=settings.cookie_file,
-        proxy=settings.ytdlp_proxy,
+        proxy=proxy_health.for_ytdlp(tunnel),
         pot_provider_url=pot_provider,
         cookies_from_browser=settings.cookies_from_browser,
         js_runtime=settings.ytdlp_js_runtime,
@@ -242,7 +285,16 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         # An incomplete login is indistinguishable from an IP ban at download
         # time, so say it once at startup rather than letting it look random.
         logger.warning(hint)
-    logger.info("yt-dlp proxy: %s", "configured" if extractor.using_proxy else "none")
+    # One line at the level that matches the finding — a tunnel that is configured and
+    # unusable is an error an operator has to see, not an info line below the fold.
+    tunnel_notice = proxy_health.startup_notice(tunnel)
+    if tunnel_notice is None:
+        logger.info("%s", proxy_health.boot_line(tunnel))
+    else:
+        # Once per boot (the watch pages on a timer): this says the bot started, and
+        # kept working, without the route it was configured to use.
+        logger.error("%s", proxy_health.boot_line(tunnel))
+        await notify_admins(bot, settings.admin_ids, tunnel_notice)
     if extractor.js_runtime_name == "none":
         logger.warning(
             "no JavaScript runtime (node/deno/bun/qjs) found — YouTube extraction is "

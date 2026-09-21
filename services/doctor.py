@@ -42,7 +42,12 @@ from core.config import (
     in_container,
     probe_url,
 )
-from services import cobalt_cookies
+
+# The same function under a second name: both report builders here take a
+# ``probe_url`` *parameter* (the YouTube link to test), and a shadowed import is a
+# bug waiting for the next edit.
+from core.config import probe_url as reachable_url
+from services import cobalt_cookies, proxy_health
 from services.cobalt import CobaltError, CobaltNodeState, CobaltService
 from services.cobalt_cookies import CobaltCookieState
 from services.extractor import (
@@ -55,6 +60,7 @@ from services.extractor import (
     pot_plugin_version,
 )
 from services.fallback import FallbackUse, last_use
+from services.proxy_health import TunnelHealth
 
 logger = logging.getLogger(__name__)
 
@@ -552,6 +558,16 @@ async def _probe_fallback(
     )
 
 
+async def probe_tunnel(url: str, *, timeout: float = proxy_health.PROBE_TIMEOUT_S) -> TunnelHealth:
+    """Ask the yt-dlp tunnel where it goes (see ``services/proxy_health.py``).
+
+    A thin re-export rather than a direct call at the call sites, for the same reason
+    the other two helper probes live here: ``tests/conftest.py`` replaces every probe
+    in *this* module for the whole suite, so nothing in a test run reaches the network.
+    """
+    return await proxy_health.probe(url, timeout=timeout)
+
+
 async def fallback_health(
     settings: Settings,
     cobalt: CobaltService | None,
@@ -924,6 +940,53 @@ def _session_server_check(settings: Settings, server: SessionServer | None) -> C
     return Check(SESSION_CHECK_NAME, "ok", f"{where} — {facts}؛ {SESSION_RELOAD_NOTE}", icon="🎫")
 
 
+def _tunnel_check(settings: Settings, tunnel: TunnelHealth | None) -> Check:
+    """The yt-dlp proxy as a report row — including *where* it comes out.
+
+    Worth its own row because it is the one setting that can break every download at
+    once, and because "the proxy is up" and "the proxy is useful" are different
+    answers: a tunnel that answers with ``warp=off`` is still the flagged address.
+    """
+    if not settings.ytdlp_proxy:
+        return Check("تونل", "ok", "خاموش — دانلودها مستقیم می‌روند (YTDLP_PROXY خالی)")
+    if tunnel is None:
+        return Check("تونل", "warn", f"{settings.ytdlp_proxy} — تست نشد", icon="🔀")
+    if not tunnel.reachable:
+        return Check(
+            "تونل",
+            "fail",
+            f"{tunnel.url} پاسخ نمی‌دهد ({tunnel.detail}) — دانلودها مستقیم می‌روند و "
+            "یوتیوب بلاک می‌ماند؛ `docker compose up -d warp` یا YTDLP_PROXY را خالی کنید",
+            icon="🔀",
+        )
+    if tunnel.on_warp:
+        where = f" از {tunnel.exit_ip}" if tunnel.exit_ip else ""
+        return Check(
+            "تونل",
+            "ok",
+            f"{tunnel.url} — warp={tunnel.warp}{where}؛ دانلودها از این مسیر بیرون می‌روند",
+            icon="🔀",
+        )
+    if not tunnel.traced:
+        # A SOCKS5 tunnel: it answers, and aiohttp cannot dial it to read the trace,
+        # so the exit address is genuinely unknown. Saying "warp ثبت نشده" here would
+        # be inventing a finding; saying 🟢 alone would be hiding what was not asked.
+        return Check(
+            "تونل",
+            "ok",
+            f"{tunnel.url} — {tunnel.detail}؛ مسیر خروج تأیید نشده (پروتکل SOCKS5، "
+            "پس warp خوانده نشد) — برای دیدن IP خروج از http://warp:1080 استفاده کنید",
+            icon="🔀",
+        )
+    return Check(
+        "تونل",
+        "warn",
+        f"{tunnel.url} وصل است ولی WARP ثبت نشده (warp={tunnel.warp or 'نامعلوم'}) — "
+        "ترافیک از همان IP میزبان می‌رود؛ لاگ `docker compose logs warp` را ببینید",
+        icon="🔀",
+    )
+
+
 def _runtime_check(extractor: ExtractorService) -> Check:
     name = extractor.js_runtime_name
     if name == "none":
@@ -937,6 +1000,7 @@ def _base_checks(
     provider: PotProvider | None,
     plugin_version: str | None,
     server: SessionServer | None,
+    tunnel: TunnelHealth | None = None,
 ) -> list[Check]:
     return [
         Check(
@@ -949,6 +1013,7 @@ def _base_checks(
         _runtime_check(extractor),
         _provider_check(settings, provider, plugin_version),
         _session_server_check(settings, server),
+        _tunnel_check(settings, tunnel),
     ]
 
 
@@ -1040,15 +1105,28 @@ def _verdict(
             "کانتینرش را بالا بیاورید (docker compose up -d pot-provider) یا "
             "YTDLP_POT_PROVIDER_URL را خالی کنید تا دانلود بی‌توکن ادامه پیدا کند.",
         )
+    # The tunnel, before the generic "change your proxy" advice: a proxy that is
+    # configured but does not answer — or that answers from the *same* address — is
+    # not a "your IP is bad" problem, and handing that back without saying which of
+    # the two it is sends the operator to the wrong fix.
+    tunnel = next((check for check in checks if check.name == "تونل"), None)
+    if settings.ytdlp_proxy and tunnel is not None and tunnel.status != "ok":
+        return (
+            "⛔️ لاگین و توکن درست‌اند، و مسیر بیرون همان IP مسدود است.",
+            f"{tunnel.detail} — `docker compose up -d warp` و بعد دوباره /doctor؛ "
+            "اگر تونل بالاست ولی warp=off است، WARP ثبت نشده و یک IP تمیز لازم است.",
+        )
     if settings.ytdlp_proxy:
         return (
-            "⛔️ لاگین، توکن و پروکسی هر سه تنظیماند و باز بلاک میشوید.",
-            "پروکسی را عوض کنید: IP فعلی حتی برای کاربر لاگینشده هم پذیرفته نمیشود.",
+            "⛔️ لاگین، توکن و تونل هر سه تنظیم‌اند و باز بلاک می‌شوید.",
+            "پروکسی را عوض کنید: IP فعلی حتی برای کاربر لاگین‌شده هم پذیرفته نمی‌شود "
+            "(WARP_LICENSE_KEY را هم امتحان کنید — نسخهٔ رایگان WARP گاهی پذیرفته نمی‌شود).",
         )
     return (
-        "⛔️ لاگین و توکن درستاند، پس خود IP پذیرفته نمیشود.",
-        "YTDLP_PROXY را روی یک IP تمیز بگذارید (socks5://user:pass@host:1080) — "
-        "تنها راهحل مطمئن برای IP مسدود.",
+        "⛔️ لاگین و توکن درست‌اند، پس خود IP پذیرفته نمی‌شود.",
+        "تونل داخلی را روشن کنید (docker compose up -d warp و "
+        "YTDLP_PROXY=http://warp:1080) یا یک IP تمیز بگذارید — تنها راه‌حل مطمئن برای "
+        "IP مسدود همین است.",
     )
 
 
@@ -1084,7 +1162,21 @@ async def run_youtube_doctor(
     server: SessionServer | None = None
     if settings.wants_session_server:
         server = await probe_session_server(settings.youtube_session_server)
-    checks = _base_checks(settings, extractor, provider, pot_plugin_version(), server)
+    # Only when a proxy is configured: with no tunnel there is nothing to ask, and a
+    # probe per /doctor run is exactly what a diagnostic should spend (it is one
+    # small request, and it is the only way to learn the exit address).
+    # Translated through ``reachable_url`` because the report is read from wherever
+    # it is asked: inside the network `warp:1080` is the tunnel, on a host run only
+    # the published `127.0.0.1:1080` is — and a report that probes the wrong one
+    # would call a healthy tunnel down.
+    tunnel = (
+        await probe_tunnel(reachable_url(settings.ytdlp_proxy))
+        if settings.ytdlp_proxy
+        else None
+    )
+    checks = _base_checks(
+        settings, extractor, provider, pot_plugin_version(), server, tunnel
+    )
 
     if settings.cookies_from_browser:
         checks.append(
