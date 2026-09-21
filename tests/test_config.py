@@ -53,6 +53,109 @@ def test_admin_ids_rejects_garbage(monkeypatch: pytest.MonkeyPatch) -> None:
         _settings(monkeypatch, ADMIN_IDS="not-an-id")
 
 
+def test_admin_ids_error_says_what_to_write_instead(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare pydantic error is not something an operator can act on at 3am."""
+    with pytest.raises(ValidationError) as caught:
+        _settings(monkeypatch, ADMIN_IDS="123456789, oops")
+
+    message = str(caught.value)
+    assert "oops" in message and "123456789" in message
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    (
+        # docker-compose's `environment:` block, `docker run -e` and a shell
+        # `export` all pass the quotes through, and the dotenv parser does not.
+        ('"8116519481"', [8116519481]),
+        ("'8116519481'", [8116519481]),
+        # One per line, semicolons, a trailing separator: the separators people type.
+        ("1;2", [1, 2]),
+        ("1\n2\n3", [1, 2, 3]),
+        ("7,", [7]),
+        ("7, ,8", [7, 8]),
+        # A JSON list with ids as strings is a list of ids.
+        ('[9, "10"]', [9, 10]),
+    ),
+)
+def test_admin_ids_accepts_every_shape_an_operator_writes(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: list[int]
+) -> None:
+    assert _settings(monkeypatch, ADMIN_IDS=raw).admin_ids == expected
+
+
+def test_is_admin_compares_ids_not_strings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bug that makes an operator invisible to their own bot.
+
+    Ids reach the code from three places — the environment (text), an asyncpg row
+    (int) and JSON payloads (either) — and ``"123" in {123}`` is False, which does
+    not look like a type error. It looks like a bot that ignores its admin.
+    """
+    settings = _settings(monkeypatch, ADMIN_IDS="8116519481")
+
+    assert settings.is_admin(8116519481)
+    assert settings.is_admin("8116519481")
+    assert not settings.is_admin(8116519482)
+    assert not settings.is_admin(None)
+    assert not settings.is_admin("not-a-number")
+
+
+# ---------------------------------------------------------------------------
+# The fallback pool
+# ---------------------------------------------------------------------------
+
+
+def test_the_pool_is_the_embedded_instance_plus_the_public_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero-config means a flagged VPS still has a second address to try."""
+    settings = _settings(monkeypatch)
+
+    assert settings.cobalt_endpoints == ("http://cobalt:9000", "https://api.cobalt.tools")
+    assert settings.cobalt_enabled
+
+
+def test_extra_instances_come_before_the_public_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _settings(monkeypatch, COBALT_FALLBACK_URLS="https://mirror.example, http://other:9000/")
+
+    assert settings.cobalt_endpoints == (
+        "http://cobalt:9000",
+        "https://mirror.example",
+        "http://other:9000",
+        "https://api.cobalt.tools",
+    )
+
+
+def test_the_public_instance_can_be_switched_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Some operators would rather no link ever left their network."""
+    settings = _settings(
+        monkeypatch, COBALT_TRY_PUBLIC_INSTANCES="0", COBALT_FALLBACK_URLS="https://mirror.example"
+    )
+
+    assert settings.cobalt_endpoints == ("http://cobalt:9000", "https://mirror.example")
+
+
+def test_blanking_every_address_switches_the_fallback_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public instance is a *backup*, never the whole fallback.
+
+    Otherwise an operator who blanked ``COBALT_API_URL`` to switch the net off would
+    silently get a stranger's instance serving their users' links instead.
+    """
+    settings = _settings(monkeypatch, COBALT_API_URL="")
+
+    assert settings.cobalt_endpoints == ()
+    assert not settings.cobalt_enabled
+
+
+def test_a_pool_of_only_fallbacks_is_still_a_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _settings(monkeypatch, COBALT_API_URL="", COBALT_FALLBACK_URLS="https://mirror.example/")
+
+    assert settings.cobalt_endpoints == ("https://mirror.example", "https://api.cobalt.tools")
+    assert settings.cobalt_embedded is False
+
+
 # ---------------------------------------------------------------------------
 # Extractor retry knobs
 # ---------------------------------------------------------------------------

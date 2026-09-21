@@ -28,7 +28,7 @@ import contextlib
 import logging
 import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -350,16 +350,73 @@ def _body_text(body: Any) -> str:
     return ""
 
 
-class CobaltService:
-    """An async client for one Cobalt instance.
+def _node_urls(base_url: str | Sequence[str]) -> tuple[str, ...]:
+    """The configured instances, cleaned: trimmed, no trailing slash, no duplicates.
 
-    One instance is shared by every worker, so the HTTP session (and its
-    connection pool) is created lazily and closed once at shutdown.
+    Takes one address or a list of them so the single-instance callers (the CLI,
+    the tests, a one-off probe) keep reading like before while the bot itself can
+    pass a pool.
+    """
+    candidates: Iterable[object] = (base_url,) if isinstance(base_url, str) else base_url
+    urls: list[str] = []
+    for candidate in candidates:
+        url = candidate.strip().rstrip("/") if isinstance(candidate, str) else ""
+        if url and url not in urls:
+            urls.append(url)
+    return tuple(urls)
+
+
+@dataclass
+class _Node:
+    """One instance in the pool, with the two things worth remembering about it.
+
+    ``endpoint_index`` is the dialect that last answered it — a live instance is
+    probed once per process, not once per blocked link — and ``quarantine_until`` is
+    when it may be tried again. This state used to live on the service; a pool needs
+    one of each *per node*, which is the whole reason it moved here.
+    """
+
+    url: str
+    endpoint_index: int | None = None
+    quarantine_until: float = 0.0
+    quarantine_reason: str = ""
+
+    @property
+    def quarantined(self) -> bool:
+        return time.monotonic() < self.quarantine_until
+
+
+@dataclass(frozen=True)
+class CobaltNodeState:
+    """A node as a report reads it: where it is, what it speaks, whether it is out."""
+
+    url: str
+    dialect: str | None = None
+    quarantined: bool = False
+    reason: str = ""
+    active: bool = False
+
+
+class CobaltService:
+    """An async client for one or more Cobalt instances.
+
+    One client is shared by every worker, so the HTTP session (and its connection
+    pool) is created lazily and closed once at shutdown.
+
+    **Why a pool.** The embedded instance runs on this host's network address, so it
+    inherits whatever YouTube thinks of this IP: on a flagged VPS both engines fail
+    the same way, and a fallback that fails identically is not a fallback. A pool
+    makes the second attempt a genuinely different one — another machine, another
+    address, another chance — and the order is deliberate: the instance you control
+    first (fast, private, free), your own mirrors next, the public instance last (it
+    may demand a key, rate-limit us, and it sees the link). Nodes that fail as
+    *instances* are quarantined individually, so the pool degrades to what still
+    works instead of turning one bad node into no fallback at all.
     """
 
     def __init__(
         self,
-        base_url: str,
+        base_url: str | Sequence[str],
         *,
         api_key: str = "",
         timeout_s: float = 30.0,
@@ -367,62 +424,162 @@ class CobaltService:
         proxy: str | None = None,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
-        self.base_url = base_url.strip().rstrip("/")
+        urls = _node_urls(base_url)
+        self.base_urls: tuple[str, ...] = urls
+        #: The instance every report names first, and the only one the probes that
+        #: are *about the stack itself* (has cobalt reloaded the cookies? what is
+        #: its start time?) are sent to.
+        self.base_url = urls[0] if urls else ""
+        # A placeholder node for the disabled case keeps every accessor below free
+        # of ``if self._nodes`` — an empty ``COBALT_API_URL`` is a configuration, not
+        # an object with no state.
+        self._nodes: list[_Node] = [_Node(url=url) for url in urls] or [_Node(url="")]
+        self._primary = self._nodes[0]
+        self._active_url = ""
+        self._last_quarantine = ""
         self.api_key = api_key.strip()
         self.timeout_s = timeout_s
         self.download_timeout_s = download_timeout_s
         self.proxy = proxy or None
         self._session = session
         self._owns_session = session is None
-        #: The shape (path + payload) that last answered, so a live instance is
-        #: probed once per process instead of once per blocked link.
-        self._endpoint_index: int | None = None
-        self._quarantine_until: float = 0.0
-        self._quarantine_reason: str = ""
+
+    # ``_endpoint_index`` / ``_quarantine_until`` / ``_quarantine_reason`` name the
+    # *primary* node's memory. They used to be plain attributes and are still how the
+    # older reports and tests read the instance an operator configured; the extra
+    # nodes keep theirs in ``_nodes``.
+    @property
+    def _endpoint_index(self) -> int | None:
+        return self._primary.endpoint_index
+
+    @_endpoint_index.setter
+    def _endpoint_index(self, value: int | None) -> None:
+        self._primary.endpoint_index = value
+
+    @property
+    def _quarantine_until(self) -> float:
+        return self._primary.quarantine_until
+
+    @_quarantine_until.setter
+    def _quarantine_until(self, value: float) -> None:
+        self._primary.quarantine_until = value
+
+    @property
+    def _quarantine_reason(self) -> str:
+        return self._primary.quarantine_reason
+
+    @_quarantine_reason.setter
+    def _quarantine_reason(self, value: str) -> None:
+        self._primary.quarantine_reason = value
 
     @property
     def enabled(self) -> bool:
-        """Whether this instance is configured at all (see ``COBALT_API_URL``)."""
-        return bool(self.base_url)
+        """Whether any instance is configured (``COBALT_API_URL`` / fallbacks)."""
+        return bool(self.base_urls)
 
     @property
     def quarantined(self) -> bool:
-        """Whether a recent failure was the *instance's* fault (see ``QUARANTINE_S``)."""
-        return time.monotonic() < self._quarantine_until
+        """Whether *every* instance is being left alone (see ``QUARANTINE_S``).
+
+        With one node this is the old meaning exactly. With a pool, the question a
+        caller is really asking is "is there any net left?" — and a report that said
+        "quarantined" while three healthy nodes could still answer would be a lie.
+        """
+        return all(node.quarantined for node in self._nodes)
 
     @property
     def available(self) -> bool:
-        """Configured *and* not currently being left alone: worth one attempt."""
-        return self.enabled and not self.quarantined
+        """Configured *and* with at least one node not being left alone."""
+        return self.enabled and any(not node.quarantined for node in self._nodes)
 
     @property
     def quarantine_reason(self) -> str:
-        """Why it is being left alone, in the words the log already used."""
-        return self._quarantine_reason
+        """Why the pool is being left alone (the most recent cause, in full)."""
+        return self._last_quarantine or self._primary.quarantine_reason
 
     @property
     def dialect(self) -> str | None:
-        """Which API shape last answered this instance: ``v7``, ``v10``, or ``None``.
+        """Which API shape last answered: ``v7``, ``v10``, or ``None``.
 
         Reported by the doctor: two shapes exist in the wild, and which one an
         operator's instance speaks is the first thing to know when a request works
-        by hand but not from here.
+        by hand but not from here. With a pool it is the shape of the node that last
+        answered, because that is the one a request would go to next.
         """
-        if self._endpoint_index is None:
-            return None
-        return _DIALECTS[self._endpoint_index]
+        index = self._active_node().endpoint_index
+        return _DIALECTS[index] if index is not None else None
 
-    def _quarantine(self, error: CobaltError, seconds: float = QUARANTINE_S) -> None:
+    def node_states(self) -> tuple[CobaltNodeState, ...]:
+        """Every node as a report reads it — which is what `/doctor` and `/blocks` print.
+
+        Data, not prose: the wording belongs to the translation layer (the admin
+        reading it may be doing so in either language), and the addresses belong to
+        the report, which is the only place an operator can see *which* node is out.
+        """
+        active = self._active_node()
+        return tuple(
+            CobaltNodeState(
+                url=node.url,
+                dialect=(
+                    _DIALECTS[node.endpoint_index]
+                    if node.endpoint_index is not None
+                    else None
+                ),
+                quarantined=node.quarantined,
+                reason=node.quarantine_reason,
+                active=node is active,
+            )
+            for node in self._nodes
+            if node.url
+        )
+
+    def pool_label(self) -> str:
+        """The pool as one log line: the primary, then how many nodes back it up.
+
+        Log-facing and structural on purpose (the last node is the public instance,
+        and an operator should be able to see that in a single line at startup).
+        """
+        if not self.base_urls:
+            return ""
+        extra = len(self.base_urls) - 1
+        if not extra:
+            return self.base_url
+        return f"{self.base_url} (+{extra} more)"
+
+    def _active_node(self) -> _Node:
+        """The node that answered last, or the primary while nothing has yet."""
+        for node in self._nodes:
+            if node.url and node.url == self._active_url:
+                return node
+        return self._primary
+
+    def _attempt_order(self) -> list[_Node]:
+        """Who to ask, in order: the node that answered last, then the rest.
+
+        Quarantined nodes are skipped — that is what a quarantine is *for*. The
+        sticky-first rule matters because failover is usually about one service and
+        not the whole pool: an embedded instance that cannot serve YouTube (no
+        session, no cookies) must not cost a failed request on every later link once
+        a node that *can* serve it has been found.
+        """
+        fresh = [node for node in self._nodes if node.url and not node.quarantined]
+        active = self._active_node()
+        if active in fresh:
+            return [active, *(node for node in fresh if node is not active)]
+        return fresh
+
+    def _quarantine(self, node: _Node, error: CobaltError, seconds: float = QUARANTINE_S) -> None:
         """Stop asking an instance that just failed as an instance."""
         if not error.instance:
             return  # a private video must not silence a working fallback
-        self._quarantine_until = time.monotonic() + seconds
-        self._quarantine_reason = f"{error.code}: {error.message}"
+        node.quarantine_until = time.monotonic() + seconds
+        node.quarantine_reason = f"{error.code}: {error.message}"
+        self._last_quarantine = node.quarantine_reason
         logger.warning(
             "cobalt %s is being left alone for %.0fs — %s",
-            self.base_url,
+            node.url,
             seconds,
-            self._quarantine_reason,
+            node.quarantine_reason,
         )
 
     # ------------------------------------------------------------------
@@ -494,41 +651,84 @@ class CobaltService:
     async def resolve(
         self, url: str, media_format: MediaFormat, quality: object = ""
     ) -> CobaltMedia:
-        """Ask the instance for a direct download link for ``url``.
+        """Ask the pool for a direct download link for ``url``.
 
         ``quality`` is the tier the user picked, in Cobalt's own vocabulary (see
         :func:`video_quality_param`): a 480p request that lands on the fallback must
         not come back as the 1080p file, or the fallback would quietly override the
         choice the menu offered.
 
-        Tries each known API shape until one answers as an API; the shape that
-        worked is remembered, so this is only ever expensive once per process. An
-        instance that fails as an *instance* is quarantined (see ``QUARANTINE_S``)
-        instead of being asked again for every blocked link.
+        Per instance, each known API shape is tried until one answers as an API; the
+        shape that worked is remembered, so this is only ever expensive once per
+        process. An instance that fails as an *instance* is quarantined (see
+        ``QUARANTINE_S``) and the *next node is asked* — that is the difference
+        between a fallback and a second copy of the same failure. A link that the
+        instance answered about (a private video) is raised immediately: no other
+        node will disagree about a deleted video, and rotating on it would triple
+        the work and hide the real cause.
         """
         if not self.enabled:
             raise CobaltError("DISABLED", "نشانی کوبالت تنظیم نشده است (COBALT_API_URL خالی است).")
-        if self.quarantined:
+        nodes = self._attempt_order()
+        if not nodes:
             raise CobaltError(
                 "UNREACHABLE",
-                f"نمونهٔ کوبالت موقتاً کنار گذاشته شده است ({self._quarantine_reason})",
+                f"همهٔ نمونه‌های کوبالت موقتاً کنار گذاشته شده‌اند ({self.quarantine_reason})",
                 instance=True,
             )
 
         last: CobaltError | None = None
-        for index in self._endpoint_order():
+        tried = 0
+        for node in nodes:
+            tried += 1
+            try:
+                media = await self._resolve_on(node, url, media_format, quality)
+            except CobaltError as exc:
+                if not exc.instance:
+                    raise  # about the *link*: rotating would only repeat the answer
+                last = exc
+                if tried < len(nodes):
+                    logger.warning(
+                        "cobalt node %s could not serve it (%s) — trying the next of %d",
+                        node.url,
+                        exc.code,
+                        len(nodes) - tried,
+                    )
+                continue
+            self._active_url = node.url
+            return media
+
+        error = last or CobaltError("BAD_RESPONSE", "پاسخ نمونهٔ کوبالت خوانده نشد.", instance=True)
+        if tried > 1:
+            # Worth one clause: an operator seeing "unreachable" needs to know the
+            # pool was exhausted, not that their one address was mistyped.
+            error = CobaltError(
+                error.code, f"{error.message} (روی هر {tried} نمونه امتحان شد)", instance=True
+            )
+        raise error
+
+    async def _resolve_on(
+        self,
+        node: _Node,
+        url: str,
+        media_format: MediaFormat,
+        quality: object,
+    ) -> CobaltMedia:
+        """One instance's turn: its remembered dialect first, then the other shape."""
+        last: CobaltError | None = None
+        for index in self._endpoint_order(node):
             path, build = _ENDPOINTS[index]
             try:
-                status, body = await self._post(path, build(url, media_format, quality))
+                status, body = await self._post(node, path, build(url, media_format, quality))
             except CobaltError as exc:
-                self._quarantine(exc)
+                self._quarantine(node, exc)
                 raise
             if _is_wrong_shape(status, body):
                 # Right instance, wrong dialect (or a retired endpoint). Try the
                 # other one; this is not a reason to tell the user anything.
                 logger.info(
                     "cobalt %s does not speak the %r shape (%s) — trying the other one",
-                    self.base_url,
+                    node.url,
                     path or "/",
                     _body_text(body)[:120],
                 )
@@ -543,32 +743,34 @@ class CobaltService:
             # v10 shape has still told us which dialect it speaks — and "my
             # instance is v10 and wants a key" is exactly what the report is read
             # for. (It also stops the next resolve from re-asking v7.)
-            self._endpoint_index = index
+            node.endpoint_index = index
+            self._active_url = node.url
             try:
                 media = _parse_response(url, status, body)
             except CobaltError as exc:
-                self._quarantine(exc)
+                self._quarantine(node, exc)
                 raise
             return media
 
         error = last or CobaltError("BAD_RESPONSE", "پاسخ نمونهٔ کوبالت خوانده نشد.", instance=True)
-        self._quarantine(error)
+        self._quarantine(node, error)
         raise error
 
-    def _endpoint_order(self) -> list[int]:
+    @staticmethod
+    def _endpoint_order(node: _Node) -> list[int]:
         """The shapes to try: the one that worked last time first, then the rest."""
-        if self._endpoint_index is None:
+        if node.endpoint_index is None:
             return list(range(len(_ENDPOINTS)))
-        return [self._endpoint_index] + [
-            index for index in range(len(_ENDPOINTS)) if index != self._endpoint_index
+        return [node.endpoint_index] + [
+            index for index in range(len(_ENDPOINTS)) if index != node.endpoint_index
         ]
 
-    async def _post(self, path: str, payload: dict[str, Any]) -> tuple[int, Any]:
+    async def _post(self, node: _Node, path: str, payload: dict[str, Any]) -> tuple[int, Any]:
         """One resolve request. Every transport trouble becomes a CobaltError."""
         try:
             timeout = aiohttp.ClientTimeout(total=self.timeout_s)
             async with self._http().post(
-                f"{self.base_url}{path}",
+                f"{node.url}{path}",
                 json=payload,
                 headers=self._headers(),
                 proxy=self.proxy or None,

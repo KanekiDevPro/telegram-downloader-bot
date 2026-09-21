@@ -89,6 +89,10 @@ class FakeCobalt:
         self._error = error
         self.probes = 0
 
+    def node_states(self) -> tuple[object, ...]:
+        """No pool in this stub: the tests here are about the one verdict line."""
+        return ()
+
     async def server_start_time(self) -> float | None:
         """What the report compares the cookie file's stamp against."""
         return self.started_at

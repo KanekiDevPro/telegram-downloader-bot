@@ -43,7 +43,7 @@ from core.config import (
     probe_url,
 )
 from services import cobalt_cookies
-from services.cobalt import CobaltError, CobaltService
+from services.cobalt import CobaltError, CobaltNodeState, CobaltService
 from services.cobalt_cookies import CobaltCookieState
 from services.extractor import (
     BLOCK_EXTRACTION_CODES,
@@ -293,6 +293,10 @@ class FallbackHealth:
     #: What the net did the last time a *real* link needed it (``services.fallback``).
     #: A probe answers "would it answer?"; this answers "did it, when it counted?"
     use: FallbackUse | None = None
+    #: Every node in the pool, when there is more than one. Left out of ``stored()``
+    #: on purpose: a remembered verdict is about *one* address, and handing a stale
+    #: node list to the next run would report a pool that no longer exists.
+    nodes: tuple[CobaltNodeState, ...] = ()
 
     @property
     def icon(self) -> str:
@@ -372,6 +376,8 @@ class FallbackHealth:
         line = f"{where} — {' • '.join(tail)}" if where else " • ".join(tail)
         if self.reason:
             line += f"\n     علت: {self.reason}"
+        if pool := _pool_line(self.nodes):
+            line += f"\n{pool}"
         if use := self.use_line():
             line += f"\n{use}"
         if fix := self.fix:
@@ -401,6 +407,8 @@ class FallbackHealth:
         duplicate = self.use.reason if self.use is not None else ""
         if self.reason and self.reason != duplicate:
             lines.append(f"     علت: {self.reason}")
+        if pool := _pool_line(self.nodes):
+            lines.append(pool)
         if use := self.use_line():
             lines.append(use)
         if not self.ready and self.state != "off" and self.fix:
@@ -566,7 +574,34 @@ async def fallback_health(
     )
     if pool is not None and (use := await last_use(pool)) is not None:
         health = replace(health, use=use)
+    if cobalt is not None:
+        # Read from the *client*, not from the probe: with a pool, the interesting
+        # news is usually about a node the probe never touched (the embedded one
+        # cannot serve YouTube, so the second node took the link — that is a
+        # failover an admin has to know about, and nothing in the verdict says it).
+        health = replace(health, nodes=cobalt.node_states())
     return health
+
+
+def _pool_line(nodes: tuple[CobaltNodeState, ...]) -> str:
+    """The pool in one line — only when there is more than one instance to explain.
+
+    A single instance is already named by the paragraph above, and repeating the
+    address would read as two different facts. With a pool, the address an operator
+    configured is often *not* the one that ends up serving a blocked link, so which
+    node is out, and which one is taking the work, is the entire question.
+    """
+    if len(nodes) < 2:
+        return ""
+    parts: list[str] = []
+    for node in nodes:
+        marks = [node.dialect] if node.dialect else []
+        if node.active:
+            marks.append("فعال")
+        if node.quarantined:
+            marks.append("🟡 کنار گذاشته")
+        parts.append(node.url + (f" ({' • '.join(marks)})" if marks else ""))
+    return f"     🔁 نمونه‌ها ({len(nodes)}): " + " | ".join(parts)
 
 
 def _host_side_hint(url: str) -> str:

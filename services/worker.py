@@ -28,7 +28,13 @@ from core.utils import MediaFormat, escape_html, format_size, sanitize_filename,
 from services import cache as cache_service
 from services import cookie_refresh, fallback, preflight, recipients, spotify, telemetry
 from services.cobalt import CobaltError, CobaltService
-from services.delivery import join_file_ids, send_album, send_cached_file
+from services.delivery import (
+    join_file_ids,
+    replay_caption,
+    send_album,
+    send_cached_file,
+    source_line,
+)
 from services.extractor import (
     IMAGE_ONLY,
     DownloadResult,
@@ -325,8 +331,10 @@ async def process_download_task(
     cached = await cache_service.get_cached(pool, task.url, task.media_format, task.quality)
     if cached is not None:
         await _edit(status, t("work.cache_resend", lang))
+        # The replay carries the source link too: it is the same file, so it deserves
+        # the same caption — and the cached row still holds the URL it came from.
         if await send_cached_file(
-            bot, task.chat_id, cached, caption=t("work.cache_caption", lang)
+            bot, task.chat_id, cached, caption=replay_caption(cached, lang)
         ):
             await _edit(status, t("work.cache_done", lang))
             return
@@ -473,7 +481,9 @@ async def _finish_upload(
         # Inside the job directory on purpose: the artwork is part of this job and
         # goes away with it, in the ``finally`` below.
         cover = await spotify.download_cover(track, result.file_path.parent) if track else None
-        delivered = await _upload(bot, task.chat_id, result, lang, track=track, cover=cover)
+        delivered = await _upload(
+            bot, task.chat_id, result, lang, track=track, cover=cover, source_url=task.url
+        )
         if delivered.cacheable:
             await cache_service.memorize(
                 pool,
@@ -589,9 +599,12 @@ def _file_id(media: Any) -> str:
 
 
 def _upload_caption(
-    result: DownloadResult, lang: str, track: spotify.SpotifyTrack | None = None
+    result: DownloadResult,
+    lang: str,
+    track: spotify.SpotifyTrack | None = None,
+    source_url: str = "",
 ) -> str:
-    """Caption for the uploaded media (title, size, resolution and duration when known).
+    """Caption for the uploaded media: title, platform, size, quality, length, link.
 
     The resolution is the *actual* one, not the tier that was asked for: "up to
     1080p" is a ceiling, and a 720p upload answering it should say 720p.
@@ -602,7 +615,7 @@ def _upload_caption(
     """
     files = (result.file_path, *result.extra_paths)
     if track is not None:
-        return _track_caption(track, files, lang)
+        return _track_caption(track, files, lang, source_url=source_url)
     parts = [
         f"<b>{escape_html(result.info.title[:200])}</b>",
         t("work.caption_platform", lang, platform=escape_html(result.info.platform)),
@@ -620,13 +633,19 @@ def _upload_caption(
     duration = _fmt_duration(result.info.duration)
     if duration:
         parts.append(t("work.caption_duration", lang, duration=duration))
+    if line := source_line(source_url, lang):
+        parts.append(line)
     return "\n".join(parts)
 
 
 def _track_caption(
-    track: spotify.SpotifyTrack, files: tuple[Path, ...], lang: str
+    track: spotify.SpotifyTrack,
+    files: tuple[Path, ...],
+    lang: str,
+    *,
+    source_url: str = "",
 ) -> str:
-    """The caption a song deserves: title, artist, album, length, size."""
+    """The caption a song deserves: title, artist, album, length, size, link."""
     parts = [f"<b>{escape_html(track.title[:200])}</b>"]
     if track.artist:
         parts.append(t("work.caption_artist", lang, artist=escape_html(track.artist)))
@@ -648,6 +667,8 @@ def _track_caption(
             ),
         )
     )
+    if line := source_line(source_url, lang):
+        parts.append(line)
     return "\n".join(parts)
 
 
@@ -778,6 +799,7 @@ async def _upload(
     *,
     track: spotify.SpotifyTrack | None = None,
     cover: Path | None = None,
+    source_url: str = "",
 ) -> Delivered:
     """Send what the download produced: one file, one photo, or a whole album.
 
@@ -786,7 +808,7 @@ async def _upload(
     and an album of them as a media group, in the post's own order.
     """
     files = (result.file_path, *result.extra_paths)
-    caption = _upload_caption(result, lang, track)
+    caption = _upload_caption(result, lang, track, source_url=source_url)
     images = [path for path in files if _delivery_kind(path, result.media_format) == "photo"]
     others = [path for path in files if path not in images]
     if images and not others:

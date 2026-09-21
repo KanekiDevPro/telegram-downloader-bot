@@ -25,6 +25,7 @@ from core.config import CLOUD_API_UPLOAD_LIMIT_MB, Settings, get_settings, probe
 from core.database import create_pool, init_db
 from core.logging import setup_logging
 from core.telegram_api import build_session, session_target
+from handlers.admin import publish_commands
 from handlers.admin import router as admin_router
 from handlers.payment import router as payment_router
 from handlers.user import router as user_router
@@ -207,11 +208,14 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
     dp["extractor"] = extractor
 
     # The fallback engine: only engaged when yt-dlp comes back *blocked*, so a
-    # configured instance costs nothing until the primary route is refused.
-    # The address *this* process reaches the instance on: the compose service name
+    # configured instance costs nothing until the primary route is refused. A
+    # *pool* of instances, because the embedded one shares this host's address —
+    # when YouTube has flagged that address, one fallback that fails identically is
+    # not a fallback (see CobaltService).
+    # The address *this* process reaches each instance on: the compose service name
     # inside the network, the published loopback port for a bot run on the host.
     cobalt = CobaltService(
-        probe_url(settings.cobalt_api_url),
+        [probe_url(url) for url in settings.cobalt_endpoints],
         api_key=settings.cobalt_api_key,
         timeout_s=settings.cobalt_timeout_s,
         download_timeout_s=settings.cobalt_download_timeout_s,
@@ -221,7 +225,7 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
     if cobalt.enabled:
         logger.info(
             "fallback extractor: %s (used only when yt-dlp is blocked%s)",
-            cobalt.base_url,
+            cobalt.pool_label(),
             ", API key set" if cobalt.api_key else "",
         )
     else:
@@ -463,6 +467,11 @@ async def run_polling(app: dict[str, Any]) -> None:
     with suppress(Exception):
         await bot.delete_webhook(drop_pending_updates=True)
 
+    # The command menu is published here rather than at build time: this is the
+    # first moment the bot is definitely talking to Telegram, and a diagnostic run
+    # (boot_check) must not spend API calls on a UI convenience.
+    await publish_commands(bot, get_settings().default_language)
+
     try:
         await dp.start_polling(bot)
     finally:
@@ -487,6 +496,7 @@ async def run_webhook(app: dict[str, Any]) -> None:
     webhook_url = f"{settings.webhook_url.rstrip('/')}{settings.webhook_path}"
     await bot.set_webhook(webhook_url, secret_token=settings.webhook_secret or None)
     logger.info("webhook set: %s", webhook_url)
+    await publish_commands(bot, settings.default_language)
 
     runner = web.AppRunner(web_app)
     await runner.setup()
@@ -513,6 +523,11 @@ async def main() -> None:
         )
     if not settings.admin_ids:
         logger.warning("ADMIN_IDS is empty — payment receipts will have nobody to forward to.")
+    else:
+        # Counted, never listed: the ids are private, but the *number* is the first
+        # thing to check when an operator says the panel is not theirs (a typo in
+        # ADMIN_IDS, or the bot reading a different .env than the one edited).
+        logger.info("admins: %d id(s) configured (ADMIN_IDS)", len(settings.admin_ids))
     if not settings.manual_card_number or not settings.manual_card_holder:
         logger.warning(
             "MANUAL_CARD_NUMBER / MANUAL_CARD_HOLDER are not set — the card-to-card "

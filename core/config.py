@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 from io import StringIO
 from pathlib import Path
@@ -39,10 +40,48 @@ LOCAL_COBALT_HOSTS: frozenset[str] = frozenset(
 )
 
 
+def candidates_configured(candidates: list[str]) -> bool:
+    """Whether any address in the list is non-empty (i.e. a pool is configured)."""
+    return any(isinstance(candidate, str) and candidate.strip() for candidate in candidates)
+
+
 def cobalt_instance_is_local(url: str) -> bool:
     """Whether a Cobalt URL points at the instance shipped in ``docker-compose``."""
     host = (urlparse(url).hostname or "").lower()
     return host in LOCAL_COBALT_HOSTS or host.startswith("127.")
+
+
+#: The public Cobalt instance, as published by the project itself
+#: (https://github.com/imputnet/cobalt — the docs name this one as the official
+#: instance). Only ever the *last* node tried, because it is the one we do not
+#: control: it may require an API key (``error.api.auth.jwt.missing``), rate-limit
+#: anonymous callers, and it sees every link handed to it. A second public node is
+#: deliberately *not* listed here: mirrors come and go, and a hard-coded third-party
+#: address in a production path is exactly the thing that rots into a dead default.
+#: Operators who want more add them to ``COBALT_FALLBACK_URLS`` (the community keeps
+#: a live list at https://instances.cobalt.best).
+PUBLIC_COBALT_INSTANCES: tuple[str, ...] = ("https://api.cobalt.tools",)
+
+#: Everything a person puts *between* two ids or two URLs: commas, semicolons,
+#: whitespace (including the newline of one-per-line), in any mixture.
+_ADMIN_SPLIT = re.compile(r"[,;\s]+")
+
+
+def _admin_id(value: object, source: str) -> int:
+    """One Telegram id, or a validation error naming the offender and the formats.
+
+    Raising (rather than dropping the token) is the point: an ``ADMIN_IDS`` with a
+    typo in it either means the operator is locked out of their own bot, or — if we
+    guessed — that some *other* id silently became an admin. Neither is a thing to
+    discover later, so the message says what to write instead.
+    """
+    text = str(value).strip().strip("'\"").strip()
+    if re.fullmatch(r"-?\d+", text):
+        return int(text)
+    raise ValueError(
+        f"ADMIN_IDS got {value!r} (from {source!r}) — numeric Telegram user ids are "
+        "required, separated by commas or spaces, e.g. ADMIN_IDS=123456789, 987654321"
+    )
 
 
 #: Compose service names and the loopback port each is published on. The published
@@ -344,6 +383,22 @@ class Settings(BaseSettings):
     )
     #: Some instances (self-hosted ones, and api.cobalt.tools) require a key; it
     #: is sent as ``Authorization: Api-Key <key>`` only when non-empty.
+    #: Extra Cobalt instances to rotate through when the one above cannot serve a
+    #: link — a second self-hosted node on another host, a friend's instance, or a
+    #: public one. Comma/space separated (``COBALT_FALLBACK_URLS``); empty by
+    #: default, because pointing a stranger's server at your users' links is the
+    #: operator's decision, not ours.
+    cobalt_fallback_urls: Annotated[list[str], NoDecode] = Field(
+        default_factory=list, alias="COBALT_FALLBACK_URLS"
+    )
+    #: Whether the official public instance is appended to that rotation. On by
+    #: default: a VPS whose IP YouTube has flagged gets *no* fallback at all
+    #: otherwise, since the embedded instance shares that IP. Costs one failed
+    #: request per blocked link when it refuses anonymous callers, and is the first
+    #: thing to switch off if you would rather no link ever left your network.
+    cobalt_try_public_instances: bool = Field(
+        default=True, alias="COBALT_TRY_PUBLIC_INSTANCES"
+    )
     cobalt_api_key: str = Field(default="", alias="COBALT_API_KEY")
     #: How long a *metadata* resolution may take, and the separate budget for the
     #: file body. The resolve is one round trip; the download is a real transfer.
@@ -383,18 +438,39 @@ class Settings(BaseSettings):
     @field_validator("admin_ids", mode="before")
     @classmethod
     def _parse_admin_ids(cls, value: object) -> object:
-        """Accept comma/space separated ids, a JSON list, or nothing at all."""
+        """Every way an operator writes a list of ids — and a loud error for a typo.
+
+        Measured, because each shape below is a way the admin silently stops being an
+        admin (or the bot refuses to start at all):
+
+        * ``123456`` — one id;
+        * ``123, 456`` / ``123 456`` / ``123;456`` / one per line — the separators a
+          person actually types;
+        * ``123,`` — a trailing separator, which ``int("")`` used to reject;
+        * ``"123456"`` — quoted. A ``.env`` file has its quotes stripped by the
+          dotenv parser, but ``docker compose``'s own ``environment:`` block, an
+          ``export`` in a shell and ``docker run -e`` all pass them through, and
+          ``int('"123"')`` ends the process with a ValidationError;
+        * ``[123, "456"]`` — a JSON list (ids as strings are welcome);
+        * ``123, oops`` — a typo, which raises a message naming the token and the
+          accepted formats instead of a bare pydantic error nobody can act on.
+        """
+        if value is None:
+            return []
         if not isinstance(value, str):
             return value
-        raw = value.strip()
+        raw = value.strip().strip("'\"").strip()
         if not raw:
             return []
         if raw.startswith("["):
             try:
-                return json.loads(raw)
+                parsed = json.loads(raw)
             except ValueError:
-                pass  # fall back to the tolerant split below
-        return [int(part) for part in raw.replace(",", " ").split()]
+                parsed = None
+            if isinstance(parsed, list):
+                parts: list[object] = list(parsed)
+                return [_admin_id(part, raw) for part in parts]
+        return sorted({_admin_id(part, raw) for part in _ADMIN_SPLIT.split(raw) if part})
 
     @field_validator("default_language", mode="before")
     @classmethod
@@ -501,6 +577,31 @@ class Settings(BaseSettings):
             return value
         return value.strip().rstrip("/")
 
+    @field_validator("cobalt_fallback_urls", mode="before")
+    @classmethod
+    def _parse_fallback_urls(cls, value: object) -> object:
+        """``a,b`` / ``a b`` / ``[a, b]`` / blank — the same tolerance as ADMIN_IDS.
+
+        Sharing the parsing habit matters here: an operator who wrote
+        ``COBALT_API_URL`` as one address will write a list as one line, and a
+        silent misfire would look like "the fallback does not work".
+        """
+        if value is None:
+            return []
+        if not isinstance(value, str):
+            return value
+        raw = value.strip().strip("'\"").strip()
+        if not raw:
+            return []
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item).strip().rstrip("/") for item in parsed if str(item).strip()]
+        return [part.rstrip("/") for part in _ADMIN_SPLIT.split(raw) if part]
+
     @field_validator("cobalt_api_key", mode="before")
     @classmethod
     def _strip_api_key(cls, value: object) -> object:
@@ -556,13 +657,37 @@ class Settings(BaseSettings):
 
     @property
     def cobalt_enabled(self) -> bool:
-        """True when a Cobalt instance is configured as the fallback extractor.
+        """True when at least one Cobalt instance is configured as the fallback.
 
-        “Configured” is the only thing we can know cheaply: probing the instance
+        “Configured” is the only thing we can know cheaply: probing the instances
         on every link would cost more than the fallback saves. If it turns out to
         be down when it matters, the original yt-dlp error is what the user gets.
         """
-        return bool(self.cobalt_api_url)
+        return bool(self.cobalt_endpoints)
+
+    @property
+    def cobalt_endpoints(self) -> tuple[str, ...]:
+        """Every instance to try, in order: the one above, the extras, the public node.
+
+        Order is the whole design of a fallback: the instance you control is asked
+        first (it is fast, local and private), the operator's own mirrors next, and
+        the public instance last — it is the one that may refuse anonymous callers,
+        rate-limit us, or log a user's link, so nothing reaches it while a node you
+        pay for can still answer.
+        """
+        candidates = [self.cobalt_api_url, *self.cobalt_fallback_urls]
+        # Only as a *backup*: an operator who blanks every address is switching the
+        # fallback off, and quietly reaching for a public instance instead would
+        # undo that (and leak the links). The shipped default is non-empty, so a
+        # zero-config deployment still gets the public node as its second hope.
+        if self.cobalt_try_public_instances and candidates_configured(candidates):
+            candidates.extend(PUBLIC_COBALT_INSTANCES)
+        seen: list[str] = []
+        for candidate in candidates:
+            url = candidate.strip().rstrip("/") if isinstance(candidate, str) else ""
+            if url and url not in seen:
+                seen.append(url)
+        return tuple(seen)
 
     @property
     def cobalt_embedded(self) -> bool:
@@ -587,9 +712,21 @@ class Settings(BaseSettings):
         """True when the local server's own credentials are present."""
         return bool(self.telegram_api_id and self.telegram_api_hash)
 
-    def is_admin(self, user_id: int | None) -> bool:
-        """True when ``user_id`` belongs to one of the configured admins."""
-        return user_id is not None and user_id in self.admin_id_set
+    def is_admin(self, user_id: int | str | None) -> bool:
+        """True when ``user_id`` belongs to one of the configured admins.
+
+        A ``str`` id is accepted deliberately: ids reach us from three places — the
+        environment (text), an ``asyncpg`` row (int) and JSON payloads (either) —
+        and ``"8116519481" in {8116519481}`` is ``False``. That comparison failing
+        does not look like a bug; it looks like a bot that ignores its own operator,
+        which is why the conversion happens here, once, instead of at every call.
+        """
+        if user_id is None:
+            return False
+        try:
+            return int(user_id) in self.admin_id_set
+        except (TypeError, ValueError):
+            return False
 
 
 @lru_cache(maxsize=1)

@@ -45,7 +45,7 @@ from core.utils import escape_html, extract_url, today_local, validate_url
 from handlers.payment import callback_message, plans_keyboard
 from services import cache as cache_service
 from services import content, preflight, spotify
-from services.delivery import send_cached_file
+from services.delivery import replay_caption, send_cached_file
 from services.extractor import ExtractorService
 from services.queue import DownloadTask, TaskQueue
 from services.subscription import effective_daily_limit, is_admin, is_premium_active
@@ -86,6 +86,11 @@ def _main_menu(
     builder.button(text=t("menu.language", lang), callback_data="menu:language")
     if support:
         builder.button(text=t("menu.support", lang), callback_data="menu:support")
+    if admin:
+        # The panel used to be reachable only by remembering that `/admin` exists:
+        # an operator had no way to tell a missing permission from a missing
+        # feature. It is a button now, on the one screen they always open.
+        builder.button(text=t("menu.admin", lang), callback_data="menu:admin")
     builder.adjust(2)
     return builder.as_markup()
 
@@ -626,10 +631,16 @@ async def _queue_url_flow(
     if not validate_url(url):
         await _edit_or_reply(status, t("intake.invalid_link", lang))
         return
-    if not await _probe_supported(url):
+    routing = content.routing_for(url)
+    # The router decides whether the *extractor* gets a say. `is_url_supported`
+    # answers "does yt-dlp have a site handler for this?"; a link that is itself a
+    # file (`pbs.twimg.com/…?format=jpg`, an `i.redd.it` image, a Discord CDN
+    # attachment) has none — and does not need one, because it is downloaded
+    # directly and the fallback covers the rest. Asking anyway is how a perfectly
+    # good photo link ends in "this site is not supported".
+    if routing.kind not in _SELF_SERVED_KINDS and not await _probe_supported(url):
         await _edit_or_reply(status, t("intake.unsupported", lang))
         return
-    routing = content.routing_for(url)
     if routing.solo is not None:
         await state.clear()
         await _edit_or_reply(status, t("intake.photo_auto", lang))
@@ -645,6 +656,12 @@ async def _queue_url_flow(
 def _media_question(url: str, lang: str) -> str:
     """The question this link deserves — quality, audio format, or its media."""
     return t(content.routing_for(url).header_key, lang)
+
+
+#: Kinds that are served by the download path itself rather than by a yt-dlp site
+#: handler: an image or a gallery is fetched as-is, so yt-dlp's catalogue — which is
+#: about *sites* with video — has nothing to say about it.
+_SELF_SERVED_KINDS: frozenset[str] = frozenset({"image", "gallery"})
 
 
 async def _probe_supported(url: str) -> bool:
@@ -729,7 +746,10 @@ async def _submit(
     if cached is not None:
         if tap is not None:
             await tap.answer()
-        if await send_cached_file(bot, chat_id, cached, caption=t("work.cache_caption", lang)):
+        # Same caption as a fresh upload, source link included: the user cannot tell
+        # (and should not have to care) whether this file was fetched now or the
+        # first time somebody asked for the same link.
+        if await send_cached_file(bot, chat_id, cached, caption=replay_caption(cached, lang)):
             await _edit_or_reply(status, t("intake.cache_hit", lang))
             return
         # dead file_id → drop it and fall through to a real download

@@ -28,8 +28,9 @@ reports those, so the gateway queues them instead of drawing a one-button menu �
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 from core.utils import MediaFormat, Quality
 
@@ -89,7 +90,42 @@ _MEDIA_CHOICE = Choice("fmt.media", "video", "best")
 
 _MEDIA_CHOICES: tuple[Choice, ...] = (_MEDIA_CHOICE, *_AUDIO_CHOICES)
 
+#: Extensions that *are* the answer. A URL ending in ``.jpg`` is not a page that
+#: might contain a photo — it is the photo, whatever host serves it. This is the
+#: strongest evidence available, so it is read before every host and path rule: the
+#: links people actually copy are often the file itself (a Discord CDN URL, a
+#: ``preview.redd.it`` image, a ``pbs.twimg.com`` one), and those are the links a
+#: format menu is most obviously wrong for. ``.gif`` is here rather than under
+#: video because Telegram plays it as an animation and YouTube cannot download it.
+_IMAGE_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".avif",
+        ".heic",
+        ".heif",
+        ".bmp",
+        ".tif",
+        ".tiff",
+        ".gif",
+    }
+)
+_VIDEO_SUFFIXES: frozenset[str] = frozenset(
+    {".mp4", ".mkv", ".mov", ".webm", ".m4v", ".avi"}
+)
+#: Audio files are *not* an auto-download: a file that is already a track is exactly
+#: the case where the m4a/"as it is" distinction is worth a question.
+_AUDIO_SUFFIXES: frozenset[str] = frozenset(
+    {".mp3", ".m4a", ".opus", ".flac", ".wav", ".ogg", ".aac"}
+)
+
 #: Host → kind, for the hosts where the host alone settles it.
+#: ``pbs.twimg.com`` and friends are *CDNs*: everything they serve is media, so no
+#: path rule has to guess. ``video.twimg.com`` is deliberately absent — its URLs do
+#: name their file (``…/ext_tw_video/…/pu/…mp4``), and the suffix rule reads that
+#: better than a host rule could.
 _HOST_KINDS: tuple[tuple[tuple[str, ...], ContentKind], ...] = (
     (
         (
@@ -114,6 +150,26 @@ _HOST_KINDS: tuple[tuple[tuple[str, ...], ContentKind], ...] = (
         "audio",
     ),
     (("pinterest.com", "imgur.com", "flickr.com", "500px.com"), "image"),
+    (
+        (
+            "pbs.twimg.com",
+            "cdninstagram.com",
+            "fbcdn.net",
+            "i.redd.it",
+            "preview.redd.it",
+            "external-preview.redd.it",
+            "pinimg.com",
+            "i.gyazo.com",
+            "media.tenor.com",
+            "c.tenor.com",
+            "images.unsplash.com",
+            "images.pexels.com",
+            "i.ibb.co",
+            "upload.wikimedia.org",
+            "staticflickr.com",
+        ),
+        "image",
+    ),
 )
 
 #: Path fragments that speak for *any* host (checked in order). Deliberately
@@ -121,9 +177,12 @@ _HOST_KINDS: tuple[tuple[tuple[str, ...], ContentKind], ...] = (
 #: only YouTube uses, and a host that merely *looks* like YouTube would inherit it.
 #: The hosts that really use those paths are listed in ``_HOST_PATHS`` instead.
 _PATH_KINDS: tuple[tuple[tuple[str, ...], ContentKind], ...] = (
-    (("/photo/", "/photos/", "/gallery"), "gallery"),
+    # Plural/collective shapes first: ``/photos/`` is a set even though it starts
+    # with ``/photo``, and a set is a gallery on every host that uses the word.
+    (("/photo/", "/photos/", "/photos", "/gallery", "/album/", "/albums"), "gallery"),
+    (("/photo", "/image", "/images", "/img/", "/picture", "/pics/"), "image"),
     (("/video/", "/videos/", "/embed/", "/reel/"), "video"),
-    (("/track/", "/album/", "/playlist/", "/sets/"), "audio"),
+    (("/track/", "/playlist/", "/sets/"), "audio"),
 )
 
 #: Host → path fragments *that host* uses, checked before the generic ones. A post
@@ -134,6 +193,9 @@ _HOST_PATHS: dict[str, tuple[tuple[tuple[str, ...], ContentKind], ...]] = {
         (("/shorts/", "/embed/", "/watch", "/live/"), "video"),
         (("/playlist",), "video"),
     ),
+    # ``/share/…`` is deliberately absent: that link can be a reel or a post, and a
+    # share link is the one case where the question (quality? audio?) is still worth
+    # asking. ``/p/`` and ``/stories`` cannot be anything but media.
     "instagram.com": (
         (("/p/", "/stories"), "gallery"),
         (("/reel", "/tv/"), "video"),
@@ -143,8 +205,17 @@ _HOST_PATHS: dict[str, tuple[tuple[tuple[str, ...], ContentKind], ...]] = {
         (("/photo",), "image"),
         (("/watch", "/videos/", "/reel", "/video/"), "video"),
     ),
-    "twitter.com": ((("/photo/",), "image"), (("/video/",), "video")),
-    "x.com": ((("/photo/",), "image"), (("/video/",), "video")),
+    # No trailing slash on ``/photo``: the share button of a multi-photo post hands
+    # out ``…/status/123/photo/1``, but the *app* link is ``…/status/123/photo`` —
+    # and a menu is equally wrong for both.
+    "twitter.com": ((("/photo",), "image"), (("/video/",), "video")),
+    "x.com": ((("/photo",), "image"), (("/video/",), "video")),
+    "reddit.com": (
+        (("/gallery/",), "gallery"),
+        # ``reddit.com/media?url=…`` is a redirect to the image itself.
+        (("/media",), "image"),
+    ),
+    "pinterest.com": ((("/pin/",), "image"),),
 }
 
 #: Hosts whose *posts* are one thing or another depending on the author.
@@ -178,6 +249,34 @@ _CHOICES: dict[ContentKind, tuple[Choice, ...]] = {
     "gallery": (_MEDIA_CHOICE,),
     "media": _MEDIA_CHOICES,
 }
+
+
+def _query_format(query: str) -> str:
+    """The extension a CDN puts in the query when it has none in the path.
+
+    ``pbs.twimg.com/media/ABC?format=jpg&name=large`` is what X's own share button
+    produces — the URL has no suffix at all, so the only place the answer lives is
+    ``format=``. Read from exactly that parameter (not ``fmt``/``ext``, which pages
+    use for unrelated things) and only when the path says nothing.
+    """
+    for key, value in parse_qsl(query, keep_blank_values=False):
+        if key.lower() == "format" and value:
+            return f".{value.strip().strip('.').lower()}"
+    return ""
+
+
+def _file_kind(path: str, query: str = "") -> ContentKind | None:
+    """What a link *is*, when it names a file — the strongest evidence there is."""
+    suffix = Path(unquote(path or "")).suffix.lower()
+    if not suffix and query:
+        suffix = _query_format(query)
+    if suffix in _IMAGE_SUFFIXES:
+        return "image"
+    if suffix in _VIDEO_SUFFIXES:
+        return "video"
+    if suffix in _AUDIO_SUFFIXES:
+        return "audio"
+    return None
 
 
 def url_host(url: str) -> str:
@@ -232,6 +331,10 @@ def classify(url: str) -> ContentKind:
     path = parsed.path or ""
     if not host:
         return "media"
+    if (file_kind := _file_kind(path, parsed.query)) is not None:
+        # A file beats every other rule: `/photo/123.jpg` is a photo, not a gallery
+        # page, and `movie.mp4` on a host whose posts are ambiguous is a video.
+        return file_kind
     path_kind = _path_kind(path, host)
     if path_kind is not None:
         # Only trust the path when the host does not *contradict* it: a YouTube

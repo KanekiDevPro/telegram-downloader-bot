@@ -12,6 +12,9 @@ the file that arrived can be named.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
+
+import asyncpg
 
 from core.i18n import t
 from services.extractor import DownloadResult, MediaInfo
@@ -99,3 +102,53 @@ def test_fmt_duration() -> None:
     assert _fmt_duration(0) == ""
     assert _fmt_duration(95) == "1:35"
     assert _fmt_duration(3725) == "1:02:05"
+
+
+# ---------------------------------------------------------------------------
+# The source link
+# ---------------------------------------------------------------------------
+
+
+def test_the_caption_carries_the_link_the_user_sent(tmp_path: Path) -> None:
+    """A file that arrives in a chat is looked at days later, out of context, and
+    "which video was this?" should have one cheap answer."""
+    caption = _upload_caption(
+        _result(tmp_path, duration=95),
+        "en",
+        source_url="https://youtu.be/abc",
+    )
+
+    assert caption.splitlines()[-1] == t("work.caption_source", "en", url="https://youtu.be/abc")
+
+
+def test_no_link_means_no_line(tmp_path: Path) -> None:
+    """The worker can be driven without a task; an empty `🔗 ` would look broken."""
+    caption = _upload_caption(_result(tmp_path, duration=95), "en")
+
+    assert "🔗" not in caption
+    assert len(caption.splitlines()) == 4
+
+
+def test_the_caption_escapes_html_in_the_link(tmp_path: Path) -> None:
+    """The URL is attacker-controlled text in an HTML-parsed message."""
+    caption = _upload_caption(
+        _result(tmp_path, duration=None),
+        "en",
+        source_url="https://evil.example/<script>alert(1)</script>",
+    )
+
+    assert "<script>" not in caption
+    assert "&lt;script&gt;" in caption
+
+
+def test_a_replayed_file_gets_the_same_link(tmp_path: Path) -> None:
+    """Whether the bot has seen the link before is an implementation detail."""
+    from services.delivery import replay_caption
+
+    row = cast(asyncpg.Record, {"original_url": "https://youtu.be/abc"})
+    caption = replay_caption(row, "fa")
+
+    assert caption.splitlines()[0] == t("work.cache_caption", "fa")
+    assert "https://youtu.be/abc" in caption
+    # A row that cannot answer (an older record, a stub) must not print an empty link.
+    assert "🔗" not in replay_caption(cast(asyncpg.Record, {}), "fa")

@@ -261,10 +261,24 @@ service running, they work.
 **It ships with the stack, so there is nothing to configure.** `docker-compose.yml` runs
 `ghcr.io/imputnet/cobalt:10` as a `cobalt` service (`init: true`, `restart: unless-stopped`, port
 published on `127.0.0.1:9000` only — it is unauthenticated), and `COBALT_API_URL` defaults to
-`http://cobalt:9000`. No public instance, no signup: `api.cobalt.tools` is not a usable default any
-more (its v7 endpoint was retired in Nov 2024 and its v10 API refuses anonymous callers with
-`error.api.auth.jwt.missing`).
+`http://cobalt:9000`.
 
+**One instance is not a net on a flagged VPS**, so the fallback is a *list*, tried in order:
+`COBALT_API_URL` (fast, local, private) → `COBALT_FALLBACK_URLS` (your own mirrors, in the order
+written) → `api.cobalt.tools`, appended last by default. The public one is expected to refuse
+anonymous callers (its v7 endpoint was retired in Nov 2024 and its v10 API answers
+`error.api.auth.jwt.missing`), which is exactly why it is last: it costs one failed request per
+blocked link, and nothing reaches it while an instance you control can still answer. Set
+`COBALT_TRY_PUBLIC_INSTANCES=0` to keep every link inside your network, and blank `COBALT_API_URL`
+to switch the fallback off entirely (it will not silently reach for the public instance instead).
+Public mirrors come and go — the live list is <https://instances.cobalt.best>, and none are
+hard-coded here because a third-party address in a production path is a default that rots.
+
+A node that fails as a *node* (unreachable, 5xx, auth, rate limit) is quarantined **on its own**
+for ten minutes and the next address is asked, while the node that answered last is asked first
+next time — so an embedded instance with no YouTube session costs one failed attempt once, not one
+per blocked link. A node that answered *about the link* ("this video is private", "no session for
+YouTube") ends the attempt: no other instance will disagree about a deleted video.
 **Be clear about what "embedded" means on a VPS:** the instance shares the host's address, so it
 is *not* another address for an IP-level block. It fixes a broken extractor, a site that refuses
 yt-dlp, and YouTube's per-client bot check once it has a session — but a flagged IP is still fixed
@@ -402,6 +416,14 @@ The bot speaks English and Persian, and the choice belongs to the *user*, not to
 
 The installer (`install.sh`) asks for the default language while it writes `.env`, so a fresh VPS
 needs no second step.
+
+**The panel is listed, not hidden.** `/admin`, `/doctor`, `/blocks`, `/trend`, `/refresh`,
+`/fixlogin`, `/broadcast` and `/status` work for every id in `ADMIN_IDS`, and the bot publishes them
+to Telegram per admin *chat* when it starts — so typing `/` shows them. Admins also get a
+«Admin panel» button in the main menu; normal users get neither the button nor the commands in
+their menu. If those commands do not appear after a restart, that admin has never opened a chat
+with the bot (Telegram only stores a command list for a chat it can see) — the commands still work
+when typed.
 
 ### Announcing something, and the support button
 

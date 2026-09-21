@@ -212,6 +212,68 @@ async def test_a_forwarded_panel_button_is_still_admin_only(stats: dict[str, Any
     assert bot.screens == [], "nothing is rendered"
 
 
+async def test_the_menu_button_opens_the_panel_for_an_admin(stats: dict[str, Any]) -> None:
+    """The complaint this fixes: the panel was reachable only by remembering that
+    `/admin` exists, which reads as "the panel is missing"."""
+    bot = RecordingBot()
+
+    await admin_module.on_menu_admin(_callback(bot, "menu:admin"), object(), _queue(), None)
+
+    assert bot.screens and "120" in bot.screens[0]
+    assert _buttons(bot.keyboards[0])[0][1] == "admin:stats"
+
+
+async def test_the_menu_button_is_admin_only_too(stats: dict[str, Any]) -> None:
+    bot = RecordingBot()
+
+    await admin_module.on_menu_admin(
+        _callback(bot, "menu:admin", STRANGER_ID), object(), _queue(), None
+    )
+
+    assert bot.answers and bot.answers[0].show_alert is True
+    assert bot.screens == [], "the numbers never reach a non-admin"
+
+
+class CommandBot:
+    """Records the command lists the bot publishes, per scope."""
+
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self.published: list[tuple[list[Any], Any]] = []
+        self._error = error
+
+    async def set_my_commands(self, commands: list[Any], scope: Any = None) -> bool:
+        if self._error is not None:
+            raise self._error
+        self.published.append((commands, scope))
+        return True
+
+
+async def test_the_command_menu_lists_the_panel_for_admins_only() -> None:
+    """Telegram draws a different "/" list per chat scope, which is how an admin
+    learns the commands exist without a normal user seeing them advertised."""
+    bot = CommandBot()
+
+    await admin_module.publish_commands(cast(Bot, bot), "en")
+
+    assert len(bot.published) == 2, "one global list, one for the admin's chat"
+    global_names = {command.command for command in bot.published[0][0]}
+    admin_names = {command.command for command in bot.published[1][0]}
+    assert "admin" not in global_names
+    assert "start" in global_names, "a user still gets the user commands"
+    assert {"admin", "doctor", "blocks", "broadcast"} <= admin_names
+    scope = bot.published[1][1]
+    assert scope is not None and scope.chat_id == ADMIN_ID
+
+
+async def test_a_refused_command_menu_does_not_stop_startup() -> None:
+    """A command menu is a courtesy; a deployment must not fail to boot over it."""
+    bot = CommandBot(error=RuntimeError("Telegram said no"))
+
+    await admin_module.publish_commands(cast(Bot, bot), "fa")
+
+    assert bot.published == [], "nothing was stored, and nothing was raised"
+
+
 # ---------------------------------------------------------------------------
 # What it says
 # ---------------------------------------------------------------------------

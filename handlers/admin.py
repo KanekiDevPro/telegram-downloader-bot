@@ -25,7 +25,13 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    Message,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from core import database
@@ -54,6 +60,66 @@ router = Router(name="admin")
 
 #: Telegram hard-limits a message to 4096 characters; leave room for the wrappers.
 CHUNK_LIMIT = 3800
+
+#: The command menu Telegram draws for *everyone*, as i18n keys (the client shows
+#: this list when someone types "/").
+USER_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("start", "cmd.start"),
+    ("download", "cmd.download"),
+    ("profile", "cmd.profile"),
+    ("premium", "cmd.premium"),
+    ("language", "cmd.language"),
+    ("help", "cmd.help"),
+)
+
+#: ...and the extra ones each admin chat gets. Registered per chat
+#: (``BotCommandScopeChat``) instead of globally, because a normal user's "/" menu
+#: should not advertise a panel they cannot open — and an admin should not have to
+#: remember that these commands exist at all, which is exactly how `/admin` was
+#: reported as "missing" while it was working the whole time.
+ADMIN_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("admin", "cmd.admin"),
+    ("doctor", "cmd.doctor"),
+    ("blocks", "cmd.blocks"),
+    ("trend", "cmd.trend"),
+    ("refresh", "cmd.refresh"),
+    ("fixlogin", "cmd.fixlogin"),
+    ("broadcast", "cmd.broadcast"),
+    ("status", "cmd.status"),
+)
+
+
+async def publish_commands(bot: Bot, lang: str = DEFAULT_LANG) -> None:
+    """Tell Telegram which commands exist, per scope. Never raises.
+
+    Called once at startup: a command menu is a *courtesy* for the human typing "/",
+    and a deployment must not fail to boot because Telegram refused to store it. A
+    failed per-admin scope is logged loudly — that one leaves an operator with a
+    working but invisible panel.
+    """
+    settings = get_settings()
+    try:
+        await bot.set_my_commands(
+            [BotCommand(command=name, description=t(key, lang)) for name, key in USER_COMMANDS]
+        )
+    except Exception:  # noqa: BLE001 — a nice-to-have, never a startup gate
+        logger.warning("could not publish the user command list", exc_info=True)
+    for admin_id in sorted(settings.admin_ids):
+        try:
+            await bot.set_my_commands(
+                [
+                    *(BotCommand(command=name, description=t(key, lang)) for name, key in USER_COMMANDS),
+                    *(BotCommand(command=name, description=t(key, lang)) for name, key in ADMIN_COMMANDS),
+                ],
+                scope=BotCommandScopeChat(chat_id=admin_id),
+            )
+        except Exception:  # noqa: BLE001 — an admin who never opened a chat with the bot
+            logger.warning(
+                "could not publish the admin command list for %s — the commands still work, "
+                "they are just not listed in that chat's command menu",
+                admin_id,
+                exc_info=True,
+            )
 
 
 class AdminStates(StatesGroup):
@@ -514,6 +580,34 @@ async def cmd_admin(
         return
     text, keyboard = await panel_screen("home", pool, queue, cobalt, lang)
     await message.answer(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "menu:admin")
+async def on_menu_admin(
+    cb: CallbackQuery,
+    pool: asyncpg.Pool,
+    queue: TaskQueue,
+    cobalt: CobaltService | None = None,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """The panel, one tap from the main menu — for admins only.
+
+    The admin check is the same one `/admin` makes, and it runs here too: the menu
+    button is drawn from the *stored* admin list, but a message can be forwarded and
+    a keyboard travels with it.
+    """
+    if not get_settings().is_admin(cb.from_user.id):
+        await cb.answer(t("admin.only", lang), show_alert=True)
+        return
+    message = cb.message if isinstance(cb.message, Message) else None
+    text, keyboard = await panel_screen("home", pool, queue, cobalt, lang)
+    await cb.answer()
+    if message is None:
+        return
+    try:
+        await message.edit_text(text, reply_markup=keyboard)
+    except TelegramBadRequest:
+        logger.debug("panel edit skipped", exc_info=True)
 
 
 @router.callback_query(F.data.startswith("admin:"))

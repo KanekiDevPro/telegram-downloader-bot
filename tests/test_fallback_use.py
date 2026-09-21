@@ -73,6 +73,10 @@ class FakeCobalt:
         self.dialect: str | None = None
         self.base_url = URL
 
+    def node_states(self) -> tuple[object, ...]:
+        """A single-instance pool: the tests here are about the recorded *use*."""
+        return ()
+
 
 def _cobalt(**kwargs: Any) -> Any:
     """Typed as ``Any`` on purpose: the fake stands in for a real client here."""

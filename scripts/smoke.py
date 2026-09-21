@@ -344,14 +344,19 @@ async def main() -> int:
     # compose service name does not resolve and the instance is on its published
     # loopback port.
     cobalt = CobaltService(
-        probe_url(settings.cobalt_api_url),
+        [probe_url(url) for url in settings.cobalt_endpoints],
         api_key=settings.cobalt_api_key,
         timeout_s=settings.cobalt_timeout_s,
     )
     ok &= verdict(
         "the fallback engine is configured",
         cobalt.enabled == settings.cobalt_enabled,
-        f"{cobalt.base_url or '(off)'}" + (" +key" if settings.cobalt_api_key else ""),
+        f"{cobalt.pool_label() or '(off)'}" + (" +key" if settings.cobalt_api_key else ""),
+    )
+    ok &= verdict(
+        "a host YouTube has flagged has more than one address to fall back to",
+        len(cobalt.base_urls) >= 2,
+        " | ".join(cobalt.base_urls),
     )
     blocked = ExtractionError("EXTRACTOR_BLOCKED", "blocked")
     geo = ExtractionError("GEO_RESTRICTED", "geo")

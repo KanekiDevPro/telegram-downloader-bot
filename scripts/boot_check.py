@@ -529,8 +529,13 @@ async def main() -> int:
             # The address the bot itself would use — on the host that is the published
             # loopback port, not the compose name, and saying so here is what stops
             # "unreachable" from looking like a broken deployment.
-            f"{(cobalt.base_url if cobalt is not None else settings.cobalt_api_url) or '(off)'}"
+            f"{(cobalt.pool_label() if cobalt is not None else settings.cobalt_api_url) or '(off)'}"
             + (" +api key" if settings.cobalt_api_key else ""),
+        )
+        check(
+            "a flagged host still has a second address to try",
+            len(settings.cobalt_endpoints) >= 2,
+            " | ".join(settings.cobalt_endpoints) or "(no pool)",
         )
         if cobalt is not None and cobalt.enabled:
             check(

@@ -73,7 +73,7 @@ async def main(argv: list[str] | None = None) -> int:
     # a host process, where a compose service name does not resolve — and a report
     # that says "unreachable" about a healthy instance is worse than no report.
     cobalt = CobaltService(
-        probe_url(settings.cobalt_api_url),
+        [probe_url(url) for url in settings.cobalt_endpoints],
         api_key=settings.cobalt_api_key,
         timeout_s=settings.cobalt_timeout_s,
         download_timeout_s=settings.cobalt_download_timeout_s,

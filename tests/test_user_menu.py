@@ -220,7 +220,12 @@ def test_the_menu_speaks_the_language_it_is_drawn_in() -> None:
 
 def test_the_menu_hides_the_vip_button_from_an_admin() -> None:
     """VIP is permanent for an admin, so the button could only lead to a screen
-    explaining that they cannot buy it."""
+    explaining that they cannot buy it.
+
+    The admin gets the panel there instead: `/admin` is a working command, but a
+    command nobody can see is indistinguishable from a missing feature — which is
+    exactly how the panel was reported as "not accessible" while nothing was broken.
+    """
     markup = user_module._main_menu(FA, admin=True)
 
     assert "menu:premium" not in dict(_buttons(markup)).values()
@@ -228,7 +233,15 @@ def test_the_menu_hides_the_vip_button_from_an_admin() -> None:
         "👤 پروفایل من": "menu:profile",
         "❓ راهنما": "menu:help",
         "🌐 زبان": "menu:language",
+        "🛠 پنل مدیریت": "menu:admin",
     }
+
+
+def test_only_an_admin_is_offered_the_panel() -> None:
+    assert "menu:admin" not in dict(_buttons(user_module._main_menu(EN))).values()
+    assert "menu:admin" not in dict(
+        _buttons(user_module._main_menu(EN, support=True))
+    ).values()
 
 
 def test_the_support_button_appears_only_when_somebody_configured_it() -> None:
@@ -777,6 +790,75 @@ async def test_a_link_is_acknowledged_before_anything_else(monkeypatch: pytest.M
     assert bot.texts[0] == t("intake.analyse", FA), "said first, before the probe"
     assert t("intake.choose_quality", FA) in bot.edits[-1], "and the same message becomes the question"
     assert ("🎬 بهترین کیفیت موجود", "fmt:video:best") in _buttons(bot.keyboards[-1])
+
+
+async def test_a_file_link_is_never_handed_to_the_extractor_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CDN photo is not a site yt-dlp has a handler for, and it must not need one.
+
+    The probe answers "does the extractor catalogue know this site?" — asking it
+    about ``pbs.twimg.com/media/…?format=jpg`` is how a perfectly good photo link
+    ends in "this site is not supported" before anything was attempted.
+    """
+    asked: list[str] = []
+
+    async def probe(url: str) -> bool:
+        asked.append(url)
+        return False  # what the real probe says about a CDN file URL
+
+    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(user_module, "_probe_supported", probe)
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
+    bot = RecordingBot()
+    url = "https://pbs.twimg.com/media/GAbc123?format=jpg&name=large"
+    queue = _fake_queue(depth=1)
+
+    await user_module._queue_url_flow(
+        _message(url, bot),
+        _fresh_state(),
+        _user(),
+        url,
+        FA,
+        bot=cast(Bot, bot),
+        pool=object(),
+        queue=queue,
+    )
+
+    assert asked == [], "the router already knew, so nothing was asked"
+    assert t("intake.photo_auto", FA) in bot.edits
+    assert [task.media_format for task in queue.tasks] == ["video"]
+    assert bot.keyboards == [], "and no format menu was drawn for it"
+
+
+async def test_a_page_link_is_still_put_to_the_extractor_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The skip is for links that are *files*; a page still gets the cheap check."""
+    asked: list[str] = []
+
+    async def probe(url: str) -> bool:
+        asked.append(url)
+        return False
+
+    monkeypatch.setattr(user_module, "_probe_supported", probe)
+    bot = RecordingBot()
+
+    await user_module._queue_url_flow(
+        _message("https://example.com/x", bot),
+        _fresh_state(),
+        _user(),
+        "https://example.com/x",
+        FA,
+        bot=cast(Bot, bot),
+        pool=object(),
+        queue=_fake_queue(),
+    )
+
+    assert asked == ["https://example.com/x"]
+    assert "پشتیبانی نمی‌شود" in bot.edits[-1]
 
 
 async def test_an_unsupported_link_answers_in_the_same_message(

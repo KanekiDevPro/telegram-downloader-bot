@@ -141,3 +141,78 @@ def test_the_cache_key_and_the_menu_agree_on_what_a_tier_is() -> None:
 
     for choice in content.routing_for("https://youtu.be/abc").choices:
         assert normalize_quality(choice.quality, choice.media_format) == choice.quality
+
+
+# ---------------------------------------------------------------------------
+# A link that *is* a file, and the menu it must not get
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "kind"),
+    (
+        # The CDN URLs X's own share button produces: no suffix in the path at all.
+        ("https://pbs.twimg.com/media/GAbc123?format=jpg&name=large", "image"),
+        ("https://pbs.twimg.com/media/GAbc123?format=png&name=small", "image"),
+        ("https://pbs.twimg.com/media/GAbc123?format=webp", "image"),
+        # A CDN host is media whatever the path says.
+        ("https://i.redd.it/abc.png", "image"),
+        ("https://preview.redd.it/abc.jpeg?width=640&crop=smart", "image"),
+        ("https://external-preview.redd.it/abc.jpg?auto=webp", "image"),
+        ("https://cdn.discordapp.com/attachments/1/2/3.png?ex=abc", "image"),
+        ("https://media.tenor.com/abc.gif", "image"),
+        ("https://i.ibb.co/abc/photo.webp", "image"),
+        # The extension is the evidence, on whatever host.
+        ("https://files.example/picture.avif", "image"),
+        ("https://files.example/picture.JPG", "image"),
+        ("https://files.example/clip.mp4", "video"),
+        ("https://files.example/album/track.flac", "audio"),
+        # Instagram and X shapes people actually copy.
+        ("https://www.instagram.com/stories/user/12345/", "gallery"),
+        ("https://x.com/user/status/12345/photo", "image"),
+        ("https://x.com/user/status/12345/photo/2", "image"),
+        ("https://twitter.com/user/status/12345/photo/1", "image"),
+        ("https://www.reddit.com/media?url=https%3A%2F%2Fi.redd.it%2Fa.jpg", "image"),
+        # Deliberately *not* settled: a share link can be a reel or a post, and a
+        # page URL that merely mentions a format is still a page.
+        ("https://www.instagram.com/share/BAabc/", "media"),
+        ("https://example.com/api/thing?format=json", "media"),
+        ("https://files.example/post.jpg.html", "media"),
+        # A page that is a set of images, on a host with no opinion of its own.
+        ("https://example.com/photos/set-1", "gallery"),
+        # ...and a host that *does* have an opinion keeps it: a Bandcamp album is
+        # music, so the generic `/album/` rule must not turn it into a gallery.
+        ("https://artist.bandcamp.com/album/some-record", "audio"),
+    ),
+)
+def test_a_file_link_is_read_before_every_host_and_path_rule(url: str, kind: str) -> None:
+    assert content.classify(url) == kind
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://pbs.twimg.com/media/GAbc123?format=jpg&name=large",
+        "https://i.redd.it/abc.png",
+        "https://cdn.discordapp.com/attachments/1/2/3.png",
+        "https://www.instagram.com/p/abc/",
+        "https://www.instagram.com/stories/user/12345/",
+        "https://x.com/user/status/12345/photo",
+        "https://www.tiktok.com/@user/photo/123",
+        "https://www.pinterest.com/pin/12345/",
+        "https://www.reddit.com/media?url=https%3A%2F%2Fi.redd.it%2Fa.jpg",
+    ),
+)
+def test_a_pure_image_link_is_never_asked_about(url: str) -> None:
+    """The bug this whole section exists for: a photo post that got a format menu.
+
+    A photo post has exactly one possible answer, so the keyboard would be a single
+    button that cannot be wrong (and, before ``Routing.solo``, an audio option that
+    cannot work at all).
+    """
+    routing = content.routing_for(url)
+
+    assert routing.solo is not None
+    assert [choice.media_format for choice in routing.choices] == ["video"], (
+        "the only request is \"send its media\" — no audio tiers"
+    )

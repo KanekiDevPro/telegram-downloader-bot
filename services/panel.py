@@ -22,7 +22,7 @@ from core import database
 from core.config import Settings, probe_url
 from core.i18n import DEFAULT_LANG, t
 from core.utils import today_local
-from services.cobalt import CobaltService
+from services.cobalt import CobaltNodeState, CobaltService
 from services.doctor import fallback_health, http_reachable
 from services.queue import TaskQueue
 
@@ -186,7 +186,7 @@ async def _cobalt_line(
     except Exception:
         logger.exception("could not probe the fallback engine")
         return t("panel.cobalt.error", lang)
-    return t(
+    line = t(
         "panel.cobalt_line",
         lang,
         icon=health.icon,
@@ -195,6 +195,37 @@ async def _cobalt_line(
         dialect=health.dialect or "—",
         where=t("panel.embedded", lang) if health.embedded else t("panel.remote", lang),
     )
+    return line + _pool_lines(health.nodes, lang)
+
+
+def _pool_lines(nodes: tuple[CobaltNodeState, ...], lang: str) -> str:
+    """The pool, when there is one — which node is in use and which is set aside.
+
+    The line above names the *primary* instance, and with a pool that is often not
+    the one serving blocked links: a second node quietly taking the traffic is the
+    news an operator needs (it usually means the embedded instance cannot serve
+    that service, most often YouTube). Rendered from the reader's language. A lone
+    instance adds nothing here — its state is the line above.
+    """
+    if len(nodes) < 2:
+        return ""
+    parts: list[str] = []
+    for node in nodes:
+        state = (
+            "panel.node_quarantined"
+            if node.quarantined
+            else "panel.node_active" if node.active else "panel.node_standby"
+        )
+        parts.append(
+            t(
+                "panel.cobalt_node",
+                lang,
+                url=node.url,
+                dialect=node.dialect or "—",
+                state=t(state, lang),
+            )
+        )
+    return "\n" + t("panel.cobalt_pool", lang, count=len(nodes), nodes=" | ".join(parts))
 
 
 async def _helper_line(

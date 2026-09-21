@@ -33,6 +33,7 @@ from aiogram.types import (
 )
 
 from core.i18n import DEFAULT_LANG, t
+from core.utils import escape_html
 
 #: What one media group may hold — aiogram's own union, spelled out so a list of
 #: ``InputMediaPhoto`` can be handed over without a cast (lists are invariant).
@@ -45,6 +46,33 @@ logger = logging.getLogger(__name__)
 #: caller that has nothing to say about language at all.
 def cached_caption(lang: str = DEFAULT_LANG) -> str:
     return t("work.cache_caption", lang)
+
+
+def source_line(url: str, lang: str = DEFAULT_LANG) -> str:
+    """The ``🔗 link`` line, or an empty string when there is no link to name.
+
+    Part of every caption on purpose: a file that arrives in a chat is looked at days
+    later, out of context, and “which video was this?” has exactly one cheap answer.
+    It is the link *the user sent* — for a Spotify track that is the Spotify URL, not
+    the YouTube video the song was fetched from.
+    """
+    return t("work.caption_source", lang, url=escape_html(url)) if url else ""
+
+
+def replay_caption(record: asyncpg.Record, lang: str = DEFAULT_LANG) -> str:
+    """The caption a replayed cache hit gets: the replay line, plus its source link.
+
+    A cached file is the same file, so it gets the same caption — including the link,
+    which the cached row still holds (``original_url``). Whether the bot has seen a
+    link before is an implementation detail, and it must not be visible in the chat.
+    """
+    base = cached_caption(lang)
+    try:
+        url = str(record["original_url"] or "")
+    except (KeyError, IndexError, TypeError):  # a stub row without the column
+        return base
+    line = source_line(url, lang)
+    return f"{base}\n{line}" if line else base
 
 #: Telegram's own ceiling on one media group; a larger album is sent in batches.
 MEDIA_GROUP_MAX = 10

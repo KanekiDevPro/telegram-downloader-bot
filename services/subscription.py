@@ -26,8 +26,8 @@ from core.config import get_settings
 UNLIMITED_DAILY_LIMIT = 10**7
 
 
-def is_admin_id(telegram_id: int | None) -> bool:
-    """Whether this Telegram id is in ``ADMIN_IDS``."""
+def is_admin_id(telegram_id: int | str | None) -> bool:
+    """Whether this Telegram id is in ``ADMIN_IDS`` (see ``Settings.is_admin``)."""
     return get_settings().is_admin(telegram_id)
 
 

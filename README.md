@@ -459,10 +459,33 @@ bot:    COBALT_API_URL=http://cobalt:9000   # the default in core/config.py
 **What it does fix:** an extractor that broke, a site that refuses yt-dlp's requests, a public
 instance that died, and YouTube's *per-client* bot check once the instance has a session.
 
-**What it cannot fix — and this one matters:** the embedded instance shares the host's network
-address, so it is **not another address** for an IP-level block. A flagged IP is still fixed the
-same way it always was (a *residential* `YTDLP_PROXY`), and if you want the *fallback* to leave
-through a different path, give the instance its own proxy — it does not inherit `YTDLP_PROXY`:
+**What it cannot fix — and this one is why there is a pool:** the embedded instance shares the
+host's network address, so on its own it is **not another address** for an IP-level block. The
+fallback is therefore a *list* of instances, tried in order:
+
+```
+COBALT_API_URL            the instance above — fast, local, private, and asked first
+COBALT_FALLBACK_URLS      your own mirrors, in the order written (comma/space separated)
+api.cobalt.tools          the official public instance, appended last by default
+```
+
+The public one is a deliberate last resort: it may demand a key, it rate-limits anonymous callers,
+and every link handed to it leaves your network — `COBALT_TRY_PUBLIC_INSTANCES=0` keeps the whole
+fallback internal, and blanking `COBALT_API_URL` switches it off entirely (it does not silently
+reach for the public instance instead). More public mirrors are listed at
+<https://instances.cobalt.best>; none are hard-coded here, because a third-party address baked into
+a production path is the kind of default that rots.
+
+The ordering rules are the feature: a node that fails as a *node* (unreachable, 5xx, auth, rate
+limit) is quarantined **on its own** for ten minutes and the next address is asked, while the node
+that answered last is asked first next time — so an embedded instance with no YouTube session costs
+one failed request once, not one per blocked link. A node that answered *about the link* ("this
+video is private", "no session for YouTube") ends the attempt instead: no other instance will
+disagree about a deleted video, and rotating on it would triple the work and bury the real cause.
+
+A flagged IP is still fixed the same way it always was (a *residential* `YTDLP_PROXY`), and if you
+want the *fallback* to leave through a different path, give the instance its own proxy — it does
+not inherit `YTDLP_PROXY`:
 
 ```bash
 COBALT_HTTP_PROXY=socks5h://user:pass@host:1080   # .env → docker compose up -d cobalt
@@ -736,7 +759,9 @@ in-process queue, losing queued work on restart).
 | `YTDLP_POT_PROVIDER_URL` | `http://pot-provider:4416` | PO-token provider base URL (the service compose runs); empty = off |
 | `YOUTUBE_SESSION_SERVER` | `http://yt-session-generator:8080` | YouTube session server for the fallback engine; empty = off |
 | `YTDLP_PROXY` | — | optional proxy for yt-dlp, e.g. `socks5://user:pass@host:1080`; worth it only with a login in the jar and a *residential* exit |
-| `COBALT_API_URL` | `http://cobalt:9000` (the instance compose runs) | fallback extractor, used only when yt-dlp comes back *blocked*; empty = off |
+| `COBALT_API_URL` | `http://cobalt:9000` (the instance compose runs) | primary fallback instance, used only when yt-dlp comes back *blocked*; empty = off |
+| `COBALT_FALLBACK_URLS` | — | extra instances to rotate through, in order (your own mirrors; comma/space separated) |
+| `COBALT_TRY_PUBLIC_INSTANCES` | `1` | append `api.cobalt.tools` as the *last* resort; `0` keeps every link inside your network |
 | `COBALT_API_KEY` | — | sent as `Authorization: Api-Key …` (self-hosted instances usually need one) |
 | `COBALT_TIMEOUT_S` / `COBALT_DOWNLOAD_TIMEOUT_S` | `30` / `1800` | resolve (one round trip) and transfer budgets |
 | `COBALT_PROXY` | — | optional proxy for the fallback only — not inherited from `YTDLP_PROXY` |
@@ -808,11 +833,13 @@ process that never saw the update. Admin notices are resolved per recipient for 
 `services/content.py`, which reads the URL's shape before anything is probed:
 
 ```
-https://youtu.be/…            → 🎬 best available | 1080p | 720p | 480p
-https://soundcloud.com/…      → 🎧 M4A (untouched stream) | 🎵 MP3 192k
-https://open.spotify.com/…    → the same audio menu (the link is rewritten to YouTube)
-https://www.instagram.com/p/… → downloaded straight away (one possible answer = no question)
-https://x.com/u/status/…      → 🖼 the media of this post | 🎧 M4A | 🎵 MP3
+https://youtu.be/…                         → 🎬 best available | 1080p | 720p | 480p
+https://soundcloud.com/…                   → 🎧 M4A (untouched stream) | 🎵 MP3 192k
+https://open.spotify.com/…                 → the same audio menu (the link is rewritten to YouTube)
+https://www.instagram.com/p/…              → downloaded straight away (one possible answer = no question)
+https://x.com/u/status/…                   → 🖼 the media of this post | 🎧 M4A | 🎵 MP3
+https://i.imgur.com/abcd.jpg               → downloaded straight away (it *is* a file)
+https://pbs.twimg.com/media/X?format=jpg   → downloaded straight away (X's share button)
 ```
 
 A link with exactly **one** possible answer is never asked about: a photo post has no tier to pick
@@ -820,7 +847,37 @@ and no audio to extract, so a one-button menu would be a question that cannot be
 and every tap is a round trip. Those links are queued immediately («🖼 پست عکسی است — همین حالا
 رسانهاش ارسال میشود»), and `services/delivery.py` still decides how each file is sent. A gallery
 link's menu therefore offers *nothing* but that, which is the strict version of "do not show what the
-link cannot produce".
+link cannot produce". The path shapes are the ones people actually copy — `/photo` with and without
+the index (`…/status/123/photo` and `…/status/123/photo/1`), Instagram's `/p/` and `/stories/`,
+Reddit's `/media?url=…` passthrough — plus three pieces of evidence that beat any path rule:
+
+- **a file extension** (`.jpg`, `.webp`, `.png`, `.avif`, `.gif`, `.mp4`, `.flac`, …), including the
+  uppercase and multi-dot cases: `picture.JPG` is a photo, `post.jpg.html` is a page;
+- **a CDN host**, where everything served is media — `pbs.twimg.com`, `i.redd.it`,
+  `preview.redd.it`, `cdninstagram.com`, `fbcdn.net`, `cdn.discordapp.com`, `imgur.com`,
+  `pinimg.com`, `media.tenor.com`, `i.ibb.co`, `upload.wikimedia.org`, …;
+- and, for the CDNs that ship the format in the query instead of the path (`…?format=jpg&name=large`
+  is what X's share sheet produces), exactly the `format=` parameter — not `fmt`/`ext`, which pages
+  use for unrelated things.
+
+Those links are also exempt from the extractor-catalogue probe. That probe answers "does yt-dlp have
+
+**The admin panel is one tap away, and it is listed.** `/admin`, `/doctor`, `/blocks`, `/trend`,
+`/refresh`, `/fixlogin`, `/broadcast` and `/status` answer for ids in `ADMIN_IDS`, and that used
+to be the *only* way to reach them: they were never published to Telegram, so typing `/` showed a
+user's commands and nothing else — which reads as "the panel is missing" while nothing was
+broken. The bot now publishes the user list globally and a longer list per admin *chat*
+(`BotCommandScopeChat`), in the deployment's `DEFAULT_LANGUAGE`, and draws a «🛠 Admin
+panel» button in the main menu for admins only. A normal user's `/` menu does not advertise a
+panel they cannot open, and the button is not drawn for them either — both read the same stored
+`ADMIN_IDS`.
+a *site* handler for this?" — a CDN photo file has none and does not need one (it is fetched
+directly, and the fallback covers the rest), so asking it is how a perfectly good photo link used to
+end in «این لینک پشتیبانی نمیشود» before anything was even attempted.
+
+What is deliberately **not** settled is a plain post URL (`x.com/u/status/123`, `reddit.com/r/…`):
+that can be a clip, a photo or a gallery, and the URL says nothing about which. It keeps its honest
+three-button menu — the alternative is a network round trip in front of every video link.
 
 A tap that was never offered (an older menu, a forwarded message, a crafted callback) is refused
 with an answer, and the question is asked again — nothing is queued that the user was not shown.

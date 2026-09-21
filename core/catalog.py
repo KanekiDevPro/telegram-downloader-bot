@@ -58,12 +58,31 @@ MESSAGES: Final[Catalog] = {
             "👇 از دکمه‌های زیر شروع کن:"
         ),
     },
+    # The command menu Telegram draws when someone types "/". Descriptions are
+    # Telegram's own 256-character field, so they stay short and imperative.
+    "cmd.start": {"en": "Start the bot", "fa": "شروع ربات"},
+    "cmd.download": {"en": "Download a link", "fa": "دانلود یک لینک"},
+    "cmd.profile": {"en": "My quota and status", "fa": "سهمیه و وضعیت من"},
+    "cmd.premium": {"en": "Upgrade to VIP", "fa": "ارتقا به ویژه"},
+    "cmd.language": {"en": "Change language", "fa": "تغییر زبان"},
+    "cmd.help": {"en": "Help and supported sites", "fa": "راهنما و سایت‌های پشتیبانی‌شده"},
+    "cmd.admin": {"en": "Admin panel", "fa": "پنل مدیریت"},
+    "cmd.doctor": {"en": "Diagnose YouTube", "fa": "عیب‌یابی یوتیوب"},
+    "cmd.blocks": {"en": "Block digest", "fa": "گزارش بلاک‌ها"},
+    "cmd.trend": {"en": "Failures per day", "fa": "روند خطاها"},
+    "cmd.refresh": {"en": "Re-export the cookie jar", "fa": "ساخت دوبارهٔ کوکی"},
+    "cmd.fixlogin": {"en": "Fix the YouTube login", "fa": "رفع ورود یوتیوب"},
+    "cmd.broadcast": {"en": "Message all users", "fa": "پیام به همهٔ کاربران"},
+    "cmd.status": {"en": "Download status", "fa": "وضعیت دانلود"},
     "menu.profile": {"en": "👤 My profile", "fa": "👤 پروفایل من"},
     "menu.premium": {"en": "💎 Go VIP", "fa": "💎 ارتقا به ویژه (VIP)"},
     "menu.help": {"en": "❓ Help", "fa": "❓ راهنما"},
     "menu.language": {"en": "🌐 Language", "fa": "🌐 زبان"},
     # The one menu button an operator fills in: its target lives in the database.
     "menu.support": {"en": "💬 Support", "fa": "💬 پشتیبانی"},
+    # Drawn only for ids in ADMIN_IDS: the panel is not a hidden feature, it is just
+    # not a user's business.
+    "menu.admin": {"en": "🛠 Admin panel", "fa": "🛠 پنل مدیریت"},
     "menu.back": {"en": "🔙 Back", "fa": "🔙 بازگشت"},
     "support.text": {
         "en": "💬 <b>Support</b>\n\nQuestions, a payment that needs a look, or a "
@@ -373,6 +392,9 @@ MESSAGES: Final[Catalog] = {
     "work.caption_size": {"en": "📦 {size}", "fa": "📦 {size}"},
     "work.caption_duration": {"en": "⏱ {duration}", "fa": "⏱ {duration}"},
     "work.caption_quality": {"en": "🎬 {resolution}", "fa": "🎬 کیفیت {resolution}"},
+    # The line an operator asks for and a user never notices they wanted: where this
+    # file came from. Same in both languages — it is a URL, and Telegram linkifies it.
+    "work.caption_source": {"en": "🔗 {url}", "fa": "🔗 {url}"},
     "work.login_block": {
         "en": (
             "🔒 This link can only be downloaded with a signed-in account, and the bot's "
@@ -760,6 +782,17 @@ MESSAGES: Final[Catalog] = {
         "en": "{icon} Fallback extractor ({where}, {url}, {dialect}): {state}",
         "fa": "{icon} موتور جایگزین ({where}، {url}، {dialect}): {state}",
     },
+    "panel.cobalt_pool": {
+        "en": "     🔁 {count} instances, in order: {nodes}",
+        "fa": "     🔁 {count} نمونه، به ترتیب: {nodes}",
+    },
+    "panel.cobalt_node": {
+        "en": "{url} ({dialect} • {state})",
+        "fa": "{url} ({dialect} • {state})",
+    },
+    "panel.node_active": {"en": "in use", "fa": "در حال استفاده"},
+    "panel.node_quarantined": {"en": "set aside", "fa": "کنار گذاشته"},
+    "panel.node_standby": {"en": "standby", "fa": "ذخیره"},
     "panel.embedded": {"en": "embedded", "fa": "داخلی"},
     "panel.remote": {"en": "remote", "fa": "بیرونی"},
     "panel.cobalt.error": {
