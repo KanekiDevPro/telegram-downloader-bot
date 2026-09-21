@@ -25,8 +25,8 @@ from services.doctor import (
     SessionServer,
     _host_side_hint,
     _provider_check,
+    _seconds_since,
     _session_server_check,
-    _token_age,
     probe_pot_provider,
     probe_session_server,
 )
@@ -290,12 +290,12 @@ def test_an_absent_session_server_is_off_not_a_failure(
 
 def test_milliseconds_are_not_mistaken_for_centuries() -> None:
     """The reference generator stamps seconds; a server that stamps ms must still read right."""
-    assert _token_age(int((time.time() - 60) * 1000)) is not None
-    age = _token_age(int((time.time() - 60) * 1000))
+    assert _seconds_since(int((time.time() - 60) * 1000)) is not None
+    age = _seconds_since(int((time.time() - 60) * 1000))
     assert age is not None and 50 < age < 70
-    assert _token_age("nonsense") is None
-    assert _token_age(None) is None
-    assert _token_age(int(time.time() + 500)) is None  # a future stamp is not an age
+    assert _seconds_since("nonsense") is None
+    assert _seconds_since(None) is None
+    assert _seconds_since(int(time.time() + 500)) is None  # a future stamp is not an age
 
 
 # ---------------------------------------------------------------------------

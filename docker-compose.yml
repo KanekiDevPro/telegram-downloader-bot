@@ -62,6 +62,16 @@ services:
   # else. The image ships its own HEALTHCHECK (the WARP client's own status), which is
   # what `docker compose ps` reports; nothing here depends on it being *healthy*,
   # only on it being started, so a slow WARP registration cannot hold up the bot.
+  #
+  # `warp` mode is the client's default, and in that mode it is a *full tunnel*: the
+  # whole namespace is routed, which is why the image's own healthcheck can run a
+  # plain `curl` and expect `warp=on`, and why a container that shares this namespace
+  # (the session generator below) is on the tunnel with no configuration at all. The
+  # client can also be put in WARP's **proxy** mode (`warp-cli mode proxy`, then only
+  # traffic through 1080 is tunnelled) — the one case where sharing the namespace is
+  # *not* enough, and the reason `deploy/session_proxy/` forces Chromium through the
+  # proxy and `/doctor` reports the proxy's measured exit instead of trusting a
+  # setting.
   warp:
     image: caomingjun/warp
     init: true
@@ -115,7 +125,8 @@ services:
   # It has to mint the token on the *same* address the downloads go out from — the
   # generator's own documentation is explicit that a token made on a clean IP is
   # refused for the blocked one — so it is placed behind the tunnel, exactly like
-  # yt-dlp. `network_mode` is how: see the note below.
+  # yt-dlp: `network_mode` below, plus the forced Chromium proxy that makes the route
+  # explicit. Both halves matter, and they cover different WARP modes; see the notes.
   #
   # Turns out it cannot produce a token on every host (the browser has to play a
   # real YouTube embed from this IP). When it will not, /doctor says so instead of
@@ -125,13 +136,13 @@ services:
     image: ghcr.io/imputnet/yt-session-generator:webserver
     init: true
     restart: unless-stopped
-    # Why a shared namespace and not `HTTP_PROXY`/`HTTPS_PROXY`: measured from the
-    # image's own source (imputnet/yt-session-generator), the generator has no proxy
-    # flag and Chromium does not read proxy environment variables — so setting them
-    # here would look like routing and route nothing. Sharing the tunnel container's
-    # network namespace routes it at the packet level, whatever the app believes, and
-    # puts its Chromium on the *same* WARP exit as yt-dlp, which is the requirement
-    # above.
+    # Route 1 — a shared network namespace. Not `HTTP_PROXY`/`HTTPS_PROXY`: measured
+    # from the image's own source (imputnet/yt-session-generator), the generator has
+    # no proxy flag and Chromium does not read proxy environment variables, so those
+    # variables would look like routing and route nothing. Sharing the tunnel's
+    # namespace routes at the packet level and puts Chromium on the same WARP exit as
+    # yt-dlp — which is the whole requirement, and it is what carries the browser
+    # while the WARP client is in its default `warp` (full tunnel) mode.
     #
     # Two consequences, both deliberate: the published port moves to `warp` (a
     # namespace owns its ports), and the name this service is reached by is the
@@ -139,11 +150,54 @@ services:
     # generator out of the tunnel can delete this line and restore the `ports:`
     # entry below it — the bot then downloads through WARP while the token comes
     # from the host IP, which YouTube may refuse.
+    #
+    # Route 2 — the browser argument, in `deploy/session_proxy/sitecustomize.py`.
+    # Sharing a namespace only routes everything while the client is in `warp` mode;
+    # put the client in WARP's *proxy* mode and only traffic dialled through 1080 is
+    # tunnelled, at which point an unconfigured Chromium goes out of this host's own
+    # flagged address and every token attempt ends in
+    # `timeout waiting for outgoing API request`. The image has no hook for the one
+    # switch that fixes that, so the file is mounted as Python's `sitecustomize` —
+    # imported by the interpreter itself, before the generator's first line — and
+    # wraps `nodriver.start` to add `--proxy-server=<the tunnel>`. It decides per
+    # launch (a WARP client switched to proxy mode is picked up by the next refresh),
+    # writes its verdict to the shared `runtime/` mount, and `/doctor` reads that
+    # back as the browser's route. A browser that is *not* on the tunnel is the one
+    # failure that must never be silent, so the wrapper refuses to run unproxied when
+    # it cannot install itself at all.
     network_mode: "service:warp"
     depends_on:
       warp:
         condition: service_started
         required: false
+    environment:
+      # Where the browser must send its traffic. Inside this shared namespace
+      # `127.0.0.1` *is* the tunnel container, which is why this is not `warp:1080`.
+      # A single dash so `YT_SESSION_CHROMIUM_PROXY=` (empty) can mean "run the
+      # browser direct" — the one way to express that on purpose.
+      YT_SESSION_CHROMIUM_PROXY: ${YT_SESSION_CHROMIUM_PROXY-socks5://127.0.0.1:1080}
+      # `auto` forces the proxy whenever it answers (a browser pointed at a dead proxy
+      # has no route at all, while the namespace may still be carrying it), `always`
+      # forces it regardless, `never` installs nothing.
+      YT_SESSION_PROXY_MODE: ${YT_SESSION_PROXY_MODE-auto}
+      YT_SESSION_ROUTE_FILE: /runtime/browser-route.json
+      YT_SESSION_TRACE_URL: ${YT_SESSION_TRACE_URL:-https://cloudflare.com/cdn-cgi/trace}
+      # The interpreter imports `sitecustomize` from here before running the
+      # generator — the single hook this image leaves open. With the mount missing,
+      # Python *skips* the file silently, which is why the report file below is also
+      # how the bot notices that the patch is not in place at all.
+      PYTHONPATH: /opt/session-proxy
+    volumes:
+      # The *directory*, not the file: a bind mount whose source is missing makes
+      # Docker create a directory at the target and the container then refuses to
+      # start (the same trap the cookie jar above documents). A directory source
+      # cannot do that, and a missing `sitecustomize.py` inside it degrades to "no
+      # report file" — which the bot's `/doctor` row names out loud.
+      - ./deploy/session_proxy:/opt/session-proxy:ro
+      # The verdict, shared with the bot (read-only there). Bind-mounted rather than
+      # a named volume so `cat runtime/browser-route.json` answers "which route is
+      # the browser on?" on the host as well as in `/doctor`.
+      - ${RUNTIME_HOST_DIR:-./runtime}:/runtime
     # Chromium needs more shared memory than Docker's 64 MB default, and this is
     # not a tuning detail: with the default it starts, dies, and takes the whole
     # helper down with it — `Failed to connect to browser`, at which point the
@@ -410,6 +464,10 @@ services:
       # Cobalt reads the session server itself; the bot holds the same value only so
       # /doctor can probe the route the fallback will take.
       YOUTUBE_SESSION_SERVER: ${YOUTUBE_SESSION_SERVER:-http://yt-session-generator:8080}
+      # Where the session generator writes which route its Chromium took (see
+      # `deploy/session_proxy/`). Read-only: the bot reports it, it does not decide
+      # it. Empty = the row says so instead of guessing.
+      YT_SESSION_ROUTE_FILE: /runtime/browser-route.json
       # The jar is read from the read-only mount below, so a fresh export is
       # live after `docker compose restart bot` (no rebuild). Overridden here
       # rather than in .env because it is a container path.
@@ -452,6 +510,10 @@ services:
       # because *this* is where it comes from; an empty COBALT_COOKIES_DIR turns
       # the generation off and the fallback runs without cookies.
       - ${COBALT_COOKIES_HOST_DIR:-./cobalt}:/app/cobalt
+      # The session generator's browser verdict (it writes, this only reads). Read
+      # through a mount so `/doctor` can answer "is the token browser on the tunnel?"
+      # with a measurement rather than with the setting the operator wrote.
+      - ${RUNTIME_HOST_DIR:-./runtime}:/runtime:ro
 
 volumes:
   pgdata:

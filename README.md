@@ -248,9 +248,16 @@ residential exit. Three things follow, and each is visible rather than surprisin
 * **it is one address for both engines.** `cobalt-warp` (the fallback's second node, so the
   pool has one instance per address) is given the same tunnel, and the session generator shares
   the tunnel's *network namespace* — its token is bound to the IP its browser ran on, so a token
-  minted anywhere else is refused for a download taken here. That is also why no proxy variable
-  is set on it: Chromium ignores `HTTP(S)_PROXY` (measured from the image's source), so setting
-  one would look like routing and route nothing.
+  minted anywhere else is refused for a download taken here. No proxy *variable* is set on it,
+  because Chromium ignores `HTTP(S)_PROXY` (measured from the image's source) — so its browser is
+  covered twice instead: the shared namespace routes it while the WARP client is in its default
+  `warp` mode, and `deploy/session_proxy/` (mounted into that container as Python's
+  `sitecustomize`, which the interpreter imports before the generator's first line) puts
+  `--proxy-server=<the tunnel>` into the one call that launches Chromium, which is what keeps the
+  browser on the tunnel when the client is in WARP's *proxy* mode. The route it actually took is
+  written to `runtime/browser-route.json` and read back by `/doctor` as 🖥 مرورگر سشن, because
+  "the server answers" and "its Chromium is on the tunnel" are different facts — and only the
+  second one explains a token that never arrives.
 * **a tunnel that is down does not break the bot.** It is probed at boot (a few tries, because
   WARP registers seconds after its container starts); if it never answers, yt-dlp is given *no*
   proxy — direct, with one log line, one admin message naming the one command, and a `/doctor`
@@ -529,8 +536,11 @@ detail: cobalt's dispatcher never reads `HTTP_PROXY`/`HTTPS_PROXY`, so setting t
 used to) wired nothing at all. Both halves are measured: a deliberately bogus value makes cobalt
 answer *"could not reach the source"* rather than YouTube's answer, and a real cloud proxy makes it
 answer exactly what it answers with no proxy — a different address is not an accepted one. The
-session generator is the one route with no proxy setting at all, and deliberately so: its token is
-bound to the IP its browser ran on, which is what makes it trusted.
+session generator is the one route with no proxy *setting* at all, and deliberately so: its token
+is bound to the IP its browser ran on, which is what makes it trusted — so its browser is put on
+the tunnel by the two mechanisms that can (the shared network namespace, and
+`deploy/session_proxy/`, which injects Chromium's `--proxy-server`), and `/doctor` reads back
+which of them arranged the exit (`runtime/browser-route.json`).
 
 **One export signs both engines in.** Cobalt has no login of its own and reads cookies in its own
 shape (a mapping of service → `Cookie:` header strings), so the bot converts the jar it already
@@ -797,6 +807,7 @@ in-process queue, losing queued work on restart).
 | `YTDLP_JS_RUNTIME` | `auto` | JS runtime for yt-dlp (`auto`/`none`/`node`/`deno`/`bun`/`quickjs`) |
 | `YTDLP_POT_PROVIDER_URL` | `http://pot-provider:4416` | PO-token provider base URL (the service compose runs); empty = off |
 | `YOUTUBE_SESSION_SERVER` | `http://yt-session-generator:8080` | YouTube session server for the fallback engine; empty = off |
+| `YT_SESSION_ROUTE_FILE` | `/runtime/browser-route.json` (set by compose) | where that server's own browser reports which route it took; `/doctor` reads it so "the session server answers" and "its Chromium is on the tunnel" are separate answers. Empty = the row is not shown |
 | `YTDLP_PROXY` | `http://warp:1080` (set by compose) | the tunnel yt-dlp leaves through, e.g. `socks5://user:pass@host:1080`; write it *empty* to run direct. Probed at boot (unreachable ⇒ direct + a notice) and reported by `/doctor` with the exit it saw, because "the proxy is up" and "the proxy is useful" are different answers |
 | `COBALT_API_URL` | `http://cobalt:9000` (the instance compose runs) | primary fallback instance, used only when yt-dlp comes back *blocked*; empty = off |
 | `COBALT_FALLBACK_URLS` | — | extra instances to rotate through, in order (your own mirrors; comma/space separated) |

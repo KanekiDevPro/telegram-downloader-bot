@@ -272,9 +272,19 @@ the same /24. Three details are load-bearing:
 * **one address for every engine that can have one.** `cobalt-warp` is a second Cobalt node on the
   same tunnel, so the fallback pool has one instance per *address* rather than two names for the
   blocked one, and the session generator shares the tunnel's network namespace (its token is bound
-  to the IP the browser ran on). No proxy variable is set on the generator on purpose: Chromium
+  to the IP the browser ran on). No proxy *variable* is set on the generator on purpose: Chromium
   ignores `HTTP(S)_PROXY` — measured from the image's source — so one would look like routing and
-  route nothing.
+  route nothing. Its browser is covered twice instead, because a shared namespace only routes
+  everything while the WARP client is in its default `warp` mode: `deploy/session_proxy/` is
+  mounted into that container as Python's `sitecustomize` (imported by the interpreter itself,
+  before the generator's first line) and wraps `nodriver.start` to pass
+  `--proxy-server=socks5://127.0.0.1:1080` — the tunnel, reached as a *local* address inside the
+  shared namespace. That is what keeps the browser on the tunnel when the client is in WARP's
+  **proxy** mode, where a direct connection is this host's own flagged address and every token
+  attempt ends in `timeout waiting for outgoing API request`. `YT_SESSION_PROXY_MODE` picks the
+  behaviour: `auto` (default) forces the proxy whenever it answers — a browser pointed at a dead
+  proxy has no route at all, while the namespace may still be carrying it — `always` forces it
+  regardless, `never` installs nothing.
 * **a dead tunnel is a degraded route, never a dead bot.** The bot probes it at boot
   (`TUNNEL_PROBE_ATTEMPTS`×`TUNNEL_PROBE_DELAY_S`, 6×2s by default, because WARP registers seconds
   after its container starts) and hands yt-dlp *no* proxy if it never answers — one log line, one
@@ -289,6 +299,15 @@ the same /24. Three details are load-bearing:
   `${YTDLP_PROXY-…}`, single dash: *empty means empty*); to use your own exit, set it as usual
   (`socks5://user:pass@host:1080` — PySocks ships for it, and a SOCKS5 URL is reported as reachable
   with its exit *unknown*, because aiohttp cannot dial it to ask).
+
+**Is that browser really on the tunnel?** Two commands answer it without reading a log:
+`cat runtime/browser-route.json` (what the generator's browser decided, and where a *direct*
+request from its own namespace went) and `docker compose exec warp curl -s
+https://cloudflare.com/cdn-cgi/trace | grep -E '^warp=|^ip='` (whether that namespace is tunnelled
+at all — `warp=on` there means every process in it is, the browser included). `/doctor` reads the
+first one, and its own tunnel probe answers the second half of the same question: the row
+🖥 مرورگر سشن is 🟢 only when the proxy the browser was sent to really exits through WARP, and
+⚠️/⛔️ — each with one fix named — when the browser would leave from this host's address instead.
 
 The image also ships the **Deno** JavaScript runtime, because yt-dlp degrades YouTube
 extraction without one ("some formats may be missing"). Host deployments pick up whatever

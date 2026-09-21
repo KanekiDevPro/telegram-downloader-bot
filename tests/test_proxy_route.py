@@ -274,34 +274,60 @@ def test_an_engine_without_a_proxy_says_so(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_session_generator_has_no_proxy_variable_to_wire() -> None:
-    """It is routed *without* one, and that is a measured fact, not a preference.
+def _compose_services() -> tuple[str, str, str]:
+    """The `warp`, `yt-session-generator` and `bot` blocks of the compose file.
 
-    The generator drives a real Chromium, and Chromium does not read
-    ``HTTP_PROXY``/``HTTPS_PROXY`` — the image takes no proxy flag either. A variable
-    here would look like routing and route nothing, which is the worst kind of
-    configuration: it reads as done. What actually moves the browser's traffic is
-    sharing the tunnel container's network namespace, and the alias on that container
-    is what keeps the name the bot is configured with resolvable (a process in
-    another container's namespace has no name of its own).
+    Split on the *service keys* (two-space indent), not on the bare names: those also
+    appear in the comments that explain this wiring, and a slice that starts mid-comment
+    would assert about prose instead of about configuration.
     """
     compose = (Path(__file__).resolve().parent.parent / "docker-compose.yml").read_text(
         encoding="utf-8"
     )
-    # Split on the *service keys* (two-space indent), not on the bare name: the name
-    # also appears in the comments that explain this wiring, and a slice that starts
-    # mid-comment would assert about prose instead of about configuration.
     warp = compose.split("\n  warp:", 1)[1].split("\n  yt-session-generator:", 1)[0]
-    generator = compose.split("\n  yt-session-generator:", 1)[1].split("\n  telegram-api:", 1)[0]
-    # Comments are stripped first: this asserts what Compose is *told*, and the
-    # block's own comments explain at length why the variable is absent.
+    rest = compose.split("\n  yt-session-generator:", 1)[1]
+    generator = rest.split("\n  telegram-api:", 1)[0]
+    bot = compose.split("\n  bot:", 1)[1].split("\n  cobalt:", 1)[0]
+    return warp, generator, bot
+
+
+def test_no_inert_proxy_variable_is_set_on_the_session_generator() -> None:
+    """``HTTP_PROXY``/``HTTPS_PROXY`` there would read as routing and route nothing.
+
+    The generator drives a real Chromium, and Chromium does not read those variables —
+    the image takes no proxy flag either. A variable here would be the worst kind of
+    configuration: one that looks done. What reaches the browser instead is an argument
+    to the call that launches it (``deploy/session_proxy/``), which is why the settings
+    the block *does* carry are named for that job and not for a shell proxy.
+    """
+    _warp, generator, _bot = _compose_services()
     directives = "\n".join(
         line for line in generator.splitlines() if not line.lstrip().startswith("#")
     )
 
-    assert "PROXY" not in directives.upper()
+    assert "HTTP_PROXY" not in directives.upper()
+    assert "HTTPS_PROXY" not in directives.upper()
+    assert "YT_SESSION_CHROMIUM_PROXY" in directives
+    assert "PYTHONPATH: /opt/session-proxy" in directives
+
+
+def test_the_session_generators_browser_is_put_on_the_tunnel() -> None:
+    """Two mechanisms, because they cover the two WARP modes.
+
+    A shared network namespace routes every process in it while the WARP client is in
+    its default ``warp`` mode, and the forced Chromium argument is what still holds when
+    the client is in WARP's *proxy* mode. The alias on the tunnel container is the third
+    piece: it keeps `YOUTUBE_SESSION_SERVER=http://yt-session-generator:8080` resolvable
+    for the bot *and* for the embedded fallback (a process in another container's
+    namespace has no name of its own).
+    """
+    warp, generator, bot = _compose_services()
+
     assert 'network_mode: "service:warp"' in generator
-    # The other half of the same wiring: the tunnel answers to the generator's name,
-    # so `YOUTUBE_SESSION_SERVER=http://yt-session-generator:8080` stays valid for
-    # the bot *and* for the embedded fallback.
-    assert "yt-session-generator" in warp
+    assert "./deploy/session_proxy:/opt/session-proxy:ro" in generator
+    assert "YT_SESSION_ROUTE_FILE: /runtime/browser-route.json" in generator
+    assert "yt-session-generator" in warp, "the name has to resolve on the tunnel"
+    # ...and the route it reports has to reach the bot, read-only, or `/doctor` would
+    # have nothing to say about the one process no setting of ours reaches.
+    assert "YT_SESSION_ROUTE_FILE: /runtime/browser-route.json" in bot
+    assert "/runtime:ro" in bot

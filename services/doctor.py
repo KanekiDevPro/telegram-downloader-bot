@@ -24,6 +24,7 @@ one command is, rather than dressing a missing helper up as a broken bot.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, replace
@@ -86,6 +87,38 @@ SESSION_TOKEN_PATH = "/token"
 SESSION_RELOAD_NOTE = "کوبالت هر ۵ دقیقه خودش دوباره میخواند"
 
 
+#: The browser's route, one row — its own name, because "the server answers" and
+#: "the browser is on the tunnel" are different questions with different fixes.
+ROUTE_CHECK_NAME = "مرورگر سشن"
+
+#: The generator relaunches Chromium every ``--update-interval`` (300s by default, and
+#: configurable) and the route file is rewritten on every launch — so a two-hour-old
+#: verdict is no longer describing this browser. Generous on purpose: warning about a
+#: deployment that legitimately updates hourly would be a false alarm, and the failure
+#: that matters (a generator that is not running) is already loud in the row above.
+SESSION_ROUTE_STALE_S = 7200.0
+
+#: The generator's own words for why it did (not) set the proxy. A code rather than a
+#: sentence because the file is written by a standalone patch that has no business
+#: carrying Persian: the translation belongs on this side.
+_ROUTE_REASONS: dict[str, str] = {
+    "proxy-up": "پروکسی پاسخ داد، پس مرورگر به آن فرستاده شد",
+    "forced": "اجبار دستی (YT_SESSION_PROXY_MODE=always)",
+    "proxy-down": "پروکسی پاسخ نداد، پس پرچمی به مرورگر داده نشد",
+    "disabled": "خاموش (YT_SESSION_PROXY_MODE=never)",
+    "no-proxy-configured": "آدرس پروکسی خالی است (YT_SESSION_CHROMIUM_PROXY=)",
+}
+
+#: What each way of applying the argument means — the one case worth naming is
+#: ``caller``, where the generator's own code asked for a proxy and ours stood down.
+_ROUTE_APPLIED: dict[str, str] = {
+    "kwargs": "به اجرای مرورگر تزریق شد",
+    "config": "به Config مرورگر تزریق شد",
+    "caller": "خودِ مولد پروکسی خودش را تنظیم کرده بود، ما کاری نکردیم",
+    "none": "تزریق نشد",
+    "startup": "گزارش تنظیمات (هنوز مرورگری اجرا نشده)",
+}
+
 _ICONS: dict[Status, str] = {"ok": "✅", "warn": "⚠️", "fail": "⛔️"}
 
 
@@ -117,6 +150,42 @@ class SessionServer:
     def short(self) -> bool:
         """Whether the token is shorter than cobalt considers trustworthy."""
         return self.ready and self.token_length < 160
+
+
+@dataclass(frozen=True)
+class SessionRoute:
+    """Which route the session generator's *browser* took, as it reported itself.
+
+    The session server's own setting and the route its Chromium actually used are two
+    different facts, and only the second one explains a token that never arrives: the
+    browser is the one process in the stack that no configuration of that image
+    reaches (it ignores ``HTTP_PROXY`` entirely), so the file it writes is read here
+    instead of the setting being trusted.
+    """
+
+    enabled: bool = True
+    mode: str = ""
+    proxy: str = ""
+    force: bool = False
+    proxy_up: bool = False
+    #: What a *direct* request from the browser's network namespace reported — ``on``
+    #: means the namespace itself is tunnelled, so the flag is belt-and-braces.
+    direct_warp: str = ""
+    exit_ip: str = ""
+    reason: str = ""
+    #: How the argument was applied: ``kwargs`` / ``config`` / ``caller`` (the caller
+    #: set its own) / ``none`` / ``startup`` (a configuration report, no launch yet).
+    applied: str = ""
+    age: float | None = None
+
+    @property
+    def stale(self) -> bool:
+        """Whether this report predates the generator's own refresh cadence."""
+        return self.age is not None and self.age > SESSION_ROUTE_STALE_S
+
+    @property
+    def direct_tunnelled(self) -> bool:
+        return self.direct_warp in {"on", "plus"}
 
 
 @dataclass(frozen=True)
@@ -744,16 +813,50 @@ async def probe_session_server(url: str, timeout: float = 5.0) -> SessionServer:
     return SessionServer(
         reachable=True,
         ready=True,
-        age=_token_age(data.get("updated")),
+        age=_seconds_since(data.get("updated")),
         token_length=len(token),
     )
 
 
-def _token_age(updated: object) -> float | None:
-    """Seconds since the server stamped its token, whatever unit it stamped it in.
+def read_session_route(path: Path | None) -> SessionRoute | None:
+    """Read the session generator's own account of the browser's route.
 
-    The reference generator writes seconds (``int(time.time())``); a server that
-    writes milliseconds would otherwise read as a token from the year 57000.
+    ``None`` when there is nothing to read, and deliberately silent about why: an
+    absent file is the normal state of a host run, of a deployment whose generator
+    has not launched a browser yet, and of one where the read-only mount that carries
+    the patch is missing altogether. The row distinguishes those from the *other*
+    facts it already has, rather than inventing a cause for a missing file.
+    """
+    if path is None:
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # Unreadable or half-written (the writer renames into place, so this is a
+        # truncated file at worst): reported as "no report", never guessed at.
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return SessionRoute(
+        enabled=bool(payload.get("enabled", True)),
+        mode=str(payload.get("mode", "")),
+        proxy=str(payload.get("proxy", "")),
+        force=bool(payload.get("force")),
+        proxy_up=bool(payload.get("proxy_up")),
+        direct_warp=str(payload.get("direct_warp", "")),
+        exit_ip=str(payload.get("exit_ip", "")),
+        reason=str(payload.get("reason", "")),
+        applied=str(payload.get("applied", "")),
+        age=_seconds_since(payload.get("updated")),
+    )
+
+
+def _seconds_since(updated: object) -> float | None:
+    """Seconds since a stamp, whatever unit it was written in.
+
+    The reference generator writes seconds (``int(time.time())``); a server (or a
+    patch) that writes milliseconds would otherwise read as a token from the year
+    57000. A stamp in the future is not a duration, so it is reported as unknown.
     """
     if not isinstance(updated, (int, float)) or not updated:
         return None
@@ -899,6 +1002,108 @@ def _major(version: str) -> str:
     return version.split(".", 1)[0]
 
 
+def _session_route_check(
+    settings: Settings,
+    route: SessionRoute | None,
+    tunnel: TunnelHealth | None,
+) -> Check:
+    """Which way out the session generator's *browser* took — measured, not configured.
+
+    The generator mints its ``po_token`` with a real Chromium, and that browser is the
+    one process in this stack that no environment variable reaches (it ignores
+    ``HTTP_PROXY``; the image calls ``nodriver.start`` with no proxy support). So the
+    settings can be perfectly right while the browser still leaves from this host's
+    flagged address, and the only way to know is to read what it reported.
+
+    Two facts make the answer, and they come from different measurements: the file the
+    patch writes (which argument it injected, and where a *direct* request from that
+    namespace went) and the bot's own probe of the same proxy (where the traffic that
+    goes *through* it actually surfaces). A forced proxy whose own exit is WARP is the
+    answer an admin wants; a forced proxy that is not WARP is the failure that would
+    otherwise look like "YouTube is being difficult again".
+    """
+    if route is None:
+        return Check(
+            ROUTE_CHECK_NAME,
+            "warn",
+            f"گزارشی از {settings.session_route_file} نرسیده — سرور سشن بالا نیست یا پوشهٔ "
+            "مشترک mount نشده (docker compose up -d yt-session-generator)",
+            icon="🖥",
+        )
+
+    status, detail = _route_verdict(route, tunnel)
+    if route.stale and route.age is not None:
+        # The file is rewritten on every browser launch, so an old one is evidence about
+        # a process that is gone — whatever it says about the route stays informative,
+        # and nothing about it may read as "this is current".
+        return Check(
+            ROUTE_CHECK_NAME,
+            "warn" if status == "ok" else status,
+            f"{detail} — ولی آخرین بار {describe_age(route.age)} تصمیم گرفته شده و مرورگر "
+            "از آن موقع دوباره اجرا نشده",
+            icon="🖥",
+        )
+    return Check(ROUTE_CHECK_NAME, status, detail, icon="🖥")
+
+
+def _route_verdict(route: SessionRoute, tunnel: TunnelHealth | None) -> tuple[Status, str]:
+    """The route's status and its one-line evidence, before the age is considered."""
+    why = _ROUTE_REASONS.get(route.reason, route.reason or "دلیل نامعلوم")
+    applied = _ROUTE_APPLIED.get(route.applied, route.applied)
+    # ``describe_age`` ends with "پیش" itself, so a trailing word here would double it.
+    when = f"؛ آخرین بار {describe_age(route.age)}" if route.age is not None else ""
+
+    if not route.enabled:
+        return (
+            "warn",
+            f"خاموش — {why}. در این حالت مرورگر از مسیر خودِ namespace می‌رود: با کلاینت "
+            "WARP در حالت پیش‌فرض (warp) همان هم تونل است، در حالت proxy نه",
+        )
+
+    if not route.force:
+        return (
+            "warn",
+            f"{route.proxy} — {why}. اگر کلاینت WARP در حالت proxy باشد، مرورگر همین "
+            "حالا از IP این هاست بیرون می‌رود و توکن ساخته نمی‌شود "
+            "(docker compose up -d warp، و بعد دوباره /doctor)",
+        )
+
+    if route.direct_tunnelled:
+        where = f" از {route.exit_ip}" if route.exit_ip else ""
+        return (
+            "ok",
+            f"مرورگر از {route.proxy} می‌رود ({why}، {applied}){when}؛ مسیر مستقیم همین "
+            f"namespace هم warp={route.direct_warp}{where} است، پس خروج در هر دو حالت WARP است",
+        )
+
+    # The proxy is forced, and a direct request from that namespace is *not* a WARP
+    # tunnel — exactly the proxy-mode client, where the proxy has to carry the browser
+    # alone. Whether it does is a separate measurement: the bot's own tunnel probe goes
+    # through the same gost, so its exit address answers it.
+    if tunnel is not None and tunnel.on_warp:
+        where = f" از {tunnel.exit_ip}" if tunnel.exit_ip else ""
+        return (
+            "ok",
+            f"مرورگر از {route.proxy} می‌رود ({why}، {applied}){when}؛ پروکسی هم واقعاً از "
+            f"WARP خارج می‌شود (warp={tunnel.warp}{where})",
+        )
+    if tunnel is not None and tunnel.wrong_exit:
+        return (
+            "fail",
+            f"مرورگر به {route.proxy} فرستاده شده ولی این پروکسی WARP نیست "
+            f"(warp={tunnel.warp or 'نامعلوم'})، و مسیر مستقیم هم تونل نیست — پس مرورگر "
+            "از همان IP میزبان بیرون می‌رود و توکن ساخته نمی‌شود. اگر WARP در حالت proxy "
+            "است، gost باید به پروکسی خودش زنجیر شود "
+            "(GOST_ARGS=-L :1080 -F=127.0.0.1:40000 — فقط در همین حالت)",
+        )
+    return (
+        "warn",
+        f"مرورگر به {route.proxy} فرستاده شده ({why}، {applied}){when}، ولی خروج آن تأیید "
+        "نشد (مسیر مستقیم هم تونل نیست) — با /doctor دوباره ببینید؛ تا آن موقع ممکن است "
+        "توکن ساخته نشود",
+    )
+
+
 def _session_server_check(settings: Settings, server: SessionServer | None) -> Check:
     """The fallback engine's YouTube session: the one route that needs no login.
 
@@ -934,7 +1139,8 @@ def _session_server_check(settings: Settings, server: SessionServer | None) -> C
         )
     facts = "توکن آماده"
     if server.age is not None:
-        facts += f"، ساخته‌شده {describe_age(server.age)} پیش"
+        # ``describe_age`` already ends with "پیش" ("4 دقیقه پیش").
+        facts += f"، ساخته‌شده {describe_age(server.age)}"
     if server.short:
         facts += f"، ولی کوتاه ({server.token_length} کاراکتر — کوبالت خودش هشدار می‌دهد)"
     return Check(SESSION_CHECK_NAME, "ok", f"{where} — {facts}؛ {SESSION_RELOAD_NOTE}", icon="🎫")
@@ -1001,8 +1207,9 @@ def _base_checks(
     plugin_version: str | None,
     server: SessionServer | None,
     tunnel: TunnelHealth | None = None,
+    route: SessionRoute | None = None,
 ) -> list[Check]:
-    return [
+    checks = [
         Check(
             "ffmpeg",
             "ok" if extractor.ffmpeg_available else "warn",
@@ -1013,8 +1220,14 @@ def _base_checks(
         _runtime_check(extractor),
         _provider_check(settings, provider, plugin_version),
         _session_server_check(settings, server),
-        _tunnel_check(settings, tunnel),
     ]
+    # The browser's own route, but only for a deployment that has something to report:
+    # "the session server answers" and "its Chromium is on the tunnel" are different
+    # facts, and a switch that is off must not add a row that says nothing.
+    if settings.session_route_file is not None:
+        checks.append(_session_route_check(settings, route, tunnel))
+    checks.append(_tunnel_check(settings, tunnel))
+    return checks
 
 
 def _verdict(
@@ -1174,8 +1387,11 @@ async def run_youtube_doctor(
         if settings.ytdlp_proxy
         else None
     )
+    # Read (never written) here: the generator's own account of which route its
+    # browser took, which is the one fact no setting of ours can state.
+    route = read_session_route(settings.session_route_file)
     checks = _base_checks(
-        settings, extractor, provider, pot_plugin_version(), server, tunnel
+        settings, extractor, provider, pot_plugin_version(), server, tunnel, route
     )
 
     if settings.cookies_from_browser:

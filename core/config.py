@@ -412,6 +412,12 @@ class Settings(BaseSettings):
     youtube_session_server: str = Field(
         default="http://yt-session-generator:8080", alias="YOUTUBE_SESSION_SERVER"
     )
+    #: Where that server's own browser reports which route it took (written by
+    #: ``deploy/session_proxy/``, mounted read-only here). The setting it was given
+    #: and the route it actually used are different facts, and only one of them
+    #: explains a token that never arrives — so `/doctor` reads this instead of
+    #: trusting the configuration. Empty = the row is not shown at all.
+    session_route_file: Path | None = Field(default=None, alias="YT_SESSION_ROUTE_FILE")
     #: Some instances (self-hosted ones, and api.cobalt.tools) require a key; it
     #: is sent as ``Authorization: Api-Key <key>`` only when non-empty.
     #: Extra Cobalt instances to rotate through when the one above cannot serve a
@@ -587,7 +593,7 @@ class Settings(BaseSettings):
             return True
         return value  # anything else: let pydantic report a clear validation error
 
-    @field_validator("telegram_api_files_dir", mode="before")
+    @field_validator("telegram_api_files_dir", "session_route_file", mode="before")
     @classmethod
     def _blank_env_dir_is_none(cls, value: object) -> object:
         if value is None or (isinstance(value, str) and not value.strip()):
