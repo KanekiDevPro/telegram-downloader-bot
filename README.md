@@ -65,12 +65,14 @@ sudo bash -c "$(wget -qO- https://raw.githubusercontent.com/KanekiDevPro/telegra
   drift. A link is acknowledged before it is queued (*«🔍 در حال تحلیل و ارسال به صف…»*), because a
   request that looks ignored gets sent twice, and the same message is then edited through the whole
   download.
-- **An admin panel** — `/admin` is one message with four screens: stats (users, downloads today,
-  cache rows, 24h failures, pending payments, language mix), health (database, Redis, the fallback
-  engine with its dialect, the PO-token provider and the session server), the queue, and tools that
-  call the *same* callbacks as the cookie-jar alert (`/doctor`, `/refresh`). Admin ids from
-  `ADMIN_IDS` also get **perpetual VIP** without a subscription row: they are never stopped by a
-  quota, and the profile says so.
+- **An admin panel** — `/admin` is one message with four screens, each edited in place: stats
+  (users, downloads today, cache rows, 24h failures, pending payments, language mix), health
+  (database, Redis, the fallback engine with its dialect, the PO-token provider and the session
+  server), the queue, and the tools. Two of those tools are new here: a **global broadcast**
+  (count → draft → preview as the message itself → confirm → paged sending at a paced rate, then a
+  report of sent/blocked/failed) and the **support button** every user's menu carries. Admin ids
+  from `ADMIN_IDS` also get **perpetual VIP** without a subscription row: they are never stopped by
+  a quota, the profile says so, and the VIP button is hidden from them.
 - **Quotas & premium** — atomic per-day download counters (reset automatically by local date),
   premium limits, and an always-on expiry sweep.
 - **Subscription & payments (Strategy pattern)** — `PaymentStrategy` interface with a
@@ -497,6 +499,15 @@ YOUTUBE_SESSION_SERVER=http://yt-session-generator:8080
 # because cobalt re-reads the server every 5 minutes on its own
 ```
 
+**The directory has to be writable by the bot's uid.** `cobalt/` is bind-mounted into both
+containers (the bot writes the file, cobalt reads and refreshes it), and a bind mount keeps the
+*host's* ownership — so a directory created by root (a fresh clone, an installer run as root) is not
+writable by uid `10001`, which is what `PermissionError` at startup used to look like. The image
+creates it world-writable for the case where nothing is mounted, the deploy docs' one-liner
+(`mkdir -p cobalt && chmod 777 cobalt`, also done by `install.sh`) covers the mounted case, and the
+bot now *checks* it: an unwritable directory is one clear log line at boot and one `/doctor` line
+naming the fix, while the fallback simply runs without a session instead of taking the bot down.
+
 A file it did not write is never replaced (including the flat-array shape one of cobalt's own docs
 examples suggests — that one is reported, not overwritten), and services that are not ours keep
 their entries. Cobalt reads the file **once, at startup** and writes its own refreshes back into it,
@@ -637,6 +648,21 @@ Three details are deliberate:
   `smart_cache` key stays the Spotify URL, so the same link the second time is instant, and the
   `block_events` row (when YouTube refuses the *search*) names the link the user actually sent.
 
+**And the file arrives as the song, not as a YouTube rip.** The mapping used to announce itself
+(*«the YouTube version of this song…»*) and hand back a file captioned `🌐 youtube`; users noticed,
+and they were right to — they asked for a track, not for a route. The same public page now supplies
+what the delivery needs: title, artists, release year and cover art
+(`visualIdentity.image`, rewritten onto Spotify's canonical image host because the embed's own URLs
+are locale-specific). The album is the one field the embed payload does *not* carry — it comes from
+the track page's `og:description` (`Artist · Album · Song · 1987`, read by *shape* so a localized
+page still works), best-effort: no album costs a caption line, never a download.
+
+Tagging happens **through Telegram, not through ffmpeg**: `send_audio(title=…, performer=…,
+duration=…, thumbnail=…cover.jpg)` stores the metadata with the file, so nothing is re-encoded, the
+client's own player shows the song, and a cached replay keeps the tags (they live in the `file_id`).
+The caption names artist, album and length instead of the platform, and the cover is fetched into
+the per-job directory, so it is deleted with the job.
+
 A refused search is not swallowed either: it arrives as the block it is, so the user gets the known
 cause, the admins get the alert and the digest counts it — the same machinery as any other YouTube
 link, because that is what it now is. `python scripts/youtube_doctor.py` is where you look when that
@@ -754,8 +780,16 @@ answers one command makes people guess at their own quota and status:
 ├── 💎 ارتقا به ویژه (VIP)          → the plans and the manual-payment flow
 ├── ❓ راهنما / ❓ Help             → the supported sites, tiers, formats and limits
 ├── 🌐 زبان / 🌐 Language           → 🇬🇧 English / 🇮🇷 فارسی (also /language en|fa)
+├── 💬 پشتیبانی / 💬 Support       → where an operator pointed it (hidden until they do)
 └── (admins, in addition) /admin    → stats, health, queue, tools
 ```
+
+Two buttons depend on *who is looking*, not on the bot: **an admin is never shown «💎 Go VIP»**
+(they hold it permanently, so the button could only explain that they cannot buy what they already
+have), and the 💬 Support button appears only once somebody has set a contact for it — panel →
+🔧 Tools → 💬 Support button, or `/support` to read it. A blank contact means no button, which is
+the honest state: there is nobody to write to. The value is read from the database on every tap, so
+changing it is live for every user immediately — no restart, no rebuild.
 
 Those buttons are callbacks into the same handlers as `/profile`, `/premium`, `/help` and
 `/language` — the menu is a shortcut, not a second implementation, so the two can never drift.
@@ -777,9 +811,16 @@ process that never saw the update. Admin notices are resolved per recipient for 
 https://youtu.be/…            → 🎬 best available | 1080p | 720p | 480p
 https://soundcloud.com/…      → 🎧 M4A (untouched stream) | 🎵 MP3 192k
 https://open.spotify.com/…    → the same audio menu (the link is rewritten to YouTube)
-https://www.instagram.com/p/… → 🖼 send the media of this post      (no quality menu)
+https://www.instagram.com/p/… → downloaded straight away (one possible answer = no question)
 https://x.com/u/status/…      → 🖼 the media of this post | 🎧 M4A | 🎵 MP3
 ```
+
+A link with exactly **one** possible answer is never asked about: a photo post has no tier to pick
+and no audio to extract, so a one-button menu would be a question that cannot be answered wrong —
+and every tap is a round trip. Those links are queued immediately («🖼 پست عکسی است — همین حالا
+رسانهاش ارسال میشود»), and `services/delivery.py` still decides how each file is sent. A gallery
+link's menu therefore offers *nothing* but that, which is the strict version of "do not show what the
+link cannot produce".
 
 A tap that was never offered (an older menu, a forwarded message, a crafted callback) is refused
 with an answer, and the question is asked again — nothing is queued that the user was not shown.

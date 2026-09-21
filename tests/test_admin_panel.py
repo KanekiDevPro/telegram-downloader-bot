@@ -15,12 +15,16 @@ from typing import Any, cast
 
 import pytest
 from aiogram import Bot
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
 from aiogram.types import CallbackQuery, Chat, Message, User
 
 from core.config import Settings
 from handlers import admin as admin_module
 from services import panel as panel_module
+from services.broadcast import BroadcastReport
 
 ADMIN_ID = 99
 STRANGER_ID = 7
@@ -213,8 +217,10 @@ async def test_a_forwarded_panel_button_is_still_admin_only(stats: dict[str, Any
 # ---------------------------------------------------------------------------
 
 
-async def test_every_screen_renders_for_an_admin(stats: dict[str, Any], healthy: Any) -> None:
-    for screen in ("home", "stats", "health", "queue", "tools"):
+async def test_every_screen_renders_for_an_admin(
+    stats: dict[str, Any], healthy: Any, stored: dict[str, str]
+) -> None:
+    for screen in ("home", "stats", "health", "queue", "tools", "broadcast", "support"):
         text, keyboard = await admin_module.panel_screen(
             screen, healthy, _queue(), _cobalt(), lang="fa"
         )
@@ -319,6 +325,8 @@ def test_every_panel_button_has_somewhere_to_go() -> None:
     source = inspect.getsource(admin_module)
     offered = {"admin:stats", "admin:health", "admin:queue", "admin:tools", "admin:home"}
     offered |= {data for _, data in _buttons(admin_module._tools_keyboard("en"))}
+    offered |= {data for _, data in _buttons(admin_module._broadcast_keyboard("en"))}
+    offered |= {data for _, data in _buttons(admin_module._support_keyboard("en", configured=True))}
 
     from services.cookie_watch import DOCTOR_CALLBACK, REFRESH_CALLBACK
 
@@ -328,6 +336,177 @@ def test_every_panel_button_has_somewhere_to_go() -> None:
         if f'"{data}"' not in source
     ]
     assert missing == [], missing
+
+
+# ---------------------------------------------------------------------------
+# Broadcast and the support button (the two typed inputs)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def stored(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """``bot_state`` without a database: the support contact is all of it."""
+    state = {"support_contact": ""}
+
+    async def get_support_contact(pool: Any, **kwargs: Any) -> str:
+        return state["support_contact"]
+
+    async def set_support_contact(pool: Any, value: str) -> None:
+        state["support_contact"] = value
+
+    async def count_users(pool: Any) -> int:
+        return 120
+
+    monkeypatch.setattr(admin_module.database, "get_support_contact", get_support_contact)
+    monkeypatch.setattr(admin_module.database, "set_support_contact", set_support_contact)
+    monkeypatch.setattr(admin_module.database, "count_users", count_users)
+    return state
+
+
+@pytest.fixture
+def delivered(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The sending itself is pinned in test_broadcast; here it is a recorder."""
+    sent: list[str] = []
+
+    async def deliver(
+        bot: Any, pool: Any, text: str, *, on_progress: Any = None, **kwargs: Any
+    ) -> BroadcastReport:
+        sent.append(text)
+        if on_progress is not None:
+            await on_progress(1, 2)
+        return BroadcastReport(total=2, sent=1, blocked=1, failed=0)
+
+    monkeypatch.setattr(admin_module.broadcast, "deliver", deliver)
+    return sent
+
+
+def _fsm() -> FSMContext:
+    return FSMContext(
+        storage=MemoryStorage(),
+        key=StorageKey(bot_id=1, chat_id=ADMIN_ID, user_id=ADMIN_ID),
+    )
+
+
+async def test_the_broadcast_screen_counts_who_it_would_reach(stored: dict[str, str]) -> None:
+    text, keyboard = await admin_module.panel_screen(
+        "broadcast", object(), _queue(), None, lang="en"
+    )
+
+    assert "120" in text, "the number of accounts, read now rather than remembered"
+    assert ("✍️ Write the message", admin_module.BC_START) in _buttons(keyboard)
+
+
+async def test_a_broadcast_is_previewed_before_anything_is_sent(
+    stored: dict[str, str], delivered: list[str]
+) -> None:
+    """Nothing leaves the bot until the admin has seen the draft, and what they see
+    is the message itself (a copy), not the text pasted into a template."""
+    bot = RecordingBot()
+    state = _fsm()
+
+    await admin_module.on_broadcast_start(_callback(bot, admin_module.BC_START), state, lang="en")
+    await admin_module.on_broadcast_draft(_message("hello everyone", bot), state, object(), lang="en")
+
+    assert await state.get_state() == admin_module.AdminStates.broadcast.state
+    assert delivered == [], "preview is not sending"
+    assert (await state.get_data())["announcement"] == "hello everyone"
+    assert "120" in bot.screens[-1]
+
+
+async def test_confirming_sends_it_and_reports_the_outcome(
+    stored: dict[str, str], delivered: list[str]
+) -> None:
+    bot = RecordingBot()
+    state = _fsm()
+    await state.set_state(admin_module.AdminStates.broadcast)
+    await state.update_data(announcement="hello everyone")
+
+    await admin_module.on_broadcast_send(
+        _callback(bot, admin_module.BC_SEND), state, bot, object(), lang="en"
+    )
+
+    assert delivered == ["hello everyone"]
+    assert await state.get_state() is None, "the draft is not left behind"
+    report = bot.screens[-1]
+    assert "Sent" in report and "Blocked the bot" in report
+
+
+async def test_cancelling_sends_nothing(
+    stored: dict[str, str], delivered: list[str]
+) -> None:
+    bot = RecordingBot()
+    state = _fsm()
+    await state.set_state(admin_module.AdminStates.broadcast)
+    await state.update_data(announcement="hello everyone")
+
+    await admin_module.on_broadcast_cancel(_callback(bot, admin_module.BC_CANCEL), state, lang="en")
+
+    assert delivered == []
+    assert await state.get_state() is None
+    assert "cancelled" in bot.screens[-1]
+
+
+async def test_a_stranger_cannot_broadcast(stored: dict[str, str], delivered: list[str]) -> None:
+    bot = RecordingBot()
+    state = _fsm()
+
+    await admin_module.on_broadcast_start(
+        _callback(bot, admin_module.BC_START, STRANGER_ID), state, lang="en"
+    )
+
+    assert bot.answers[0].show_alert is True
+    assert bot.screens == [] and delivered == []
+    assert await state.get_state() is None, "and no draft state is opened for them"
+
+
+async def test_the_support_contact_is_stored_and_is_what_users_get(
+    stored: dict[str, str]
+) -> None:
+    bot = RecordingBot()
+    state = _fsm()
+
+    await admin_module.on_support_edit(_callback(bot, admin_module.SUP_EDIT), state, lang="en")
+    await admin_module.on_support_value(_message("@helpdesk", bot), state, object(), lang="en")
+
+    assert stored["support_contact"] == "@helpdesk"
+    assert await state.get_state() is None
+    assert "@helpdesk" in bot.screens[-1] and "link" in bot.screens[-1]
+
+
+async def test_a_contact_that_is_not_a_link_is_said_to_be_plain_text(
+    stored: dict[str, str]
+) -> None:
+    """An operator who writes an email address is not lied to about what the button
+    will do with it."""
+    bot = RecordingBot()
+
+    await admin_module.on_support_value(
+        _message("support@example.com", bot), _fsm(), object(), lang="en"
+    )
+
+    assert stored["support_contact"] == "support@example.com"
+    assert "plain text" in bot.screens[-1]
+
+
+async def test_the_support_button_can_be_removed(stored: dict[str, str]) -> None:
+    stored["support_contact"] = "@helpdesk"
+    bot = RecordingBot()
+
+    await admin_module.on_support_clear(_callback(bot, admin_module.SUP_CLEAR), object(), lang="en")
+
+    assert stored["support_contact"] == ""
+    assert "no button is shown" in bot.screens[-1]
+
+
+async def test_a_stranger_cannot_repoint_the_support_button(stored: dict[str, str]) -> None:
+    bot = RecordingBot()
+
+    await admin_module.on_support_edit(
+        _callback(bot, admin_module.SUP_EDIT, STRANGER_ID), _fsm(), lang="en"
+    )
+
+    assert bot.answers[0].show_alert is True
+    assert stored["support_contact"] == ""
 
 
 def test_the_panel_buttons_are_all_answered() -> None:

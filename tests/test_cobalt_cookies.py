@@ -276,3 +276,67 @@ def test_cannot_tell_is_not_a_yes(tmp_path: Path) -> None:
     state = CobaltCookieState(path=tmp_path / "cookies.json", cookie_count=5)
 
     assert "هنوز نوشته نشده" in state.describe()
+
+
+# ---------------------------------------------------------------------------
+# The directory the file is written into (the bind-mount trap)
+# ---------------------------------------------------------------------------
+
+
+def test_a_missing_directory_is_created(tmp_path: Path) -> None:
+    """A deployment that never made one: the bot makes it itself."""
+    directory = tmp_path / "cobalt"
+
+    assert cobalt_cookies.ensure_cookie_dir(directory) == ""
+    assert directory.is_dir()
+
+
+def test_a_directory_that_cannot_be_written_names_the_fix_and_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Docker case: the host's ``./cobalt`` is mounted over the image's own
+    directory, so it keeps the host's owner (root, on a fresh clone) and uid 10001
+    cannot write into it. It must not be a startup crash — and it must not be
+    silent either, because only the operator can fix it.
+    """
+    monkeypatch.setattr(cobalt_cookies.os, "access", lambda *args: False)
+    monkeypatch.setattr(cobalt_cookies.os, "chmod", lambda *args: None)
+    directory = tmp_path / "cobalt"
+    settings = _settings(tmp_path, directory=directory)
+
+    problem = cobalt_cookies.ensure_cookie_dir(directory)
+    state = sync_from_jar(settings)
+
+    assert "قابل نوشتن نیست" in problem and "chmod 777" in problem
+    assert state.written is False
+    assert "قابل نوشتن نیست" in state.reason
+    assert "قابل نوشتن نیست" in state.describe(), "and /doctor can say it"
+
+
+def test_a_write_that_fails_is_reported_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory that passes the access check and still refuses the file (a
+    read-only mount, a full disk): the fallback runs without cookies, the bot keeps
+    running, and the reason is on record."""
+    settings = _settings(tmp_path, directory=tmp_path / "cobalt")
+
+    def refuse(path: Path, text: str) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(cobalt_cookies, "_write_atomically", refuse)
+
+    state = sync_from_jar(settings)
+
+    assert state.written is False
+    assert "نوشتن در" in state.reason and "Permission denied" in state.reason
+
+
+def test_reading_the_state_does_not_create_anything(tmp_path: Path) -> None:
+    """``/doctor`` and ``/blocks`` *describe*: a report must not write — the
+    filesystem may be read-only, and a doctor that fails on one is no report."""
+    directory = tmp_path / "never-made"
+
+    read_state(_settings(tmp_path, directory=directory))
+
+    assert not directory.exists(), "a read must not create the directory"

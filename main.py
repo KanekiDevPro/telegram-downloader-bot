@@ -323,6 +323,12 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
     # Cobalt reads it at *startup*, which is why this runs before anything asks it
     # for a link, and why a later change needs a cobalt restart (says so in
     # /doctor and in the jar alert).
+    # The directory is checked *before* the sync so a permission problem is one
+    # clear error line at boot instead of a traceback three steps into startup.
+    # It is a Docker bind-mount trap: the host's ./cobalt keeps its own owner, so
+    # the mode set in the image does not apply to what is actually mounted there.
+    if directory_problem := cobalt_cookies.ensure_cookie_dir(settings.cobalt_cookies_dir):
+        logger.error("cobalt cookies: %s", directory_problem)
     cobalt_cookie_state = cobalt_cookies.sync_from_jar(settings, jar_path=extractor.cookie_file)
     if cobalt_cookie_state.off:
         logger.info("cobalt cookies: not generated (COBALT_COOKIES_DIR is empty)")

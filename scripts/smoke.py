@@ -115,6 +115,28 @@ async def main() -> int:
         f"used={usage['daily_downloads']}",
     )
 
+    # --- support contact + broadcast paging ---------------------------------
+    # Both are on paths a user reaches (the menu's support button, and the panel's
+    # broadcast): one row in ``bot_state``, and a query that has to walk the users
+    # table without ever repeating or skipping an id.
+    await database.set_support_contact(pool, "@smoke_support")
+    stored_contact = await database.get_support_contact(pool)
+    ok &= verdict(
+        "support contact round-trips through bot_state",
+        stored_contact == "@smoke_support",
+        stored_contact or "(empty)",
+    )
+    first_page = await database.user_id_page(pool, limit=1)
+    second_page = await database.user_id_page(pool, after=first_page[-1] if first_page else 0, limit=1)
+    ok &= verdict(
+        "broadcast pages move forward without repeating an id",
+        bool(first_page) and all(value not in second_page for value in first_page),
+        f"first={first_page} second={second_page}",
+    )
+    total_users = await database.count_users(pool)
+    ok &= verdict("the broadcast count sees the users above", total_users >= 2, f"users={total_users}")
+    await database.set_support_contact(pool, "")
+
     # --- transaction lifecycle (manual strategy) ----------------------------
     strategy = ManualPaymentStrategy(pool)
     plans = await database.list_plans(pool)
@@ -693,6 +715,7 @@ async def main() -> int:
     if settings.admin_ids:  # the alarm check added its own rows, under its own host
         await pool.execute("DELETE FROM block_events WHERE url_host = $1", alert_marker)
     await pool.execute("DELETE FROM bot_state WHERE key = $1", "smoke_state")
+    await pool.execute("DELETE FROM bot_state WHERE key = $1", database.SUPPORT_CONTACT_KEY)
     await r.aclose()
     await pool.close()
 

@@ -144,6 +144,12 @@ async def _process_with_retry(
     stop_event: asyncio.Event,
     cobalt: CobaltService | None = None,
 ) -> None:
+    lang = task.lang or DEFAULT_LANG
+    # One status message for the whole link, retries included. The task used to open
+    # its own per attempt, which is how a single failed download left three
+    # "processing…" messages behind it; the message is also where the failure is
+    # written now, so the outcome lands where the user is already looking.
+    status = await bot.send_message(task.chat_id, t("work.processing", lang))
     last_error: Optional[str] = None
     last_failure: ExtractionError | None = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -151,7 +157,7 @@ async def _process_with_retry(
             await _requeue_for_shutdown(queue, task)
             return
         try:
-            await process_download_task(task, bot, pool, extractor, cobalt)
+            await process_download_task(task, bot, pool, extractor, cobalt, status=status)
             if is_youtube_url(task.url):
                 # An anonymous YouTube download just worked, so "YouTube refuses
                 # anonymous requests here" is no longer true — stop acting on it.
@@ -176,6 +182,9 @@ async def _process_with_retry(
         if await _sleep_until(stop_event, min(2**attempt, 8)):
             await _requeue_for_shutdown(queue, task)
             return
+        # Said in the message the user is already watching: a retry has to read as
+        # "trying again", not as a download that quietly stalled.
+        await _edit(status, t("work.retry", lang, attempt=attempt + 1, attempts=MAX_ATTEMPTS))
     if last_failure is not None:
         # Recorded before the messages: the digest is the only place a *pattern*
         # of failures is visible, and it must survive a failed notification.
@@ -198,12 +207,27 @@ async def _process_with_retry(
             settings, extractor, bot, settings.admin_ids, pool=pool
         )
         return
-    await _notify_failure(bot, task, last_error or t("work.unexpected", task.lang))
+    await _notify_failure(
+        bot, task, last_error or t("work.unexpected", lang), status=status
+    )
 
 
-async def _notify_failure(bot: Bot, task: DownloadTask, message: str) -> None:
+async def _notify_failure(
+    bot: Bot, task: DownloadTask, message: str, *, status: Any = None
+) -> None:
+    """Say the download failed — in its own status message when there is one.
+
+    Editing beats sending here for the same reason it does everywhere else in this
+    worker: the message that said "working on it" is the one the user is watching,
+    and a chat that ends with one summary instead of two is the point of the
+    status message existing at all.
+    """
+    text = t("work.failed", task.lang, error=message)
+    if status is not None:
+        await _edit(status, text)
+        return
     try:
-        await bot.send_message(task.chat_id, t("work.failed", task.lang, error=message))
+        await bot.send_message(task.chat_id, text)
     except Exception:
         logger.exception("could not notify failure to chat %s", task.chat_id)
 
@@ -282,10 +306,20 @@ async def process_download_task(
     pool: asyncpg.Pool,
     extractor: ExtractorService,
     cobalt: CobaltService | None = None,
+    *,
+    status: Any = None,
 ) -> None:
+    """One attempt at one link. ``status`` is the message the narration goes in.
+
+    The caller (the retry wrapper) opens that message and hands it over, so every
+    attempt — and the failure that ends them — rewrites the same message. Callers
+    that have not opened one get it here, which is what keeps this function usable
+    on its own.
+    """
     settings = get_settings()
     lang = task.lang or DEFAULT_LANG
-    status = await bot.send_message(task.chat_id, t("work.processing", lang))
+    if status is None:
+        status = await bot.send_message(task.chat_id, t("work.processing", lang))
 
     # 1) Cache re-check (worker-side, guards concurrent duplicate requests).
     cached = await cache_service.get_cached(pool, task.url, task.media_format, task.quality)
@@ -304,16 +338,19 @@ async def process_download_task(
     #     the ordinary path: extraction, fallback, quota, cache and caption all work
     #     on the mapped video, while the cache key stays the link the user sent.
     target_url = task.url
+    track: spotify.SpotifyTrack | None = None
     if spotify.is_spotify_url(task.url):
+        # The one line the user sees about a Spotify link, and deliberately not a
+        # technical one: it says the song is being fetched, not that it is being
+        # "mapped to YouTube". What was mapped stays in the log and in the metadata
+        # the file is tagged with — a user asked for the song, not for the route.
         await _edit(status, t("work.spotify_lookup", lang))
         # No language argument on purpose: a mapping failure is translated from its
         # *code* by ``error_message`` below, so the Spotify module keeps saying what
         # it diagnosed (Persian, for the log) and the user reads their own language.
         target = await spotify.youtube_target(task.url, extractor)
         target_url = target.url
-        await _edit(
-            status, t("work.spotify_mapped", lang, credit=escape_html(target.track.credit))
-        )
+        track = target.track
 
     # 2) Metadata extraction (threaded, non-blocking). A site that refuses *this
     #    request* is the one failure a different address fixes, so it goes to the
@@ -325,7 +362,15 @@ async def process_download_task(
             await _note_fallback_skip(pool, exc, cobalt)
             raise
         await _deliver_via_fallback(
-            task, bot, pool, extractor, cobalt, status, exc, target_url=target_url
+            task,
+            bot,
+            pool,
+            extractor,
+            cobalt,
+            status,
+            exc,
+            target_url=target_url,
+            track=track,
         )
         return
     if media_info.is_live:
@@ -372,10 +417,11 @@ async def process_download_task(
             exc,
             quota_claimed=True,
             target_url=target_url,
+            track=track,
         )
         return
 
-    await _finish_upload(task, bot, pool, status, result)
+    await _finish_upload(task, bot, pool, status, result, track=track)
     if target_url != task.url:
         # A *mapped* link just went through YouTube anonymously (search and all), so
         # "YouTube refuses anonymous requests here" is no longer true.
@@ -402,23 +448,32 @@ async def _finish_upload(
     pool: asyncpg.Pool,
     status: Any,
     result: DownloadResult,
+    *,
+    track: spotify.SpotifyTrack | None = None,
 ) -> None:
     """Ceiling check, upload, cache the file_id — and always drop the job dir.
 
     The *result* owns the metadata here, not the earlier extraction: the fallback
     engine has no metadata of its own, so one shape has to serve both engines.
+    ``track`` is the Spotify metadata when the link was one: it is what the audio is
+    *tagged* with (title, artist, artwork), which is the difference between "a file"
+    and the song the user asked for.
     """
     settings = get_settings()
+    lang = task.lang or DEFAULT_LANG
     try:
         files = (result.file_path, *result.extra_paths)
         actual_size = sum(path.stat().st_size for path in files)
         if actual_size > settings.upload_limit_bytes:
-            await _edit(status, t("work.final_too_big", task.lang or DEFAULT_LANG))
+            await _edit(status, t("work.final_too_big", lang))
             return
 
         # Upload to Telegram and remember the file_id (and how to send it again).
-        await _edit(status, t("work.uploading", task.lang or DEFAULT_LANG))
-        delivered = await _upload(bot, task.chat_id, result, task.lang or DEFAULT_LANG)
+        await _edit(status, t("work.uploading", lang))
+        # Inside the job directory on purpose: the artwork is part of this job and
+        # goes away with it, in the ``finally`` below.
+        cover = await spotify.download_cover(track, result.file_path.parent) if track else None
+        delivered = await _upload(bot, task.chat_id, result, lang, track=track, cover=cover)
         if delivered.cacheable:
             await cache_service.memorize(
                 pool,
@@ -428,7 +483,7 @@ async def _finish_upload(
                 request=cache_service.request_key(task.media_format, task.quality),
                 kind=delivered.kind,
             )
-        await _edit(status, t("work.done", task.lang or DEFAULT_LANG))
+        await _edit(status, t("work.done", lang))
     finally:
         shutil.rmtree(result.file_path.parent, ignore_errors=True)  # per-job dir
 
@@ -459,6 +514,7 @@ async def _deliver_via_fallback(
     *,
     quota_claimed: bool = False,
     target_url: Optional[str] = None,
+    track: spotify.SpotifyTrack | None = None,
 ) -> None:
     """Try the fallback engine on a blocked link, and finish the job if it works.
 
@@ -517,7 +573,7 @@ async def _deliver_via_fallback(
     # the user's either way, and this row is what keeps the degradation visible.
     await telemetry.record_block(pool, task, error, extractor.cookie_file)
     await fallback.remember_use(pool, fallback.USE_USED)
-    await _finish_upload(task, bot, pool, status, result)
+    await _finish_upload(task, bot, pool, status, result, track=track)
 
 
 def _file_id(media: Any) -> str:
@@ -532,13 +588,21 @@ def _file_id(media: Any) -> str:
     return str(file_id)
 
 
-def _upload_caption(result: DownloadResult, lang: str) -> str:
+def _upload_caption(
+    result: DownloadResult, lang: str, track: spotify.SpotifyTrack | None = None
+) -> str:
     """Caption for the uploaded media (title, size, resolution and duration when known).
 
     The resolution is the *actual* one, not the tier that was asked for: "up to
     1080p" is a ceiling, and a 720p upload answering it should say 720p.
+
+    A Spotify link is captioned as the *song*: artist, album, length, no platform
+    line. "🌐 youtube" under a track the user picked on Spotify is the plumbing
+    showing through, and the file is tagged with the same metadata anyway.
     """
     files = (result.file_path, *result.extra_paths)
+    if track is not None:
+        return _track_caption(track, files, lang)
     parts = [
         f"<b>{escape_html(result.info.title[:200])}</b>",
         t("work.caption_platform", lang, platform=escape_html(result.info.platform)),
@@ -556,6 +620,34 @@ def _upload_caption(result: DownloadResult, lang: str) -> str:
     duration = _fmt_duration(result.info.duration)
     if duration:
         parts.append(t("work.caption_duration", lang, duration=duration))
+    return "\n".join(parts)
+
+
+def _track_caption(
+    track: spotify.SpotifyTrack, files: tuple[Path, ...], lang: str
+) -> str:
+    """The caption a song deserves: title, artist, album, length, size."""
+    parts = [f"<b>{escape_html(track.title[:200])}</b>"]
+    if track.artist:
+        parts.append(t("work.caption_artist", lang, artist=escape_html(track.artist)))
+    if track.album:
+        album = f"{track.album} ({track.year})" if track.year else track.album
+        parts.append(t("work.caption_album", lang, album=escape_html(album)))
+    # Spotify's own length over the video's: it is the song's real one, and it is
+    # what the audio is tagged with — a caption that disagrees would be a bug.
+    duration = _fmt_duration(track.duration_s)
+    if duration:
+        parts.append(t("work.caption_duration", lang, duration=duration))
+    parts.append(
+        t(
+            "work.caption_size",
+            lang,
+            size=format_size(
+                sum(path.stat().st_size for path in files),
+                unknown=t("misc.unknown_size", lang),
+            ),
+        )
+    )
     return "\n".join(parts)
 
 
@@ -642,11 +734,32 @@ async def _send_photos(bot: Bot, chat_id: int, images: list[Path], caption: str)
 
 
 async def _send_file(
-    bot: Bot, chat_id: int, path: Path, media_format: MediaFormat, caption: str
+    bot: Bot,
+    chat_id: int,
+    path: Path,
+    media_format: MediaFormat,
+    caption: str,
+    *,
+    track: spotify.SpotifyTrack | None = None,
+    cover: Path | None = None,
 ) -> str:
-    """Upload one file the way its format deserves; returns its file_id."""
+    """Upload one file the way its format deserves; returns its file_id.
+
+    A Spotify track is tagged through Telegram rather than through ffmpeg: the API
+    stores title, performer and artwork with the file, so the song arrives
+    *identified* in the client's own player without a single byte being re-encoded
+    — and a cached replay carries the same tags, because they live in the file_id.
+    """
     if media_format == "audio":
-        sent = await bot.send_audio(chat_id, _input_file(path), caption=caption)
+        tags: dict[str, Any] = {}
+        if track is not None:
+            tags = {
+                "title": track.title,
+                "performer": track.artist,
+                "duration": track.duration_s,
+                "thumbnail": _input_file(cover) if cover is not None else None,
+            }
+        sent = await bot.send_audio(chat_id, _input_file(path), caption=caption, **tags)
         return _file_id(sent.audio)
     try:
         sent = await bot.send_video(
@@ -657,7 +770,15 @@ async def _send_file(
         return await _send_document(bot, chat_id, path, caption)
 
 
-async def _upload(bot: Bot, chat_id: int, result: DownloadResult, lang: str) -> Delivered:
+async def _upload(
+    bot: Bot,
+    chat_id: int,
+    result: DownloadResult,
+    lang: str,
+    *,
+    track: spotify.SpotifyTrack | None = None,
+    cover: Path | None = None,
+) -> Delivered:
     """Send what the download produced: one file, one photo, or a whole album.
 
     Telegram has a method per shape and the shape is the file's, so an image post
@@ -665,7 +786,7 @@ async def _upload(bot: Bot, chat_id: int, result: DownloadResult, lang: str) -> 
     and an album of them as a media group, in the post's own order.
     """
     files = (result.file_path, *result.extra_paths)
-    caption = _upload_caption(result, lang)
+    caption = _upload_caption(result, lang, track)
     images = [path for path in files if _delivery_kind(path, result.media_format) == "photo"]
     others = [path for path in files if path not in images]
     if images and not others:
@@ -678,7 +799,9 @@ async def _upload(bot: Bot, chat_id: int, result: DownloadResult, lang: str) -> 
             await _send_file(bot, chat_id, path, result.media_format, caption)
         return Delivered(kind=delivered.kind)
     return Delivered(
-        file_id=await _send_file(bot, chat_id, files[0], result.media_format, caption),
+        file_id=await _send_file(
+            bot, chat_id, files[0], result.media_format, caption, track=track, cover=cover
+        ),
         kind=_delivery_kind(files[0], result.media_format),
     )
 

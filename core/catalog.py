@@ -62,7 +62,19 @@ MESSAGES: Final[Catalog] = {
     "menu.premium": {"en": "💎 Go VIP", "fa": "💎 ارتقا به ویژه (VIP)"},
     "menu.help": {"en": "❓ Help", "fa": "❓ راهنما"},
     "menu.language": {"en": "🌐 Language", "fa": "🌐 زبان"},
+    # The one menu button an operator fills in: its target lives in the database.
+    "menu.support": {"en": "💬 Support", "fa": "💬 پشتیبانی"},
     "menu.back": {"en": "🔙 Back", "fa": "🔙 بازگشت"},
+    "support.text": {
+        "en": "💬 <b>Support</b>\n\nQuestions, a payment that needs a look, or a "
+        "download that keeps failing? Write to {contact} — the operator reads it.",
+        "fa": "💬 <b>پشتیبانی</b>\n\nسؤال، بررسی یک پرداخت، یا دانلودی که مدام خطا "
+        "می‌دهد؟ به {contact} پیام بده — خود ادمین می‌خواند.",
+    },
+    "support.unset": {
+        "en": "💬 Support is not set up on this bot yet — try again later.",
+        "fa": "💬 هنوز راه ارتباطی پشتیبانی روی این ربات تنظیم نشده است؛ بعداً امتحان کن.",
+    },
     "language.title": {
         "en": "🌐 <b>Choose the bot's language</b>\n\nIt is saved with your account, so "
         "every message — including background downloads — arrives in it.",
@@ -252,11 +264,9 @@ MESSAGES: Final[Catalog] = {
         "en": "Send me links, text, or a link inside a caption — I download media.",
         "fa": "لینک بفرست (یا لینک داخل کپشن) — من رسانه دانلود می‌کنم.",
     },
-    "intake.spotify_note": {
-        "en": "🎵 That is a Spotify link — the same song is downloaded from its YouTube "
-        "version (Spotify itself does not serve downloadable audio).",
-        "fa": "🎵 لینک اسپاتیفای است — همین آهنگ از نسخهٔ یوتیوب دانلود می‌شود "
-        "(خودِ اسپاتیفای فایل قابل دانلود نمی‌دهد).",
+    "intake.photo_auto": {
+        "en": "🖼 A photo post — downloading its media now 👇",
+        "fa": "🖼 پست عکسی است — همین حالا رسانه‌اش دانلود می‌شود 👇",
     },
     "intake.queued": {
         "en": "⏳ Added to the queue (position ≈ {depth}).",
@@ -313,12 +323,12 @@ MESSAGES: Final[Catalog] = {
         "fa": "📥 ارسال از حافظهٔ کش (دانلود قبلی) ⚡️",
     },
     "work.spotify_lookup": {
-        "en": "🎵 Spotify link — finding the YouTube version of this song…",
-        "fa": "🎵 لینک اسپاتیفای — نسخهٔ یوتیوبِ همین آهنگ پیدا می‌شود…",
+        "en": "🎵 Fetching this song…",
+        "fa": "🎵 در حال آماده‌سازی این آهنگ…",
     },
-    "work.spotify_mapped": {
-        "en": "🎵 <b>{credit}</b> — downloading the YouTube version…",
-        "fa": "🎵 <b>{credit}</b> — از نسخهٔ یوتیوب دانلود می‌شود…",
+    "work.retry": {
+        "en": "⏳ Attempt {attempt} of {attempts}…",
+        "fa": "⏳ تلاش {attempt} از {attempts}…",
     },
     "work.live": {"en": "⛔️ Live streams cannot be downloaded.", "fa": "⛔️ پخش زنده قابل دانلود نیست."},
     "work.too_big": {
@@ -355,6 +365,11 @@ MESSAGES: Final[Catalog] = {
         "fa": "خطای داخلی: {detail}",
     },
     "work.caption_platform": {"en": "🌐 {platform}", "fa": "🌐 {platform}"},
+    # A music link is captioned as the song, not as the site it was fetched from:
+    # the file carries the same metadata as its tags, so the caption agrees with the
+    # client's own player.
+    "work.caption_artist": {"en": "🎤 {artist}", "fa": "🎤 {artist}"},
+    "work.caption_album": {"en": "💿 {album}", "fa": "💿 {album}"},
     "work.caption_size": {"en": "📦 {size}", "fa": "📦 {size}"},
     "work.caption_duration": {"en": "⏱ {duration}", "fa": "⏱ {duration}"},
     "work.caption_quality": {"en": "🎬 {resolution}", "fa": "🎬 کیفیت {resolution}"},
@@ -598,6 +613,120 @@ MESSAGES: Final[Catalog] = {
     "admin.btn_back": {"en": "🔙 Back to panel", "fa": "🔙 بازگشت به پنل"},
     "admin.btn_doctor": {"en": "🩺 Run the YouTube doctor", "fa": "🩺 اجرای دکتر یوتیوب"},
     "admin.btn_refresh": {"en": "♻️ Re-export the cookie jar now", "fa": "♻️ اکسپورت دوبارهٔ کوکی"},
+    "admin.btn_broadcast": {"en": "📣 Broadcast", "fa": "📣 پیام همگانی"},
+    "admin.btn_support": {"en": "💬 Support button", "fa": "💬 دکمهٔ پشتیبانی"},
+    "admin.broadcast_intro": {
+        "en": (
+            "📣 <b>Broadcast</b>\n"
+            "\n"
+            "One message to every account the bot has — <b>{users}</b> of them, of "
+            "which the ones who blocked the bot cannot be reached (they are counted, "
+            "not failed).\n"
+            "\n"
+            "Press the button, then send what it should say: your next message is the "
+            "draft, and you see it back before anything goes out."
+        ),
+        "fa": (
+            "📣 <b>پیام همگانی</b>\n"
+            "\n"
+            "یک پیام برای همهٔ حساب‌هایی که ربات دارد — <b>{users}</b> حساب؛ آن‌هایی "
+            "که ربات را بلاک کرده‌اند قابل دسترسی نیستند (جدا شمرده می‌شوند، خطا حساب "
+            "نمی‌شوند).\n"
+            "\n"
+            "دکمه را بزن و بعد متن را بفرست: پیام بعدی تو پیش‌نویس است و قبل از ارسال "
+            "دوباره نشانت داده می‌شود."
+        ),
+    },
+    "admin.broadcast_start": {"en": "✍️ Write the message", "fa": "✍️ نوشتن پیام"},
+    "admin.broadcast_prompt": {
+        "en": "✍️ Send me the message to broadcast (text, with any formatting you like).",
+        "fa": "✍️ پیامی که می‌خواهی همگانی شود را بفرست (متن، با هر فرمتی که می‌خواهی).",
+    },
+    "admin.broadcast_preview": {
+        "en": "👆 That is exactly what {users} users would receive. Send it?",
+        "fa": "👆 دقیقاً همین برای {users} کاربر فرستاده می‌شود. ارسال شود؟",
+    },
+    "admin.broadcast_go": {"en": "✅ Send to all", "fa": "✅ ارسال به همه"},
+    "admin.broadcast_cancel": {"en": "❌ Cancel", "fa": "❌ لغو"},
+    "admin.broadcast_cancelled": {
+        "en": "❌ Broadcast cancelled — nothing was sent.",
+        "fa": "❌ پیام همگانی لغو شد — چیزی فرستاده نشد.",
+    },
+    "admin.broadcast_empty": {
+        "en": "That was not text — send the announcement as a message.",
+        "fa": "این متن نبود — متن پیام را به‌صورت پیام بفرست.",
+    },
+    "admin.broadcast_no_users": {
+        "en": "There is nobody to message yet.",
+        "fa": "هنوز کاربری برای ارسال وجود ندارد.",
+    },
+    "admin.broadcast_sending": {
+        "en": "📣 Sending… {sent}/{total}",
+        "fa": "📣 در حال ارسال… {sent}/{total}",
+    },
+    "admin.broadcast_done": {
+        "en": (
+            "✅ <b>Broadcast finished</b>\n"
+            "\n"
+            "📨 Sent: <b>{sent}</b> of {total}\n"
+            "🚫 Blocked the bot: <b>{blocked}</b>\n"
+            "⚠️ Failed: <b>{failed}</b>"
+        ),
+        "fa": (
+            "✅ <b>پیام همگانی تمام شد</b>\n"
+            "\n"
+            "📨 ارسال‌شده: <b>{sent}</b> از {total}\n"
+            "🚫 ربات را بلاک کرده‌اند: <b>{blocked}</b>\n"
+            "⚠️ ناموفق: <b>{failed}</b>"
+        ),
+    },
+    "admin.broadcast_failed": {
+        "en": "⚠️ The broadcast stopped early — the log says why; the numbers below are "
+        "from before it stopped.",
+        "fa": "⚠️ پیام همگانی نیمه‌کاره ماند — دلیلش در لاگ است؛ گزارش ناقص است.",
+    },
+    "admin.support_intro": {
+        "en": (
+            "💬 <b>Support button</b>\n"
+            "\n"
+            "Every user's menu has a 💬 Support button, and it points wherever you say: "
+            "an <code>@username</code>, a full URL (a web form, a group invite) — or "
+            "plain text, which is shown as it is.\n"
+            "\n"
+            "Right now: <b>{contact}</b>"
+        ),
+        "fa": (
+            "💬 <b>دکمهٔ پشتیبانی</b>\n"
+            "\n"
+            "منوی هر کاربر یک دکمهٔ 💬 پشتیبانی دارد و هر جا بگویی اشاره می‌کند: "
+            "<code>@username</code>، یک URL کامل (فرم وب، دعوت گروه) — یا متن ساده که "
+            "همان‌طور نمایش داده می‌شود.\n"
+            "\n"
+            "الان: <b>{contact}</b>"
+        ),
+    },
+    "admin.support_none": {"en": "— (no button is shown)", "fa": "— (دکمه‌ای نشان داده نمی‌شود)"},
+    "admin.support_set": {"en": "✍️ Set the contact", "fa": "✍️ تنظیم راه ارتباطی"},
+    "admin.support_clear": {"en": "🗑 Remove the button", "fa": "🗑 حذف دکمه"},
+    "admin.support_prompt": {
+        "en": "✍️ Send the support contact: <code>@username</code>, or a full URL.",
+        "fa": "✍️ راه ارتباطی پشتیبانی را بفرست: <code>@username</code> یا یک URL کامل.",
+    },
+    "admin.support_saved": {
+        "en": "✅ Support button set to {contact} ({kind}). It is live for every user "
+        "right now.",
+        "fa": "✅ دکمهٔ پشتیبانی روی {contact} تنظیم شد ({kind}). همین حالا برای همهٔ "
+        "کاربران فعال است.",
+    },
+    "admin.support_linked": {"en": "opens as a link", "fa": "به‌صورت لینک باز می‌شود"},
+    "admin.support_plain": {
+        "en": "shown as plain text — Telegram cannot link it",
+        "fa": "به‌صورت متن ساده نمایش داده می‌شود — تلگرام نمی‌تواند لینکش کند",
+    },
+    "admin.support_cleared": {
+        "en": "🗑 The support button was removed from the user menu.",
+        "fa": "🗑 دکمهٔ پشتیبانی از منوی کاربران حذف شد.",
+    },
     "admin.stats": {
         "en": (
             "📊 <b>Stats</b>\n"
@@ -714,8 +843,13 @@ MESSAGES: Final[Catalog] = {
             "plus a live probe, one verdict and the next fix.\n"
             "• ♻️ Cookie re-export — read a browser profile into the jar now, verify it with "
             "a probe, and tell every admin the outcome.\n"
+            "• 📣 Broadcast — one message to every user, with a preview first and a "
+            "report after.\n"
+            "• 💬 Support button — point the button in the user menu at a username or a "
+            "URL, or remove it.\n"
             "\n"
-            "The commands are still there: /doctor /refresh /blocks /trend /fixlogin."
+            "The commands are still there: /doctor /refresh /blocks /trend /fixlogin "
+            "/broadcast."
         ),
         "fa": (
             "🔧 <b>ابزارها</b>\n"
@@ -724,8 +858,11 @@ MESSAGES: Final[Catalog] = {
             "پروب زنده، یک حکم و قدم بعدی.\n"
             "• ♻️ اکسپورت دوبارهٔ کوکی — خواندن پروفایل مرورگر داخل جار، تأیید با پروب و "
             "اطلاع نتیجه به همهٔ ادمین‌ها.\n"
+            "• 📣 پیام همگانی — یک پیام برای همهٔ کاربران، اول پیش‌نمایش و بعد گزارش.\n"
+            "• 💬 دکمهٔ پشتیبانی — دکمهٔ منوی کاربر به یوزرنیم یا URL وصل می‌شود، یا حذف.\n"
             "\n"
-            "دستورها هم سر جایشان هستند: /doctor /refresh /blocks /trend /fixlogin."
+            "دستورها هم سر جای خودشان هستند: /doctor /refresh /blocks /trend /fixlogin "
+            "/broadcast."
         ),
     },
     "admin.stale": {

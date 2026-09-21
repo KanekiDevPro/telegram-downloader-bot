@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -63,15 +64,38 @@ class DownloadStates(StatesGroup):
     waiting_format = State()
 
 
-def _main_menu(lang: str) -> InlineKeyboardMarkup:
-    """The three things a user can do here, plus the way to change the language."""
+def _main_menu(
+    lang: str, *, admin: bool = False, support: bool = False
+) -> InlineKeyboardMarkup:
+    """The things a user can do here — drawn for *this* user.
+
+    Two differences that are not cosmetic. An admin is never offered «💎 Go VIP»:
+    they hold it permanently, so the button can only lead to a screen explaining
+    that they cannot buy what they already have. And the support button exists only
+    when an operator has actually configured a contact — a button nobody filled in
+    is worse than no button, because it is a promise the bot cannot keep.
+
+    Two buttons per row: these labels are long, and five full-width rows do not fit
+    on a phone screen without scrolling.
+    """
     builder = InlineKeyboardBuilder()
     builder.button(text=t("menu.profile", lang), callback_data="menu:profile")
-    builder.button(text=t("menu.premium", lang), callback_data="menu:premium")
+    if not admin:
+        builder.button(text=t("menu.premium", lang), callback_data="menu:premium")
     builder.button(text=t("menu.help", lang), callback_data="menu:help")
     builder.button(text=t("menu.language", lang), callback_data="menu:language")
-    builder.adjust(1)  # the labels are long; one per row stays tappable on a phone
+    if support:
+        builder.button(text=t("menu.support", lang), callback_data="menu:support")
+    builder.adjust(2)
     return builder.as_markup()
+
+
+async def _menu_for(
+    pool: asyncpg.Pool | None, user: asyncpg.Record, lang: str
+) -> InlineKeyboardMarkup:
+    """The menu as this user should see it (admins know it, the DB knows support)."""
+    contact = await database.get_support_contact(pool) if pool is not None else ""
+    return _main_menu(lang, admin=is_admin(user), support=bool(contact))
 
 
 def _back_to_menu(lang: str) -> InlineKeyboardMarkup:
@@ -88,6 +112,10 @@ def _format_keyboard(url: str, lang: str) -> InlineKeyboardMarkup:
     One button per offered choice, in the order ``services/content.py`` puts them
     (best first for video, the untouched stream first for audio), and a way back to
     the menu so a user who changed their mind is not stuck in a question.
+
+    Two per row, with the way back on a row of its own: the quality tiers are short
+    labels that pair up naturally, and a link that only has one thing to offer
+    (an image post) is never shown this keyboard at all — it is downloaded.
     """
     builder = InlineKeyboardBuilder()
     for choice in content.routing_for(url).choices:
@@ -95,8 +123,9 @@ def _format_keyboard(url: str, lang: str) -> InlineKeyboardMarkup:
             text=t(choice.label_key, lang),
             callback_data=f"{FMT_PREFIX}{choice.media_format}:{choice.quality}",
         )
+    builder.adjust(2)
     builder.button(text=t("menu.back", lang), callback_data="menu:home")
-    builder.adjust(1)
+    builder.adjust(2)  # ...the back button then starts a new row of its own
     return builder.as_markup()
 
 
@@ -106,9 +135,39 @@ def _language_keyboard(lang: str) -> InlineKeyboardMarkup:
     for code, label in language_options():
         marker = "✅ " if code == normalize_lang(lang) else ""
         builder.button(text=f"{marker}{label}", callback_data=f"{LANG_PREFIX}{code}")
+    builder.adjust(len(language_options()))
     builder.button(text=t("menu.back", lang), callback_data="menu:home")
-    builder.adjust(1)
+    builder.adjust(len(language_options()))
     return builder.as_markup()
+
+
+#: A Telegram handle: what a support contact may be written as (``@name`` or bare).
+_HANDLE = re.compile(r"^[A-Za-z0-9_]{4,32}$")
+
+
+def support_target(contact: str) -> str:
+    """The clickable URL for a configured support contact (``""`` when it is none).
+
+    Three things an operator can put in that field, all of them legitimate: a full
+    URL (a web form, a group invite), a ``@username``/bare handle (the usual case),
+    and anything else — which is shown as plain text rather than turned into a link
+    that goes nowhere.
+    """
+    text = contact.strip()
+    if not text:
+        return ""
+    if text.startswith(("http://", "https://")):
+        return text
+    handle = text.lstrip("@")
+    return f"https://t.me/{handle}" if _HANDLE.match(handle) else ""
+
+
+def _support_line(contact: str, lang: str) -> str:
+    """The support screen's body: the configured contact, as a link when it is one."""
+    target = support_target(contact)
+    shown = escape_html(contact)
+    linked = f'<a href="{escape_html(target)}">{shown}</a>' if target else f"<code>{shown}</code>"
+    return t("support.text", lang, contact=linked)
 
 
 def _welcome_text(name: str, lang: str) -> str:
@@ -145,16 +204,24 @@ async def _edit_or_reply(message: Message, text: str, **kwargs: Any) -> None:
 # ---------------------------------------------------------------------------
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, user: asyncpg.Record, lang: str = DEFAULT_LANG) -> None:
+async def cmd_start(
+    message: Message,
+    user: asyncpg.Record,
+    pool: asyncpg.Pool | None = None,
+    lang: str = DEFAULT_LANG,
+) -> None:
     await message.answer(
         _welcome_text(user["username"] or t("misc.friend", lang), lang),
-        reply_markup=_main_menu(lang),
+        reply_markup=await _menu_for(pool, user, lang),
     )
 
 
 @router.callback_query(F.data == "menu:home")
 async def on_menu_home(
-    cb: CallbackQuery, user: asyncpg.Record, lang: str = DEFAULT_LANG
+    cb: CallbackQuery,
+    user: asyncpg.Record,
+    pool: asyncpg.Pool | None = None,
+    lang: str = DEFAULT_LANG,
 ) -> None:
     """The "back" button — the screen it came from becomes the menu again.
 
@@ -170,7 +237,7 @@ async def on_menu_home(
     await _edit_or_reply(
         message,
         _welcome_text(user["username"] or t("misc.friend", lang), lang),
-        reply_markup=_main_menu(lang),
+        reply_markup=await _menu_for(pool, user, lang),
     )
 
 
@@ -226,6 +293,39 @@ async def on_menu_language(cb: CallbackQuery, lang: str = DEFAULT_LANG) -> None:
     await _edit_or_reply(
         message, t("language.title", lang), reply_markup=_language_keyboard(lang)
     )
+
+
+@router.callback_query(F.data == "menu:support")
+async def on_menu_support(
+    cb: CallbackQuery, pool: asyncpg.Pool | None = None, lang: str = DEFAULT_LANG
+) -> None:
+    """The support button: the contact an operator configured, or honestly nothing.
+
+    Read from the database on every tap rather than baked into the keyboard at
+    build time — that is what makes ``/support`` in the admin panel take effect
+    without a restart.
+    """
+    message = callback_message(cb)
+    if message is None:
+        await cb.answer(t("intake.stale", lang), show_alert=True)
+        return
+    await cb.answer()
+    contact = await database.get_support_contact(pool) if pool is not None else ""
+    text = _support_line(contact, lang) if contact else t("support.unset", lang)
+    await _edit_or_reply(message, text, reply_markup=_back_to_menu(lang))
+
+
+@router.message(Command("support"))
+async def cmd_support(
+    message: Message,
+    pool: asyncpg.Pool | None = None,
+    user: asyncpg.Record | None = None,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """``/support`` — the same screen, for someone who types instead of tapping."""
+    contact = await database.get_support_contact(pool) if pool is not None else ""
+    text = _support_line(contact, lang) if contact else t("support.unset", lang)
+    await message.answer(text, reply_markup=_back_to_menu(lang))
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +399,7 @@ async def on_language_chosen(
     await _edit_or_reply(
         message,
         _welcome_text(user["username"] or t("misc.friend", chosen), chosen),
-        reply_markup=_main_menu(chosen),
+        reply_markup=await _menu_for(pool, user, chosen),
     )
 
 
@@ -452,17 +552,17 @@ async def on_text_with_url(
     state: FSMContext,
     user: asyncpg.Record,
     pool: asyncpg.Pool,
+    queue: TaskQueue,
+    bot: Bot,
     lang: str = DEFAULT_LANG,
 ) -> None:
     current = await state.get_state()
     if current == DownloadStates.waiting_format.state:
-        # User pasted a new URL while a format choice was pending → replace it.
+        # User pasted a new URL while a format choice was pending → replace it,
+        # through the same intake path (so a photo post still downloads itself).
         url = extract_url(message.text or "")
         if url and validate_url(url):
-            await state.update_data(url=url)
-            await message.answer(
-                _media_question(url, lang), reply_markup=_format_keyboard(url, lang)
-            )
+            await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
         else:
             await message.answer(t("intake.invalid_link", lang))
         return
@@ -474,7 +574,7 @@ async def on_text_with_url(
     if not url:
         await message.answer(t("intake.no_link_found", lang))
         return
-    await _queue_url_flow(message, state, user, url, lang)
+    await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
 
 
 @router.message(Command("download"))
@@ -484,6 +584,8 @@ async def cmd_download(
     state: FSMContext,
     user: asyncpg.Record,
     pool: asyncpg.Pool,
+    queue: TaskQueue,
+    bot: Bot,
     lang: str = DEFAULT_LANG,
 ) -> None:
     url = extract_url(command.args or "")
@@ -494,7 +596,7 @@ async def cmd_download(
     if not url:
         await message.answer(t("intake.download_usage", lang))
         return
-    await _queue_url_flow(message, state, user, url, lang)
+    await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
 
 
 async def _queue_url_flow(
@@ -503,16 +605,37 @@ async def _queue_url_flow(
     user: asyncpg.Record,
     url: str,
     lang: str,
+    *,
+    bot: Bot,
+    pool: asyncpg.Pool,
+    queue: TaskQueue,
 ) -> None:
-    # The first thing the user sees: work has started. The probe below is quick,
-    # but "quick" and "instant" look very different in a chat window — and the
-    # message it starts in is the one that ends up carrying the outcome.
+    """A link arrives: acknowledge it, check it, then ask — or just start.
+
+    The first thing the user sees is that work has started. The probe below is
+    quick, but "quick" and "instant" look very different in a chat window — and the
+    message it starts in is the one that ends up carrying the outcome.
+
+    A link with exactly one possible answer never gets asked about. A photo post
+    can only be delivered (there is no tier, no audio, nothing to choose), so the
+    keyboard would be a single button that cannot be wrong — a menu that looks
+    broken. It is queued straight away; ``services/delivery.py`` already knows how
+    to send whatever comes back.
+    """
     status = await message.answer(t("intake.analyse", lang))
     if not validate_url(url):
         await _edit_or_reply(status, t("intake.invalid_link", lang))
         return
     if not await _probe_supported(url):
         await _edit_or_reply(status, t("intake.unsupported", lang))
+        return
+    routing = content.routing_for(url)
+    if routing.solo is not None:
+        await state.clear()
+        await _edit_or_reply(status, t("intake.photo_auto", lang))
+        await _submit(
+            bot, message, status, pool, queue, user, url, routing.solo, lang, tap=None
+        )
         return
     await state.set_state(DownloadStates.waiting_format)
     await state.update_data(url=url)
@@ -570,18 +693,42 @@ async def on_format_chosen(
     if message is None:
         await cb.answer(t("intake.stale", lang), show_alert=True)
         return
-    chat_id = message.chat.id
     # Said before the checks, not after them: the cache lookup, the quota read and
     # the preflight are three round trips, and a tap that produces nothing for a
     # second reads as a broken button.
     status = await message.answer(t("intake.queueing", lang))
+    await _submit(bot, message, status, pool, queue, user, url, choice, lang, tap=cb)
+
+
+async def _submit(
+    bot: Bot,
+    message: Message,
+    status: Message,
+    pool: asyncpg.Pool,
+    queue: TaskQueue,
+    user: asyncpg.Record,
+    url: str,
+    choice: content.Choice,
+    lang: str,
+    *,
+    tap: CallbackQuery | None,
+) -> None:
+    """Cache → quota → preflight → queue, with every answer in ``status``.
+
+    Shared by the two ways a download starts: a format button (the user chose) and
+    a photo post (there was nothing to choose). One implementation, so the cache,
+    the quota and the preflight cannot drift apart between the two — ``tap`` is the
+    button that is waiting to be answered, when there is one.
+    """
+    chat_id = message.chat.id
 
     # 1) Smart cache hit → resend the previous file_id instantly, no re-download.
     #    The key includes the requested format *and tier*, so an MP3 ask never gets
     #    a video, and a 480p ask never replays the 1080p file.
     cached = await cache_service.get_cached(pool, url, choice.media_format, choice.quality)
     if cached is not None:
-        await cb.answer()
+        if tap is not None:
+            await tap.answer()
         if await send_cached_file(bot, chat_id, cached, caption=t("work.cache_caption", lang)):
             await _edit_or_reply(status, t("intake.cache_hit", lang))
             return
@@ -594,7 +741,8 @@ async def on_format_chosen(
     limit = effective_daily_limit(user)
     if used >= limit:
         await _edit_or_reply(status, t("intake.quota_exhausted", lang, used=used, limit=limit))
-        await cb.answer(t("intake.quota_exhausted_alert", lang), show_alert=True)
+        if tap is not None:
+            await tap.answer(t("intake.quota_exhausted_alert", lang), show_alert=True)
         return
 
     # 3) Preflight: a YouTube link that cannot work should not cost a wait. Only
@@ -609,7 +757,8 @@ async def on_format_chosen(
         fallback_available=settings.cobalt_enabled,
     )
     if verdict.refused:
-        await cb.answer()
+        if tap is not None:
+            await tap.answer()
         await _edit_or_reply(status, verdict.message)
         return
 
@@ -624,13 +773,12 @@ async def on_format_chosen(
         url_hash=cache_service.cache_key(url, choice.media_format, choice.quality),
     )
     depth = await queue.enqueue(task)
-    await cb.answer()
+    if tap is not None:
+        await tap.answer()
     lines = [
         t("intake.queued", lang, depth=depth),
         t("intake.queued_background", lang),
     ]
-    if spotify.is_spotify_url(url):
-        lines.append(t("intake.spotify_note", lang))
     if verdict.message:  # a warning, not a refusal: the link is queued either way
         lines.append(verdict.message)
     await _edit_or_reply(status, "\n".join(lines))

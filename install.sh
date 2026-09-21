@@ -59,6 +59,16 @@ echo "Leave it empty (just press CTRL+D) to skip: a fresh export can be dropped 
 echo "later and the running bot picks it up without a restart."
 cat > cookies.txt
 
+# 4b. The directory the Cobalt fallback's cookie file is generated into.
+#
+#     It is bind-mounted into *two* containers (the bot writes it, cobalt reads and
+#     refreshes it), and a bind mount keeps the host's ownership — so a directory
+#     Docker creates as root is not writable by the bot, which runs as uid 10001.
+#     That is the PermissionError this line prevents; the bot also checks it at
+#     startup and names the fix if it ever goes wrong.
+mkdir -p cobalt
+chmod 777 cobalt
+
 # 5. Up.
 echo -e "${BLUE}[5/5] Starting the containers (bot, PostgreSQL, Redis, local Bot API,"
 echo -e "      Cobalt fallback, PO-token provider, YouTube session server)...${RESET}"

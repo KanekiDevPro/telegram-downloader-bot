@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
@@ -11,6 +12,8 @@ import asyncpg
 
 from core.config import get_settings
 from core.utils import utcnow
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Schema (idempotent)
@@ -670,6 +673,66 @@ async def prune_fix_events(pool: asyncpg.Pool, keep_days: int = 90) -> int:
 async def get_state(pool: asyncpg.Pool, key: str) -> str | None:
     """A remembered value (e.g. when the weekly digest was last sent)."""
     return await pool.fetchval("SELECT value FROM bot_state WHERE key = $1", key)
+
+
+# ---------------------------------------------------------------------------
+# support contact (the user menu's one operator-editable button)
+# ---------------------------------------------------------------------------
+
+#: Where the configured support link lives in ``bot_state``.
+SUPPORT_CONTACT_KEY = "support_contact"
+
+
+async def get_support_contact(pool: asyncpg.Pool) -> str:
+    """The support link / @username an operator configured (``""`` when unset).
+
+    Never raises. This is read while the *main menu* is being drawn, and a menu
+    that fails to appear because one optional row could not be read is a worse bug
+    than a button that is missing — the operator sees the failure in the log and
+    the user still gets a working bot.
+    """
+    try:
+        return str(await get_state(pool, SUPPORT_CONTACT_KEY) or "").strip()
+    except Exception:
+        logger.exception("could not read the support contact from bot_state")
+        return ""
+
+
+async def set_support_contact(pool: asyncpg.Pool, value: str) -> None:
+    """Store the support contact (``""`` removes the button)."""
+    await set_state(pool, SUPPORT_CONTACT_KEY, value.strip())
+
+
+# ---------------------------------------------------------------------------
+# broadcast (every user, one message)
+# ---------------------------------------------------------------------------
+
+#: How many recipients one query returns. The broadcast walks pages instead of
+#: loading every id at once: a deployment with a million users must not need a
+#: million integers in memory to send one announcement.
+BROADCAST_PAGE_SIZE = 500
+
+
+async def user_id_page(
+    pool: asyncpg.Pool, after: int = 0, limit: int = BROADCAST_PAGE_SIZE
+) -> list[int]:
+    """One ordered page of user ids, keyed past ``after`` (``[]`` at the end)."""
+    rows = await pool.fetch(
+        """
+        SELECT telegram_id FROM users
+         WHERE telegram_id > $1
+         ORDER BY telegram_id
+         LIMIT $2
+        """,
+        after,
+        limit,
+    )
+    return [int(row["telegram_id"]) for row in rows]
+
+
+async def count_users(pool: asyncpg.Pool) -> int:
+    """How many accounts the bot has (what a broadcast is about to reach)."""
+    return int(await pool.fetchval("SELECT COUNT(*) FROM users"))
 
 
 async def set_state(pool: asyncpg.Pool, key: str, value: str) -> None:

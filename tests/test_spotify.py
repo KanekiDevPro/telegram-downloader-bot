@@ -15,6 +15,7 @@ import json
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -24,6 +25,9 @@ from services.extractor import ExtractionError, SearchHit, url_host
 
 TRACK_ID = "4uLU6hMCjMI75M1A2tKUQC"
 TRACK_URL = f"https://open.spotify.com/track/{TRACK_ID}"
+
+#: The locale-specific image host a real embed page answers with.
+LOCALE_CDN = "https://image-cdn-fa.spotifycdn.com/image"
 
 #: The real ``__NEXT_DATA__`` payload of a track's embed page, trimmed to the keys
 #: this module reads plus a few it ignores (measured live, not invented).
@@ -39,7 +43,27 @@ EMBED_ENTITY = {
     "type": "track",
     "uri": f"spotify:track:{TRACK_ID}",
     "audioPreview": {"url": "https://p.scdn.co/mp3-preview/abc"},
+    "releaseDate": {"isoString": "1987-11-12T00:00:00Z"},
+    # The embed's image URLs are locale-specific (``image-cdn-fa``); the id is what
+    # is stable, and it is what the canonical host is rebuilt from.
+    "visualIdentity": {
+        "image": [
+            {"url": f"{LOCALE_CDN}/ab67616d00001e02abc", "maxHeight": 300, "maxWidth": 300},
+            {"url": f"{LOCALE_CDN}/ab67616d00004851abc", "maxHeight": 64, "maxWidth": 64},
+            {"url": f"{LOCALE_CDN}/ab67616d0000b273abc", "maxHeight": 640, "maxWidth": 640},
+        ]
+    },
 }
+
+#: The track page, as Spotify writes it: the album is in this line and nowhere else.
+SEARCH_PAGE_HTML = (
+    "<html><head>"
+    '<meta property="og:title" content="Never Gonna Give You Up"/>'
+    '<meta property="og:description" content="Rick Astley · Whenever You Need '
+    'Somebody · Song · 1987"/>'
+    '<meta property="music:album" content="https://open.spotify.com/album/6N9PS4QXF1D0OWPk0Sxtb4"/>'
+    "</head><body></body></html>"
+)
 
 
 def _embed_html(entity: dict[str, object] | None = None) -> str:
@@ -58,6 +82,95 @@ TRACK = spotify.SpotifyTrack(
 
 def _hit(title: str, duration_s: int | None, video_id: str = "dQw4w9WgXcQ") -> SearchHit:
     return SearchHit(url=f"https://www.youtube.com/watch?v={video_id}", title=title, duration_s=duration_s)
+
+
+def test_the_metadata_that_makes_it_a_spotify_track_is_read_too() -> None:
+    """Title, artist, year and artwork are what the delivered file is tagged with —
+    and the cover is rewritten onto the canonical host, because the embed's own URL
+    only resolves on Spotify's localized CDN."""
+    track = spotify._read_track(_embed_html(), TRACK_ID)
+
+    assert track.year == 1987
+    assert dict(track.covers) == {
+        64: "https://i.scdn.co/image/ab67616d00004851abc",
+        300: "https://i.scdn.co/image/ab67616d00001e02abc",
+        640: "https://i.scdn.co/image/ab67616d0000b273abc",
+    }
+    assert track.artist == "Rick Astley"
+
+
+def test_the_thumbnail_is_the_size_telegram_accepts() -> None:
+    """Telegram refuses a thumbnail wider than 320px, so the 640px cover Spotify
+    publishes is not one — the 300px size is, and it is sent. When every cover is
+    oversized the file travels tagged but without artwork, never with a bad one."""
+    track = spotify._read_track(_embed_html(), TRACK_ID)
+    huge = spotify.SpotifyTrack(TRACK_ID, "Song", ("Artist",), 1, covers=((640, "https://x/640"),))
+
+    assert track.thumbnail_url == "https://i.scdn.co/image/ab67616d00001e02abc"
+    assert huge.thumbnail_url == ""
+    assert spotify.SpotifyTrack(TRACK_ID, "Song", (), None).thumbnail_url == ""
+
+
+@pytest.mark.parametrize(
+    ("html", "album"),
+    (
+        (SEARCH_PAGE_HTML, "Whenever You Need Somebody"),
+        # The label before the year is localised, so the *shape* is what is checked:
+        # a Persian page (whose "Song" is «آهنگ») still yields the album, and a page
+        # of an unknown shape yields nothing rather than a wrong guess.
+        ('<meta property="og:description" content="Artist · Album · آهنگ · 1400"/>', "Album"),
+        ('<meta property="og:description" content="Artist · Album · Song"/>', ""),
+        ('<meta property="og:description" content="Artist · Album · Song · 1987 · x"/>', ""),
+        ("<html>nothing here</html>", ""),
+        (
+            '<meta property="og:description" content="Rick &amp; Co · A &amp; B · Song · 1999"/>',
+            "A & B",
+        ),
+    ),
+)
+def test_the_album_is_read_from_the_one_place_spotify_publishes_it(html: str, album: str) -> None:
+    assert spotify.album_from_page(html) == album
+
+
+async def test_a_missing_album_costs_a_line_of_caption_not_the_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The album lives on a second page; when that page is gone the track is still
+    complete enough to download and tag."""
+    async def canonical(session: object, url: str, timeout: float) -> str:
+        return TRACK_URL
+
+    async def get(session: object, url: str, timeout: float) -> str:
+        if "/track/" in url and "/embed/" not in url:
+            raise ExtractionError("SPOTIFY_LOOKUP_FAILED", "unavailable")
+        return _embed_html()
+
+    monkeypatch.setattr(spotify, "_canonical", canonical)
+    monkeypatch.setattr(spotify, "_get", get)
+
+    track = await spotify.lookup(TRACK_URL)
+
+    assert track.title == "Never Gonna Give You Up"
+    assert track.album == ""
+
+
+async def test_a_track_is_read_with_its_album_when_the_page_has_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def canonical(session: object, url: str, timeout: float) -> str:
+        return TRACK_URL
+
+    async def get(session: object, url: str, timeout: float) -> str:
+        return SEARCH_PAGE_HTML if "/embed/" not in url else _embed_html()
+
+    monkeypatch.setattr(spotify, "_canonical", canonical)
+    monkeypatch.setattr(spotify, "_get", get)
+
+    track = await spotify.lookup(TRACK_URL)
+
+    assert track.album == "Whenever You Need Somebody"
+    assert track.year == 1987
+    assert track.thumbnail_url
 
 
 class FakeExtractor:
@@ -175,7 +288,12 @@ async def test_lookup_follows_a_share_link_to_the_embed_page(monkeypatch: pytest
     track = await spotify.lookup("https://spotify.link/abcDEF123")
 
     assert track.title == "Never Gonna Give You Up"
-    assert seen == [f"https://open.spotify.com/embed/track/{TRACK_ID}"]
+    # The embed page first (that is the track), then the track page (that is the
+    # album) — both derived from the same base URL.
+    assert seen == [
+        f"https://open.spotify.com/embed/track/{TRACK_ID}",
+        f"https://open.spotify.com/track/{TRACK_ID}",
+    ]
 
 
 async def test_lookup_refuses_a_link_that_is_not_a_track(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -292,7 +410,11 @@ async def test_the_gateway_lets_a_spotify_link_through_without_asking_yt_dlp(
 
 
 class _SpotifyOrigin(BaseHTTPRequestHandler):
-    """The two pages a lookup can land on: a share hop, and the embed document."""
+    """The pages a lookup can land on: a share hop, the embed, the track page — and
+    the image CDN the cover is fetched from."""
+
+    #: A minimal thing that is announced as image/jpeg (its bytes are not parsed).
+    COVER = b"\xff\xd8\xff" + b"x" * 512
 
     def do_GET(self) -> None:  # noqa: N802 — http.server's own API
         if self.path.startswith("/share/"):
@@ -304,15 +426,20 @@ class _SpotifyOrigin(BaseHTTPRequestHandler):
             self._body(_embed_html())
             return
         if self.path.startswith(f"/track/{TRACK_ID}"):
-            self._body("<html>the share link's destination</html>")
+            self._body(SEARCH_PAGE_HTML)
+            return
+        if self.path.startswith("/image/"):
+            self._body(
+                self.COVER, content_type="image/jpeg"
+            )
             return
         self.send_response(404)
         self.end_headers()
 
-    def _body(self, html: str) -> None:
-        body = html.encode("utf-8")
+    def _body(self, html: str | bytes, content_type: str = "text/html; charset=utf-8") -> None:
+        body = html.encode("utf-8") if isinstance(html, str) else html
         self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -335,6 +462,9 @@ def origin(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     monkeypatch.setattr(
         spotify, "_EMBED_URL", f"http://{host}:{port}/embed/track/{{track_id}}"
     )
+    # The image CDN is a host too: pointing it at the origin keeps the cover fetch
+    # a real HTTP request instead of a bare function call.
+    monkeypatch.setattr(spotify, "_IMAGE_CDN", f"http://{host}:{port}/image/{{image_id}}")
     try:
         yield f"http://{host}:{port}"
     finally:
@@ -347,6 +477,38 @@ async def test_a_track_is_read_over_real_http(origin: str) -> None:
 
     assert track.credit == "Rick Astley — Never Gonna Give You Up"
     assert track.duration_s == 213
+    assert track.album == "Whenever You Need Somebody"
+
+
+async def test_the_cover_reaches_the_disk_over_real_http(
+    origin: str, tmp_path: Path
+) -> None:
+    """The artwork is fetched, size-checked and written next to the job's files."""
+    track = await spotify.lookup(TRACK_URL)
+
+    path = await spotify.download_cover(track, tmp_path)
+
+    assert path is not None and path.is_file()
+    assert path.read_bytes().startswith(b"\xff\xd8\xff")
+    assert path.parent == tmp_path
+
+
+async def test_a_cover_telegram_would_refuse_is_not_written(
+    origin: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Telegram's 200 kB thumbnail ceiling is checked *before* the upload, so an
+    oversized image costs the artwork rather than the whole file."""
+    monkeypatch.setattr(spotify, "MAX_COVER_BYTES", 10)
+    track = await spotify.lookup(TRACK_URL)
+
+    assert await spotify.download_cover(track, tmp_path) is None
+    assert not (tmp_path / spotify.COVER_FILE_NAME).exists()
+
+
+async def test_a_track_without_artwork_is_not_a_request(tmp_path: Path) -> None:
+    bare = spotify.SpotifyTrack(TRACK_ID, "Song", ("Artist",), 120)
+
+    assert await spotify.download_cover(bare, tmp_path) is None
 
 
 async def test_a_share_link_is_followed_over_real_http(origin: str) -> None:

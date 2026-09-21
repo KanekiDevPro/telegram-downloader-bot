@@ -206,6 +206,12 @@ services:
       # (its own write-back loop). The source is a *directory* that always exists,
       # so a missing cookie file is an absent file — not a Docker-created directory
       # where a file was expected. `COBALT_COOKIES_HOST_DIR` moves it.
+      #
+      # A bind mount keeps the *host* directory's ownership, so this path must be
+      # writable by uid 10001 — which is what `mkdir -p cobalt && chmod 777 cobalt`
+      # (in install.sh, and in deploy/README.md) is for. A directory Docker
+      # created itself is root-owned, and the bot's own check reports that at
+      # startup with the fix instead of failing the whole boot.
       - ${COBALT_COOKIES_HOST_DIR:-./cobalt}:/cookies
     healthcheck:
       # wget is what the image ships (no curl); the API answers JSON on `/`.

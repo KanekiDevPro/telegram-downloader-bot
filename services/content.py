@@ -18,6 +18,11 @@ So this module is a table, not a guesser, and it is honest about the difference:
 
 The file still decides how something is *delivered* (see ``services/delivery.py``);
 this only decides what can be *asked for*.
+
+One kind of link is never asked about at all: the ones with a single possible answer
+(a photo post has no tier to pick and no audio to extract). :attr:`Routing.solo`
+reports those, so the gateway queues them instead of drawing a one-button menu — see
+``handlers/user.py``.
 """
 
 from __future__ import annotations
@@ -48,6 +53,18 @@ class Routing:
     kind: ContentKind
     header_key: str
     choices: tuple[Choice, ...]
+
+    @property
+    def solo(self) -> Choice | None:
+        """The only answer this link has, when asking would be busywork.
+
+        A photo post has exactly one possible request — "send its media" — because
+        a gallery has no quality tier and no audio to extract. A menu of one honest
+        button is still a menu: it costs a round trip and reads as if the bot had
+        forgotten the other options. ``None`` means the link has real choices and
+        the question is worth asking.
+        """
+        return self.choices[0] if len(self.choices) == 1 else None
 
 
 #: Video quality tiers, best first — the order a person thinks in.

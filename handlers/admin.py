@@ -17,18 +17,23 @@ receives is not a dead end.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import asyncpg
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from core import database
 from core.config import get_settings
 from core.i18n import DEFAULT_LANG, t
 from core.utils import escape_html
-from services import cookie_refresh, login_wizard, panel
+from handlers.user import support_target
+from services import broadcast, cookie_refresh, login_wizard, panel
 from services.cobalt import CobaltService
 from services.cookie_refresh import RefreshOutcome, render_outcome
 from services.cookie_watch import DOCTOR_CALLBACK, REFRESH_CALLBACK
@@ -49,6 +54,18 @@ router = Router(name="admin")
 
 #: Telegram hard-limits a message to 4096 characters; leave room for the wrappers.
 CHUNK_LIMIT = 3800
+
+
+class AdminStates(StatesGroup):
+    """The panel's two typed inputs: an announcement, and the support contact.
+
+    Both go through a confirmation instead of acting on what arrives: a broadcast
+    reaches every user and cannot be taken back, and a mistyped support handle is a
+    broken button for everybody until somebody notices. One extra tap each.
+    """
+
+    broadcast = State()
+    support = State()
 
 
 def _chunks(text: str, limit: int = CHUNK_LIMIT) -> list[str]:
@@ -365,34 +382,66 @@ async def on_alert_check(
 #: The panel's own callback namespace (``admin:<screen>``).
 PANEL_HOME = "admin:home"
 _PANEL_SCREENS: frozenset[str] = frozenset(
-    {"home", "stats", "health", "queue", "tools"}
+    {"home", "stats", "health", "queue", "tools", "broadcast", "support"}
 )
+#: The two confirmations (they are not screens: they act).
+BC_SEND = "bc:send"
+BC_CANCEL = "bc:cancel"
+BC_START = "bc:start"
+SUP_EDIT = "sup:edit"
+SUP_CLEAR = "sup:clear"
 
 
 def _panel_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """The four screens, and the way back to the user menu."""
+    """The four reading screens, in two rows, plus the way back to the user menu."""
     builder = InlineKeyboardBuilder()
     builder.button(text=t("admin.btn_stats", lang), callback_data="admin:stats")
     builder.button(text=t("admin.btn_health", lang), callback_data="admin:health")
     builder.button(text=t("admin.btn_queue", lang), callback_data="admin:queue")
     builder.button(text=t("admin.btn_tools", lang), callback_data="admin:tools")
+    builder.adjust(2)
     builder.button(text=t("menu.back", lang), callback_data="menu:home")
-    builder.adjust(2, 2, 1)
+    builder.adjust(2)
     return builder.as_markup()
 
 
 def _tools_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """The two actions worth a tap — both of which already exist as commands.
+    """Everything an operator *does* from here.
 
-    No new machinery: the buttons call the *same* callbacks the cookie-jar alert
-    uses, so an operator who taps here and one who taps there get the identical
-    behaviour, one implementation and one set of tests.
+    The first two call the *same* callbacks the cookie-jar alert uses, so an
+    operator who taps here and one who taps there get identical behaviour — one
+    implementation and one set of tests. The last two are the panel's newer
+    actions: an announcement, and the support button every user sees.
     """
     builder = InlineKeyboardBuilder()
     builder.button(text=t("admin.btn_doctor", lang), callback_data=DOCTOR_CALLBACK)
     builder.button(text=t("admin.btn_refresh", lang), callback_data=REFRESH_CALLBACK)
+    builder.button(text=t("admin.btn_broadcast", lang), callback_data="admin:broadcast")
+    builder.button(text=t("admin.btn_support", lang), callback_data="admin:support")
+    builder.adjust(2)
     builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
-    builder.adjust(1)
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def _broadcast_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """An announcement waiting for a decision: send it, or walk away."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("admin.broadcast_go", lang), callback_data=BC_SEND)
+    builder.button(text=t("admin.broadcast_cancel", lang), callback_data=BC_CANCEL)
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def _support_keyboard(lang: str, *, configured: bool) -> InlineKeyboardMarkup:
+    """Write the contact, or remove it (shown only when there is one to remove)."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("admin.support_set", lang), callback_data=SUP_EDIT)
+    if configured:
+        builder.button(text=t("admin.support_clear", lang), callback_data=SUP_CLEAR)
+    builder.adjust(2)
+    builder.button(text=t("admin.btn_back", lang), callback_data="admin:tools")
+    builder.adjust(2)
     return builder.as_markup()
 
 
@@ -418,7 +467,35 @@ async def panel_screen(
         return await panel.queue_text(queue, settings, lang), _panel_keyboard(lang)
     if screen == "tools":
         return panel.tools_text(lang), _tools_keyboard(lang)
+    if screen == "broadcast":
+        return await _broadcast_screen(pool, lang)
+    if screen == "support":
+        return await _support_screen(pool, lang)
     return await panel.header(pool, lang), _panel_keyboard(lang)
+
+
+async def _broadcast_screen(pool: asyncpg.Pool, lang: str) -> tuple[str, InlineKeyboardMarkup]:
+    """What a broadcast will reach, before anyone writes it.
+
+    The count is read here rather than remembered from the last run: an operator
+    about to message everybody should see how many that is *now*.
+    """
+    total = await database.count_users(pool)
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("admin.broadcast_start", lang), callback_data=BC_START)
+    builder.button(text=t("admin.btn_back", lang), callback_data="admin:tools")
+    builder.adjust(2)
+    return t("admin.broadcast_intro", lang, users=total), builder.as_markup()
+
+
+async def _support_screen(pool: asyncpg.Pool, lang: str) -> tuple[str, InlineKeyboardMarkup]:
+    """Where the support button points right now, and how to change it."""
+    contact = await database.get_support_contact(pool)
+    shown = contact or t("admin.support_none", lang)
+    return (
+        t("admin.support_intro", lang, contact=escape_html(shown)),
+        _support_keyboard(lang, configured=bool(contact)),
+    )
 
 
 @router.message(Command("admin"))
@@ -472,3 +549,221 @@ async def on_panel_button(
         # Identical content (a tap on the screen already open) is not an error worth
         # a new message; a message that cannot be edited at all is.
         logger.debug("panel edit skipped (%s)", screen, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# The panel's two typed inputs: a broadcast, and the support contact
+# ---------------------------------------------------------------------------
+
+
+async def _edit(message: Message, text: str, **kwargs: Any) -> None:
+    """Replace a panel message in place, tolerating one Telegram will not touch.
+
+    A panel message that cannot be edited (too old, or already carrying exactly
+    this text) is not an error worth interrupting an operator with: the *action*
+    behind the button is what matters, and it has already happened.
+    """
+    try:
+        await message.edit_text(text, **kwargs)
+    except TelegramBadRequest:
+        logger.debug("could not edit the panel message", exc_info=True)
+
+
+@router.message(Command("broadcast"))
+async def cmd_broadcast(
+    message: Message, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
+) -> None:
+    """``/broadcast`` — the same screen the panel button opens."""
+    settings = get_settings()
+    user = message.from_user
+    if not settings.is_admin(user.id if user else None):
+        await message.answer(t("admin.only", lang))
+        return
+    text, keyboard = await _broadcast_screen(pool, lang)
+    await message.answer(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data == BC_START)
+async def on_broadcast_start(
+    cb: CallbackQuery, state: FSMContext, lang: str = DEFAULT_LANG
+) -> None:
+    """Ask for the text; the next message from this admin is the announcement."""
+    if not get_settings().is_admin(cb.from_user.id):
+        await cb.answer(t("admin.only", lang), show_alert=True)
+        return
+    message = cb.message if isinstance(cb.message, Message) else None
+    if message is None:
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    await cb.answer()
+    await state.set_state(AdminStates.broadcast)
+    await _edit(message, t("admin.broadcast_prompt", lang))
+
+
+@router.message(AdminStates.broadcast)
+async def on_broadcast_draft(
+    message: Message, state: FSMContext, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
+) -> None:
+    """The announcement itself — shown back as a *copy*, then confirmed.
+
+    A copy rather than the text pasted into a template: the message that appears is
+    byte-for-byte what the users would receive, formatting included, and it cannot
+    be broken by an announcement whose markup happens to be unbalanced.
+    """
+    user = message.from_user
+    if not get_settings().is_admin(user.id if user else None):
+        await state.clear()
+        await message.answer(t("admin.only", lang))
+        return
+    announcement = (message.html_text or message.text or "").strip()
+    if not announcement:
+        await message.answer(t("admin.broadcast_empty", lang))
+        return
+    total = await database.count_users(pool)
+    if total == 0:
+        await state.clear()
+        await message.answer(t("admin.broadcast_no_users", lang))
+        return
+    await state.update_data(announcement=announcement)
+    try:
+        await message.copy_to(message.chat.id, reply_markup=_broadcast_keyboard(lang))
+    except TelegramBadRequest:
+        # The copy is a courtesy; an announcement Telegram will not re-send is one
+        # worth refusing anyway, so the question is asked without the preview.
+        logger.info("could not show the broadcast preview as a copy", exc_info=True)
+        await message.answer(
+            t("admin.broadcast_preview", lang, users=total),
+            reply_markup=_broadcast_keyboard(lang),
+        )
+        return
+    await message.answer(t("admin.broadcast_preview", lang, users=total))
+
+
+@router.callback_query(F.data == BC_CANCEL)
+async def on_broadcast_cancel(cb: CallbackQuery, state: FSMContext, lang: str = DEFAULT_LANG) -> None:
+    """Nothing was sent, and the panel says so."""
+    if not get_settings().is_admin(cb.from_user.id):
+        await cb.answer(t("admin.only", lang), show_alert=True)
+        return
+    await state.clear()
+    message = cb.message if isinstance(cb.message, Message) else None
+    await cb.answer()
+    if message is not None:
+        await _edit(message, t("admin.broadcast_cancelled", lang))
+
+
+@router.callback_query(F.data == BC_SEND)
+async def on_broadcast_send(
+    cb: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+    pool: asyncpg.Pool,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """Run the broadcast, with the progress in the message being watched."""
+    if not get_settings().is_admin(cb.from_user.id):
+        await cb.answer(t("admin.only", lang), show_alert=True)
+        return
+    announcement = str((await state.get_data()).get("announcement") or "")
+    await state.clear()
+    if not announcement:
+        # The draft is gone (a restart emptied it, or the panel is old).
+        await cb.answer(t("admin.broadcast_cancelled", lang), show_alert=True)
+        return
+    message = cb.message if isinstance(cb.message, Message) else None
+    if message is None:
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    await cb.answer(t("admin.broadcast_sending", lang, sent=0, total=0))
+
+    async def progress(sent: int, total: int) -> None:
+        await _edit(message, t("admin.broadcast_sending", lang, sent=sent, total=total))
+
+    try:
+        report = await broadcast.deliver(bot, pool, announcement, on_progress=progress)
+    except Exception:
+        logger.exception("broadcast failed")
+        await _edit(message, t("admin.broadcast_failed", lang))
+        return
+    await _edit(
+        message,
+        t(
+            "admin.broadcast_done",
+            lang,
+            total=report.total,
+            sent=report.sent,
+            blocked=report.blocked,
+            failed=report.failed,
+        ),
+    )
+    logger.info(
+        "broadcast sent by admin %s: %s/%s (%s blocked, %s failed)",
+        cb.from_user.id,
+        report.sent,
+        report.total,
+        report.blocked,
+        report.failed,
+    )
+
+
+@router.callback_query(F.data == SUP_EDIT)
+async def on_support_edit(
+    cb: CallbackQuery, state: FSMContext, lang: str = DEFAULT_LANG
+) -> None:
+    """Ask for the new contact (a URL, or an ``@username``)."""
+    if not get_settings().is_admin(cb.from_user.id):
+        await cb.answer(t("admin.only", lang), show_alert=True)
+        return
+    message = cb.message if isinstance(cb.message, Message) else None
+    if message is None:
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    await cb.answer()
+    await state.set_state(AdminStates.support)
+    await _edit(message, t("admin.support_prompt", lang))
+
+
+@router.message(AdminStates.support)
+async def on_support_value(
+    message: Message, state: FSMContext, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
+) -> None:
+    """Store the contact — which is what makes the user menu's button appear."""
+    user = message.from_user
+    if not get_settings().is_admin(user.id if user else None):
+        await state.clear()
+        await message.answer(t("admin.only", lang))
+        return
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer(t("admin.support_prompt", lang))
+        return
+    await database.set_support_contact(pool, value)
+    await state.clear()
+    target = support_target(value)
+    await message.answer(
+        t(
+            "admin.support_saved",
+            lang,
+            contact=escape_html(value),
+            kind=t("admin.support_linked" if target else "admin.support_plain", lang),
+        ),
+        reply_markup=_support_keyboard(lang, configured=True),
+    )
+    logger.info("support contact set by admin %s: %s", user.id if user else "?", value)
+
+
+@router.callback_query(F.data == SUP_CLEAR)
+async def on_support_clear(
+    cb: CallbackQuery, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
+) -> None:
+    """Remove the button from every user's menu."""
+    if not get_settings().is_admin(cb.from_user.id):
+        await cb.answer(t("admin.only", lang), show_alert=True)
+        return
+    message = cb.message if isinstance(cb.message, Message) else None
+    await cb.answer(t("admin.support_cleared", lang))
+    await database.set_support_contact(pool, "")
+    if message is None:
+        return
+    text, keyboard = await _support_screen(pool, lang)
+    await _edit(message, text, reply_markup=keyboard)

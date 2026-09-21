@@ -121,7 +121,19 @@ class FakeBot:
         return SimpleNamespace(document=SimpleNamespace(file_id="doc-1"))
 
     async def send_audio(self, chat_id: int, file: Any, **kwargs: Any) -> Any:
-        self.uploads.append({"chat_id": chat_id, "kind": "audio", "caption": kwargs.get("caption", "")})
+        # The tags are recorded, not ignored: a Spotify track is delivered with its
+        # title, artist and artwork attached through the API (nothing re-encoded).
+        self.uploads.append(
+            {
+                "chat_id": chat_id,
+                "kind": "audio",
+                "caption": kwargs.get("caption", ""),
+                "title": kwargs.get("title"),
+                "performer": kwargs.get("performer"),
+                "duration": kwargs.get("duration"),
+                "thumbnail": kwargs.get("thumbnail"),
+            }
+        )
         return SimpleNamespace(audio=SimpleNamespace(file_id="file-1"))
 
 
@@ -137,11 +149,14 @@ class FakeExtractor:
         download_error: Optional[ExtractionError] = None,
         info: Optional[MediaInfo] = None,
         file_bytes: bytes = b"x" * 4096,
+        media_format: str = "video",
     ) -> None:
         self.download_dir = download_dir
         self.cookie_file = cookie_file
         self.extract_error = extract_error
         self.download_error = download_error
+        #: What the produced file *is* — an audio ask has to reach ``send_audio``.
+        self.media_format = media_format
         self.info = info or INFO
         self.file_bytes = file_bytes
         self.downloads = 0
@@ -175,7 +190,7 @@ class FakeExtractor:
         job.mkdir(parents=True, exist_ok=True)
         path = job / "primary.mp4"
         path.write_bytes(self.file_bytes)
-        return DownloadResult(file_path=path, info=self.info, media_format="video")
+        return DownloadResult(file_path=path, info=self.info, media_format=self.media_format)  # type: ignore[arg-type]
 
 
 class FakeCobalt:
@@ -247,6 +262,7 @@ def _install(
     download_dir: Path,
     cookie_file: Optional[Path] = None,
     daily_limit_reached: bool = False,
+    media_format: str = "video",
 ) -> Env:
     """Wire the worker's collaborators to recorders (no DB, no network)."""
     blocks: list[tuple[str, str]] = []
@@ -285,6 +301,7 @@ def _install(
         cookie_file=cookie_file,
         extract_error=extract_error,
         download_error=download_error,
+        media_format=media_format,
     )
     return Env(
         bot=FakeBot(),
@@ -588,7 +605,9 @@ async def test_a_spotify_link_is_rewritten_before_anything_is_tried(
     assert asked == [SPOTIFY_TASK.url]
     assert env.extractor.extracted == [MAPPED_URL]
     assert env.extractor.downloaded == [MAPPED_URL]
-    assert "Rick Astley" in " ".join(env.bot.status.edits)
+    # The user is told the song is being fetched — never that it was found on
+    # YouTube. The route is plumbing; the file arrives tagged as the track.
+    assert all("یوتیوب" not in edit and "YouTube" not in edit for edit in env.bot.status.edits)
     assert env.memorized == [
         {
             "url": SPOTIFY_TASK.url,  # the user's link, not the stand-in
@@ -598,6 +617,41 @@ async def test_a_spotify_link_is_rewritten_before_anything_is_tried(
             "kind": "video",
         }
     ]
+
+
+async def test_a_spotify_track_is_delivered_tagged_as_the_song(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The complaint this answers: a Spotify link used to arrive as a YouTube file
+    with a YouTube caption. Nothing is re-encoded — Telegram stores the title, the
+    performer and the artwork with the upload — and the caption names the song.
+    """
+    _patch_mapping(monkeypatch)
+    cover_dirs: list[Path] = []
+
+    async def cover(track: Any, directory: Path, **kwargs: Any) -> Any:
+        cover_dirs.append(directory)
+        return None
+
+    monkeypatch.setattr(worker.spotify, "download_cover", cover)
+    env = _install(monkeypatch, download_dir=tmp_path, media_format="audio")
+    task = replace(SPOTIFY_TASK, media_format="audio")
+
+    await worker.process_download_task(task, env.bot, env.pool, env.extractor, env.cobalt)
+
+    upload = env.bot.uploads[0]
+    assert upload["kind"] == "audio"
+    assert upload["title"] == "Never Gonna Give You Up"
+    assert upload["performer"] == "Rick Astley"
+    assert upload["duration"] == 213
+    # No artwork in this case (the fetch answered nothing) — but it was looked for
+    # inside the job directory, so the file goes away with the job.
+    assert upload["thumbnail"] is None
+    assert [path.name for path in cover_dirs] == ["job-primary"]
+    caption = upload["caption"]
+    assert "Rick Astley" in caption and "3:33" in caption
+    assert "🌐" not in caption, "a song is not captioned with the site it came from"
+    assert env.memorized[0]["request"] == "audio"
 
 
 async def test_the_net_gets_the_mapped_video_not_the_spotify_link(

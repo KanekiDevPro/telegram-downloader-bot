@@ -152,6 +152,12 @@ class FakeQueue:
         return self.depth_value
 
 
+def _fake_queue(depth: int = 0) -> Any:
+    """The stub, typed loosely: the handlers declare the real queue class, and this
+    stands in for it (two methods, no Redis)."""
+    return FakeQueue(depth=depth)
+
+
 @pytest.fixture(autouse=True)
 def _quiet_cost(monkeypatch: pytest.MonkeyPatch) -> None:
     """Quota reads: three downloads used today, clean settings, no plans.
@@ -199,7 +205,8 @@ def test_the_menu_offers_profile_premium_help_and_language() -> None:
         "❓ راهنما": "menu:help",
         "🌐 زبان": "menu:language",
     }
-    assert len(markup.inline_keyboard) == 4, "one button per row: these labels are long"
+    # Two per row: five full-width buttons do not fit on a phone screen.
+    assert [len(row) for row in markup.inline_keyboard] == [2, 2]
 
 
 def test_the_menu_speaks_the_language_it_is_drawn_in() -> None:
@@ -209,6 +216,46 @@ def test_the_menu_speaks_the_language_it_is_drawn_in() -> None:
         "❓ Help": "menu:help",
         "🌐 Language": "menu:language",
     }
+
+
+def test_the_menu_hides_the_vip_button_from_an_admin() -> None:
+    """VIP is permanent for an admin, so the button could only lead to a screen
+    explaining that they cannot buy it."""
+    markup = user_module._main_menu(FA, admin=True)
+
+    assert "menu:premium" not in dict(_buttons(markup)).values()
+    assert dict(_buttons(markup)) == {
+        "👤 پروفایل من": "menu:profile",
+        "❓ راهنما": "menu:help",
+        "🌐 زبان": "menu:language",
+    }
+
+
+def test_the_support_button_appears_only_when_somebody_configured_it() -> None:
+    assert "menu:support" not in dict(_buttons(user_module._main_menu(FA))).values()
+
+    markup = user_module._main_menu(FA, support=True)
+
+    assert dict(_buttons(markup))["💬 پشتیبانی"] == "menu:support"
+
+
+@pytest.mark.parametrize(
+    ("contact", "target"),
+    (
+        ("@helpdesk", "https://t.me/helpdesk"),
+        ("helpdesk", "https://t.me/helpdesk"),
+        ("https://t.me/somegroup", "https://t.me/somegroup"),
+        ("https://example.com/support", "https://example.com/support"),
+        # Anything else is shown as it is rather than turned into a link that goes
+        # nowhere: an operator may legitimately write "email me at …".
+        ("support@example.com", ""),
+        ("", ""),
+    ),
+)
+def test_a_support_contact_becomes_a_link_only_when_it_is_one(
+    contact: str, target: str
+) -> None:
+    assert user_module.support_target(contact) == target
 
 
 async def test_start_shows_the_menu() -> None:
@@ -610,11 +657,82 @@ async def test_the_question_matches_the_link(monkeypatch: pytest.MonkeyPatch) ->
     message = _message("https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC", bot)
 
     await user_module._queue_url_flow(
-        message, await _state(), _user(), "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC", FA
+        message,
+        await _state(),
+        _user(),
+        "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+        FA,
+        bot=cast(Bot, bot),
+        pool=object(),
+        queue=_fake_queue(),
     )
 
     assert t("intake.choose_audio", FA) in bot.edits[-1]
     assert ("🎧 صدا — M4A (اصل، بدون تبدیل)", "fmt:audio:m4a") in _buttons(bot.keyboards[-1])
+    # Two per row, with the way back on its own: the tiers pair up naturally.
+    assert [len(row) for row in bot.keyboards[-1].inline_keyboard] == [2, 1]
+
+
+def test_a_photo_post_is_offered_nothing_else() -> None:
+    """The image bug, pinned: a gallery link must not be offered audio or video
+    tiers it cannot produce. Its one option is "send the media"."""
+    for url in (
+        "https://www.instagram.com/p/abc/",
+        "https://www.tiktok.com/@user/photo/123",
+        "https://x.com/user/status/12345/photo/1",
+        "https://www.pinterest.com/pin/123/",
+    ):
+        routing = content_module.routing_for(url)
+
+        assert [choice.label_key for choice in routing.choices] == ["fmt.media"], url
+        assert routing.solo is not None, url
+
+
+def test_a_video_or_music_link_is_never_answered_without_asking() -> None:
+    for url in (
+        "https://youtu.be/abc",
+        "https://soundcloud.com/a/b",
+        "https://x.com/user/status/12345",  # ambiguous: could be anything
+    ):
+        assert content_module.routing_for(url).solo is None, url
+
+
+async def test_a_photo_post_is_downloaded_without_a_format_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A menu with one button that cannot be wrong is a menu that looks broken —
+    and every tap costs a round trip. The link goes straight to the queue."""
+    async def supported(url: str) -> bool:
+        return True
+
+    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(user_module, "_probe_supported", supported)
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
+    bot = RecordingBot()
+    message = _message("https://www.instagram.com/p/abc/", bot)
+    queue = _fake_queue(depth=2)
+    state = _fresh_state()
+
+    await user_module._queue_url_flow(
+        message,
+        state,
+        _user(),
+        "https://www.instagram.com/p/abc/",
+        FA,
+        bot=cast(Bot, bot),
+        pool=object(),
+        queue=queue,
+    )
+
+    assert bot.texts[0] == t("intake.analyse", FA)
+    assert t("intake.photo_auto", FA) in bot.edits
+    assert "موقعیت تقریبی: 2" in bot.edits[-1], "and it is already in the queue"
+    assert t("intake.choose_media", FA) not in " ".join(bot.edits), "nothing was asked"
+    assert bot.keyboards == [], "and there is nothing to tap"
+    assert [task.media_format for task in queue.tasks] == ["video"]
+    assert await state.get_state() is None, "a answered link leaves no pending step"
 
 
 # ---------------------------------------------------------------------------
@@ -623,13 +741,18 @@ async def test_the_question_matches_the_link(monkeypatch: pytest.MonkeyPatch) ->
 
 
 async def _state(url: str = "https://youtu.be/abc") -> FSMContext:
-    context = FSMContext(
-        storage=MemoryStorage(),
-        key=StorageKey(bot_id=1, chat_id=USER_ID, user_id=USER_ID),
-    )
+    context = _fresh_state()
     await context.set_state(DownloadStates.waiting_format)
     await context.update_data(url=url)
     return context
+
+
+def _fresh_state() -> FSMContext:
+    """A user with no step in progress (what a first link arrives with)."""
+    return FSMContext(
+        storage=MemoryStorage(),
+        key=StorageKey(bot_id=1, chat_id=USER_ID, user_id=USER_ID),
+    )
 
 
 async def test_a_link_is_acknowledged_before_anything_else(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -641,7 +764,14 @@ async def test_a_link_is_acknowledged_before_anything_else(monkeypatch: pytest.M
     message = _message("https://youtu.be/abc", bot)
 
     await user_module._queue_url_flow(
-        message, await _state(), _user(), "https://youtu.be/abc", FA
+        message,
+        await _state(),
+        _user(),
+        "https://youtu.be/abc",
+        FA,
+        bot=cast(Bot, bot),
+        pool=object(),
+        queue=_fake_queue(),
     )
 
     assert bot.texts[0] == t("intake.analyse", FA), "said first, before the probe"
@@ -660,7 +790,14 @@ async def test_an_unsupported_link_answers_in_the_same_message(
     message = _message("https://example.com/x", bot)
 
     await user_module._queue_url_flow(
-        message, await _state(), _user(), "https://example.com/x", FA
+        message,
+        await _state(),
+        _user(),
+        "https://example.com/x",
+        FA,
+        bot=cast(Bot, bot),
+        pool=object(),
+        queue=_fake_queue(),
     )
 
     assert bot.texts == [t("intake.analyse", FA)]

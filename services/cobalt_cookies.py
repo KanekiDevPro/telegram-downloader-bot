@@ -24,6 +24,12 @@ Two properties this module is careful about:
   meaning "when we last changed it"). The sidecar written next to it records that
   timestamp — which is what lets the doctor say "cobalt is running an older
   version" instead of guessing from an mtime.
+* **An unwritable directory degrades, it does not crash.** The file lives in a
+  bind-mounted host directory (``COBALT_COOKIES_DIR``), whose ownership comes from
+  the host — so a directory root created is not writable by the bot's uid 10001.
+  That used to be a ``PermissionError`` during startup; it is now a warned-about
+  state with the exact fix, reported by ``/doctor``
+  (:func:`ensure_cookie_dir`), while the fallback simply runs without a session.
 """
 
 from __future__ import annotations
@@ -123,7 +129,10 @@ class CobaltCookieState:
                 head += f"، بدون {', '.join(self.missing_login)}"
             return head
         if self.cookie_count:
-            return f"{self.path} — هنوز نوشته نشده ({self.cookie_count} کوکی در جار آماده است)"
+            head = f"{self.path} — هنوز نوشته نشده ({self.cookie_count} کوکی در جار آماده است)"
+            # The reason is *appended* rather than swapped in: the count is real
+            # news (the jar is ready), and so is whatever stopped the write.
+            return f"{head}؛ {self.reason}" if self.reason else head
         return f"{self.path} — ساخته نشده ({self.reason or 'کوکی یوتیوبی در جار نیست'})"
 
 
@@ -133,6 +142,45 @@ def cobalt_cookie_paths(settings: Settings) -> tuple[Path | None, Path]:
     if directory is None:
         return None, Path()
     return directory / COBALT_FILE_NAME, directory / SIDECAR_FILE_NAME
+
+
+def ensure_cookie_dir(directory: Path | None, *, create: bool = True) -> str:
+    """Make sure the cookie directory is writable *by this process*.
+
+    Returns ``""`` when it is, and a sentence naming the fix when it is not. The
+    failure this exists for is the Docker bind mount: ``docker-compose.yml`` mounts
+    the host's ``./cobalt`` over the image's ``/app/cobalt``, and a bind mount keeps
+    the *host's* ownership — so a directory created by root (a fresh ``git clone``,
+    or an installer that ran as root) is not writable by the bot's uid 10001, and
+    the image's own mode is masked by it. Creating the directory is the common case
+    (a deployment that never made one) and chmod is the best effort after that;
+    when neither works the caller degrades instead of raising, because a fallback
+    engine without cookies is worth more than a bot that will not boot.
+
+    ``create=False`` is for read-only callers (``/doctor``, ``/blocks``): they must
+    be able to *describe* the problem without creating anything.
+    """
+    if directory is None:
+        return ""
+    if create:
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return f"پوشهٔ {directory} ساخته نشد ({exc.strerror or type(exc).__name__})"
+    if os.access(directory, os.W_OK):
+        return ""
+    try:
+        os.chmod(directory, 0o777)
+    except OSError:
+        logger.debug("could not open up %s", directory, exc_info=True)
+    if os.access(directory, os.W_OK):
+        logger.info("made %s writable for the cobalt cookie file", directory)
+        return ""
+    return (
+        f"پوشهٔ {directory} برای این کاربر قابل نوشتن نیست — روی هاست درستش کنید "
+        f"(chmod 777 آن پوشه یا chown 10001) و بات را ری‌استارت کنید؛ تا آن زمان "
+        f"کوبالت بدون کوکی اجرا می‌شود"
+    )
 
 
 def cookie_header(rows: list[list[str]]) -> tuple[str, int, int]:
@@ -199,6 +247,11 @@ def sync_from_jar(settings: Settings, *, jar_path: Path | None = None) -> Cobalt
     if path is None:
         return CobaltCookieState(reason="COBALT_COOKIES_DIR خالی است")
     jar = jar_path if jar_path is not None else settings.cookie_file
+    if problem := ensure_cookie_dir(path.parent):
+        # Reported, not raised: the bot keeps serving links, the fallback simply
+        # runs without a session, and /doctor says which host permission to fix.
+        logger.error("cobalt cookies: %s", problem)
+        return replace(_read_state(path, sidecar, jar), reason=problem)
     rows = read_netscape_cookie_rows(jar)
     if not rows:
         return replace(
@@ -230,30 +283,29 @@ def sync_from_jar(settings: Settings, *, jar_path: Path | None = None) -> Cobalt
         changed = True
 
     missing = missing_youtube_login_cookies(jar)
-    if changed:
-        _write_atomically(path, text)
-        logger.info(
-            "cobalt cookies: %s youtube cookie(s) written to %s%s%s",
-            used,
-            path,
-            f" (skipped {skipped})" if skipped else "",
-            f", keeping {', '.join(others)}" if others else "",
-        )
     state = CobaltCookieState(
         path=path,
-        written=changed,
+        # Not yet written: the flag means "this call changed the file", and it
+        # only earns that after the write below actually succeeded.
+        written=False,
         cookie_count=used,
         missing_login=missing,
         other_services=others,
         source=str(jar) if jar is not None else "",
     )
-    if changed:
-        state = replace(state, generated_at=time.time())
+    if not changed:
+        return replace(state, generated_at=_read_sidecar(sidecar))
+    # One stamp for the sidecar and for the returned state: two calls to time.time()
+    # differ by microseconds, and the doctor compares this number against cobalt's
+    # start time — "the stamp survived the restart" has to be exactly true.
+    stamp = time.time()
+    try:
+        _write_atomically(path, text)
         _write_atomically(
             sidecar,
             json.dumps(
                 {
-                    "at": state.generated_at,
+                    "at": stamp,
                     "cookies": used,
                     "missing_login": list(missing),
                     "source": state.source,
@@ -264,9 +316,23 @@ def sync_from_jar(settings: Settings, *, jar_path: Path | None = None) -> Cobalt
             )
             + "\n",
         )
-    else:
-        state = replace(state, generated_at=_read_sidecar(sidecar))
-    return state
+    except OSError as exc:
+        # The same trap as an unwritable directory, one step later — a write that
+        # fails must not take the bot down with it.
+        problem = (
+            f"نوشتن در {path} ممکن نشد ({exc.strerror or type(exc).__name__}) — "
+            f"دسترسی پوشه را روی هاست درست کنید"
+        )
+        logger.error("cobalt cookies: %s", problem)
+        return replace(state, reason=problem)
+    logger.info(
+        "cobalt cookies: %s youtube cookie(s) written to %s%s%s",
+        used,
+        path,
+        f" (skipped {skipped})" if skipped else "",
+        f", keeping {', '.join(others)}" if others else "",
+    )
+    return replace(state, written=True, generated_at=stamp)
 
 
 def _read_sidecar(sidecar: Path) -> float | None:
@@ -309,11 +375,20 @@ def _read_state(path: Path, sidecar: Path, jar: Path | None) -> CobaltCookieStat
 
 
 def read_state(settings: Settings, *, jar_path: Path | None = None) -> CobaltCookieState:
-    """Describe the generated file without touching it (``/doctor``, scripts)."""
+    """Describe the generated file without touching it (``/doctor``, scripts).
+
+    An unwritable directory is *reported here* rather than discovered at the next
+    export: it is the one failure an operator can only fix on the host, and finding
+    it while reading the report is the cheapest possible moment to find it.
+    """
     path, sidecar = cobalt_cookie_paths(settings)
     if path is None:
         return CobaltCookieState(reason="COBALT_COOKIES_DIR خالی است")
-    return _read_state(path, sidecar, jar_path if jar_path is not None else settings.cookie_file)
+    state = _read_state(
+        path, sidecar, jar_path if jar_path is not None else settings.cookie_file
+    )
+    problem = ensure_cookie_dir(path.parent, create=False)
+    return replace(state, reason=problem) if problem else state
 
 
 def restart_needed(generated_at: float | None, started_at: float | None) -> bool | None:

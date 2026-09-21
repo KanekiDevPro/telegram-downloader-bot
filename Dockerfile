@@ -27,10 +27,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Run as a non-root user; downloads/ is the only directory the bot writes to.
+# Run as a non-root user. Two directories are written to: downloads/ (job files)
+# and cobalt/ (the cookies.json generated for the fallback engine from the bot's
+# own jar).
+#
+# cobalt/ is world-writable on purpose. docker-compose mounts a *host* directory
+# over it, and a bind mount keeps the host's ownership, so the mode set here only
+# covers the case where nothing is mounted — but that case is real (running the
+# image without compose) and a 0755 root-owned directory is exactly the
+# PermissionError this line exists to prevent. The bot also checks it at boot and
+# says what to fix when the mounted directory is not writable by uid 10001.
 RUN useradd --create-home --uid 10001 bot \
-    && mkdir -p /app/downloads \
-    && chown -R bot:bot /app
+    && mkdir -p /app/downloads /app/cobalt \
+    && chown -R bot:bot /app \
+    && chmod 0777 /app/cobalt
 USER bot
 
 # BOT_TOKEN, DATABASE_URL and REDIS_URL come from the environment (see compose).

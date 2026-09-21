@@ -28,6 +28,12 @@ cp .env.example .env
 # export in the project root as cookies.txt (see the note below — an empty file
 # is worse than no file)
 
+# the directory the Cobalt fallback's cookie file is generated into. It is bind-
+# mounted into two containers, and a bind mount keeps the HOST's ownership, so this
+# is what makes it writable by the bot (uid 10001). install.sh does it for you; the
+# bot also checks at startup and names the fix if it is missing.
+mkdir -p cobalt && chmod 777 cobalt
+
 docker compose up -d --build          # bot + postgres + redis + cobalt + the two YouTube helpers
 docker compose --profile local-api up -d --build   # + telegram-bot-api, 2000 MB uploads
 docker compose logs -f bot
@@ -281,6 +287,13 @@ production:
   `docker compose restart cobalt`. The jar alert says that in the message, and `/doctor` compares the
   sidecar's stamp with the instance's own start time, so "the running instance is on the old
   version" is a fact you can read, not an mtime to interpret.
+- **The directory must be writable by the bot's uid.** `cobalt/` is mounted into *both* containers,
+  and a bind mount keeps the host directory's owner: if it was created by root (a fresh clone, or an
+  installer that ran as root), uid `10001` cannot write into it. That used to be a `PermissionError`
+  at startup. Now the bot creates the directory, tries `chmod 0777`, and — if it still cannot write —
+  logs one error naming the fix (`chmod 777 cobalt`, or `chown 10001 cobalt`) and keeps running with
+  the fallback unsessioned; `/doctor` reports the same line. The image also ships `/app/cobalt` as
+  world-writable for the case where nothing is mounted over it.
 - **A file the bot did not write is never replaced.** A hand-made `cookies.json` — including the
   flat-array shape one of cobalt's docs examples suggests — is reported by `/doctor` and left alone;
   other services in it (`instagram`, `twitter`, …) survive every regeneration.
@@ -389,6 +402,26 @@ The bot speaks English and Persian, and the choice belongs to the *user*, not to
 
 The installer (`install.sh`) asks for the default language while it writes `.env`, so a fresh VPS
 needs no second step.
+
+### Announcing something, and the support button
+
+Both live in `/admin` → 🔧 Tools.
+
+**📣 Broadcast** sends one message to every account. It counts the recipients first, asks for the
+text, shows your message back as a *copy* (so what you approve is byte-for-byte what users get,
+formatting included), and only sends after you confirm. The sending walks the table a page at a
+time and paces itself (~16/s, well under Telegram's ~30/s per bot, and it sleeps the exact
+`retry_after` when the API still pushes back), then reports four numbers: sent, blocked the bot,
+failed, out of the total. A user who blocked the bot is *counted*, not treated as an error — that
+is the most common outcome of a broadcast, and it is nobody's fault. `/broadcast` opens the same
+screen.
+
+**💬 Support button** is the one menu button an operator fills in: `@username`, a full URL (a web
+form, a group invite), or plain text — which is shown as it is, and the panel says which of the two
+it will be. Set it and every user's `/start` menu carries it immediately (the value is read from
+`bot_state` on each tap, not baked into a keyboard); leave it empty, or press 🗑 Remove, and the
+button is not there at all. `support@example.com` is accepted and explained: Telegram cannot link
+it, so it is shown as text.
 
 ### The `telegram-api` service
 
