@@ -52,6 +52,13 @@ IPV4_ANY = "0.0.0.0"
 OAUTH2_USERNAME = "oauth2"
 OAUTH2_PASSWORD = ""
 
+#: The stable error code for the OAuth refusal a misconfigured deployment meets:
+#: ``YTDLP_USE_OAUTH2=1`` on a yt-dlp that no longer implements the flow. Its
+#: own code (not ``GENERAL``) because the fix is one switch in `.env`, and a
+#: message that says «خطای غیرمنتظره» sends the operator chasing the site
+#: instead of their own settings.
+OAUTH_REFUSED_CODE = "OAUTH_REFUSED"
+
 # ---------------------------------------------------------------------------
 # Format selection (Telegram-optimised output)
 # ---------------------------------------------------------------------------
@@ -717,6 +724,16 @@ def _map_download_error(exc: DownloadError) -> ExtractionError:
             "TIMEOUT",
             "ارتباط با سرور مبدأ قطع شد؛ دوباره تلاش کنید.",
         ),
+        (
+            # The OAuth flag is configured but this yt-dlp refuses the flow — a
+            # *self-inflicted* misconfiguration, not the site's behaviour. Named
+            # as its own code so the doctor's verdict (and the user's message)
+            # can say «تنظیمات خودمان است», not «خطای غیرمنتظره».
+            ("login with oauth is no longer supported",),
+            OAUTH_REFUSED_CODE,
+            "ربات برای لاگین یوتیوب روی OAuth تنظیم شده ولی این نسخهٔ yt-dlp آن را "
+            "پشتیبانی نمی‌کند (یوتیوب مسیر را بسته) — کلید YTDLP_USE_OAUTH2 را خاموش کنید.",
+        ),
     )
     for needles, code, msg in mapping:
         if any(needle in lowered for needle in needles):
@@ -987,6 +1004,11 @@ class ExtractorService:
         #: IPv4-only when the app says so; see ``IPV4_ANY``.
         self.force_ipv4 = force_ipv4
         self.use_oauth2 = use_oauth2
+        #: The outcome of the capability probe: ``None`` until first asked, then a
+        #: bool. ``oauth_impossible`` reads ``use_oauth2 and probe said no`` — the
+        #: one case where the configured flag must NOT reach the request (a yt-dlp
+        #: that refuses the flow would otherwise refuse every extraction).
+        self._oauth_supported: bool | None = None
         self.cache_dir = cache_dir.strip()
         #: Retries after a retryable failure, and the base of the exponential
         #: backoff between them (0 disables both).
@@ -1014,6 +1036,23 @@ class ExtractorService:
     @property
     def using_proxy(self) -> bool:
         return bool(self.proxy)
+
+    @property
+    def oauth_impossible(self) -> bool:
+        """``YTDLP_USE_OAUTH2=1`` on a yt-dlp that refuses the flow.
+
+        The probe runs once, off the event loop, and its answer is remembered —
+        an import plus a login call is not something to spend per request. Until
+        it has run, the flag is assumed *possible*: the flag must not be dropped
+        on the strength of a probe that has not answered yet.
+        """
+        if not self.use_oauth2:
+            return False
+        if self._oauth_supported is None:
+            from services.oauth import probe_oauth_support_sync
+
+            self._oauth_supported = probe_oauth_support_sync()
+        return not self._oauth_supported
 
     @property
     def using_pot_provider(self) -> bool:
@@ -1106,15 +1145,16 @@ class ExtractorService:
             # plugin, the device-flow token — are kept. Pointless without the flag
             # on a stock install; cheap either way.
             opts["cache_dir"] = self.cache_dir
-        if self.use_oauth2:
-            # The Smart-TV device flow: yt-dlp prompts ``go to
-            # https://www.google.com/device and enter code XXX-YYY-ZZZ`` on its
-            # progress reporter, then polls until the code is entered. The
-            # password is empty *by contract* — the flow authenticates the
-            # device, not an account. The plugin's own guidance is to avoid
-            # running it *with* a cookie jar (the jar's anonymous identifiers can
-            # trip the token exchange), so a deployment with both configured gets
-            # one loud warning rather than a silent conflict.
+        # ``oauth_impossible`` runs the capability probe once; the two-branch
+        # structure makes the answer decide which flags reach yt-dlp.
+        if self.use_oauth2 and not self.oauth_impossible:
+            # The Smart-TV device flow (``username: oauth2``), for the yt-dlp
+            # builds — stock, or a reviving plugin — that still implement it.
+            # The password is empty *by contract*: the flow authenticates the
+            # device, not an account. The plugin's guidance is to avoid running
+            # it *with* a cookie jar (the jar's anonymous identifiers can trip
+            # the token exchange), so a deployment with both configured gets one
+            # loud warning rather than a silent conflict.
             if allow_cookies and (self.cookie_file is not None or self.using_browser_cookies):
                 logger.warning(
                     "OAuth2 login is enabled alongside a cookie jar — yt-dlp's OAuth "
@@ -1124,6 +1164,22 @@ class ExtractorService:
                 )
             opts["username"] = OAUTH2_USERNAME
             opts["password"] = OAUTH2_PASSWORD
+        elif self.oauth_impossible:
+            # ``YTDLP_USE_OAUTH2=1`` on a yt-dlp that no longer implements the
+            # flow (YouTube revoked it). Sending ``username: oauth2`` anyway
+            # would make EVERY extraction die before it starts — including the
+            # ones the working cookie jar would have served — so the flag is
+            # dropped and the reason said once. The operator asked for OAuth and
+            # a deployment must not silently pretend it is logging in that way;
+            # but it must also not let a knob that cannot work take down the
+            # route that does. Measured by services/oauth.py, surfaced by
+            # /doctor, and never allowed to poison the requests.
+            logger.warning(
+                "YTDLP_USE_OAUTH2=1 but this yt-dlp refuses the OAuth2 flow — "
+                "the flag is NOT applied to requests (a dead switch must not take "
+                "down the working cookie route). /doctor shows the refusal; a "
+                "reviving plugin re-enables it."
+            )
         # Browser cookies are merged with the jar file by yt-dlp; whichever is
         # missing is skipped, so both can be configured safely. ``allow_cookies=False``
         # is the second opinion a stale session sometimes needs: the same request

@@ -1358,6 +1358,17 @@ def _verdict(
             )
         return ("ℹ️ تست زنده انجام نشد.", "برای اطمینان کامل بدون --no-probe اجرا کنید.")
 
+    if probe_error.code == "OAUTH_REFUSED":
+        # A misconfiguration on *our* side, named by the extractor: the OAuth
+        # switch is on but this yt-dlp refuses the flow. The jar may be perfect —
+        # the flag simply stood in front of it. One line, one switch.
+        return (
+            "⛔️ مشکل از تنظیمات خود ربات است، نه از یوتیوب.",
+            "YTDLP_USE_OAUTH2=1 در .env روشن است ولی این yt-dlp جریان OAuth را ندارد "
+            "(یوتیوب مسیر را بسته) — کلید را خاموش کنید و کانتینر را ری‌استارت کنید؛ "
+            "کوکی لاگین‌شده مسیر اصلی است و بدون این کلید کار می‌کند.",
+        )
+
     if probe_error.code == "SESSION_STALE":
         # Not a block: YouTube accepted the session but refused the request. The
         # usual causes are a rotated login, an unusable visitor binding, or a

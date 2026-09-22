@@ -346,6 +346,15 @@ is on, and the `📺` row in `/doctor` shows the state either way. A plugin that
 installed into a mounted plugin directory (`/app/config/yt-dlp`), re-enables the whole path with
 no code changes. Off by default — on stock yt-dlp the switch only buys the clear error.
 
+**And the switch cannot take the working route down with it.** The refusal is detected *before*
+requests are built (`oauth_impossible` on the extractor, same probe), so on stock yt-dlp the
+`username: oauth2` flag is dropped at request time — every link that the cookie jar would have
+served still goes out, with one log line saying the flag was not applied. If a refusal ever does
+reach a request (a probe window race, a plugin that loads too late), it is classified as
+`OAUTH_REFUSED`, not a generic error: the user is told the bot's login method is misconfigured and
+an admin has been notified, and `/doctor`'s verdict names the switch (`YTDLP_USE_OAUTH2` off →
+restart) instead of «خطای غیرمنتظره».
+
 Regenerate cookies whenever downloads start failing again:
 
 ```bash

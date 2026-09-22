@@ -100,6 +100,19 @@ async def probe_oauth_support() -> tuple[bool, str]:
     return await asyncio.to_thread(_probe_in_thread)
 
 
+def probe_oauth_support_sync() -> bool:
+    """The blocking probe, for callers already off the event loop.
+
+    :meth:`ExtractorService._base_opts` runs in a worker thread by design (the
+    whole point of the executor wrapper), so awaiting ``to_thread`` there is
+    both illegal and unnecessary — this is the same measurement, called
+    directly. First element of the tuple only; the refusal text is for the
+    report, not the request path.
+    """
+    supported, _evidence = _probe_in_thread()
+    return supported
+
+
 @dataclass(frozen=True)
 class OAuthOutcome:
     """How one device-flow attempt ended — and what to tell the admin."""

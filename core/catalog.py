@@ -416,6 +416,10 @@ MESSAGES: Final[Catalog] = {
         "en": "The extraction failed unexpectedly. Try again in a moment.",
         "fa": "خطای غیرمنتظره در استخراج رخ داد؛ کمی بعد دوباره تلاش کنید.",
     },
+    "err.OAUTH_REFUSED": {
+        "en": "The bot's YouTube login method is misconfigured — an admin has been notified.",
+        "fa": "تنظیمات لاگین یوتیوب ربات اشتباه است — ادمین‌ها خبردار شدند.",
+    },
     "err.UNSUPPORTED_URL": {
         "en": "The extraction engine does not support this link.",
         "fa": "این لینک توسط موتور استخراج پشتیبانی نمی‌شود.",
