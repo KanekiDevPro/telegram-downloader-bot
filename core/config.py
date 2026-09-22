@@ -413,6 +413,22 @@ class Settings(BaseSettings):
     #: ``none``, or ``node[:/path/to/node]`` / ``deno`` / ``bun`` / ``quickjs``.
     #: YouTube extraction degrades without one.
     ytdlp_js_runtime: str = Field(default="auto", alias="YTDLP_JS_RUNTIME")
+    #: Where yt-dlp may fetch EJS challenge-solver scripts from, when neither the
+    #: ``yt-dlp-ejs`` package nor its cache has one (yt-dlp's own
+    #: ``--remote-components``). Written exactly as yt-dlp spells the values:
+    #: ``ejs:github`` (yt-dlp/ejs GitHub releases) and ``ejs:npm`` (npm), comma-
+    #: or space-separated. Default ``ejs:github``: with *no* source for the
+    #: solver's lib script, the n challenge cannot be solved and YouTube serves
+    #: degraded formats ("n challenge solving failed"). Not required — empty
+    #: turns remote fetching off and the ``yt-dlp-ejs`` package alone serves.
+    #: Production impact: extraction of challenge-protected sites only; fetched
+    #: scripts are version-pinned and hash-checked by yt-dlp, then cached in
+    #: ``YTDLP_CACHE_DIR``. (This yt-dlp takes the *list* spelling — a dict like
+    #: ``{ejs: github}`` is discarded as an unsupported component.)
+    ytdlp_remote_components: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["ejs:github"],
+        alias="YTDLP_REMOTE_COMPONENTS",
+    )
     #: YouTube clients to ask for, in order (``YTDLP_YOUTUBE_CLIENTS``, written the
     #: way a list usually is: ``visionos,web_embedded,tv_downgraded,web``). Empty =
     #: yt-dlp picks (its own default is ``visionos``+``web`` for an anonymous
@@ -678,14 +694,15 @@ class Settings(BaseSettings):
             return value
         return value.strip().rstrip("/")
 
-    @field_validator("ytdlp_youtube_clients", mode="before")
+    @field_validator("ytdlp_youtube_clients", "ytdlp_remote_components", mode="before")
     @classmethod
-    def _parse_youtube_clients(cls, value: object) -> object:
+    def _parse_name_list(cls, value: object) -> object:
         """``a,b`` / ``a b`` / ``[a, b]`` — lower-cased, because yt-dlp lower-cases.
 
-        A blank value means "let yt-dlp decide", which is why it maps to an empty
-        list and *not* to the default: the default is a choice this deployment makes,
-        and an operator who writes an empty value is making a different one.
+        A blank value means "let yt-dlp decide" (clients) or "no remote sources"
+        (components) — either way it maps to an empty list and *not* to the
+        default: the default is a choice this deployment makes, and an operator
+        who writes an empty value is making a different one.
         """
         if value is None:
             return []

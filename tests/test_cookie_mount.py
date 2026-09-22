@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import stat
+import threading
 from pathlib import Path
 
 import pytest
@@ -77,10 +78,17 @@ def test_the_writable_copy_is_moved_into_place(tmp_path: Path) -> None:
     assert [path.name for path in (tmp_path / ".cookies").iterdir()] == ["cookies.txt"]
 
 
-def test_a_failed_copy_leaves_the_previous_jar_intact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_failed_copy_everywhere_never_hands_over_the_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """No space, no permission: yt-dlp gets the source instead of a truncated jar."""
+    """No space, no permission: yt-dlp gets *no* jar — never the read-only one.
+
+    Handing the source over is exactly the reported production failure: yt-dlp
+    rewrites its cookiefile at close, so a read-only mount ends every run in
+    ``OSError: [Errno 30] Read-only file system: '/cookies/cookies.txt'``. The
+    anonymous fallback is deliberate — and it says ``COOKIE_STORAGE`` once,
+    loudly, with paths and errnos only.
+    """
     source = _jar(tmp_path / "cookies.txt", _row("SAPISID", "old"))
     extractor = _service(tmp_path, source)
     copy_path = Path(extractor._base_opts(extract_only=True)["cookiefile"])
@@ -91,11 +99,47 @@ def test_a_failed_copy_leaves_the_previous_jar_intact(
         raise OSError("no space left on device")
 
     monkeypatch.setattr(extractor_module.shutil, "copyfile", failing_copy)
-    handed = extractor._base_opts(extract_only=True)["cookiefile"]
 
-    assert Path(handed) == source, "the mounted jar is handed over, not a broken copy"
+    with caplog.at_level("ERROR"):
+        first = extractor._base_opts(extract_only=True)
+        second = extractor._base_opts(extract_only=True)
+
+    assert "cookiefile" not in first, "yt-dlp is never pointed at a jar it would rewrite"
+    assert "cookiefile" not in second
     assert "old" in copy_path.read_text(encoding="utf-8"), "the previous copy is untouched"
     assert [path.name for path in copy_path.parent.iterdir()] == ["cookies.txt"]
+    errors = [record.getMessage() for record in caplog.records if record.levelname == "ERROR"]
+    storage_errors = [message for message in errors if "COOKIE_STORAGE" in message]
+    assert len(storage_errors) == 1, "one loud error per jar, not one per call"
+    assert "no space" in storage_errors[0] and str(source) in storage_errors[0]
+
+
+def test_the_system_temp_dir_serves_when_the_download_area_does_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unwritable downloads/ volume must not cost the login.
+
+    The download area is the first copy location; a per-process directory under
+    the system temp dir is the second. Only when *both* fail does a run go
+    anonymous (the test above).
+    """
+    source = _jar(tmp_path / "cookies.txt")
+    extractor = _service(tmp_path, source)
+    real_copy = extractor_module.shutil.copyfile
+
+    def download_area_is_read_only(src: os.PathLike[str], dst: os.PathLike[str]) -> None:
+        if ".cookies" in Path(dst).parts:
+            raise OSError(30, "Read-only file system")
+        real_copy(src, dst)
+
+    monkeypatch.setattr(extractor_module.shutil, "copyfile", download_area_is_read_only)
+
+    handed = Path(extractor._base_opts(extract_only=True)["cookiefile"])
+
+    assert handed != source and handed.parent != tmp_path / ".cookies"
+    assert handed.parent.name.startswith("tdb-cookies-"), "the per-process runtime dir"
+    assert handed.is_file() and os.access(handed, os.W_OK)
+    assert handed.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
 
 
 def test_the_copy_is_what_yt_dlp_rewrites_when_a_download_ends(tmp_path: Path) -> None:
@@ -114,6 +158,77 @@ def test_the_copy_is_what_yt_dlp_rewrites_when_a_download_ends(tmp_path: Path) -
     # Handed the bot's copy, the same close is uneventful.
     yt_dlp.YoutubeDL({**opts, "quiet": True, "no_warnings": True}).close()
     assert source.read_text(encoding="utf-8") == HEADER + _row("SAPISID")
+
+
+def test_each_run_gets_a_private_copy_and_the_jar_never_moves(tmp_path: Path) -> None:
+    """The rewrite-on-close lands on a private, disposable copy.
+
+    The source and the shared snapshot survive every run byte-identical — that
+    is what makes concurrent runs safe and the mount permanently read-only.
+    """
+    source = _jar(tmp_path / "cookies.txt", _row("LOGIN_INFO"), _row("SAPISID", "x"))
+    extractor = _service(tmp_path, source)
+    opts = extractor._base_opts(extract_only=True)
+    snapshot = Path(opts["cookiefile"])
+    before = source.read_text(encoding="utf-8")
+
+    with extractor._ydl(opts) as ydl:
+        run_copy = Path(ydl.params["cookiefile"])
+        assert run_copy != snapshot and run_copy != source
+        assert run_copy.is_file() and os.access(run_copy, os.W_OK)
+        assert run_copy.read_text(encoding="utf-8") == before
+
+    # The real close() above *saved* the jar back — proving the write lands on
+    # the private copy: gone now, with both shared files untouched.
+    assert not run_copy.exists(), "the private copy is removed with the run"
+    assert source.read_text(encoding="utf-8") == before
+    assert snapshot.read_text(encoding="utf-8") == before
+
+
+def test_concurrent_runs_never_share_a_cookie_file(tmp_path: Path) -> None:
+    """Worker A must never rewrite the jar worker C is reading.
+
+    yt-dlp truncates-and-rewrites its cookiefile at close; runs sharing one file
+    could catch it half-written — which parses as "no cookies" and turns into a
+    bogus block. Every concurrent run therefore gets its own copy: proven here
+    by four runs overlapping at a barrier, all seeing distinct writable files,
+    all cleaned up afterwards, with the source and snapshot untouched.
+    """
+    source = _jar(tmp_path / "cookies.txt", _row("LOGIN_INFO"), _row("SAPISID", "x"))
+    extractor = _service(tmp_path, source)
+    opts = extractor._base_opts(extract_only=True)
+    snapshot = Path(opts["cookiefile"])
+    before = source.read_text(encoding="utf-8")
+
+    runs = 4
+    barrier = threading.Barrier(runs)
+    seen: list[Path] = []
+    failures: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            with extractor._ydl(opts) as ydl:
+                path = Path(ydl.params["cookiefile"])
+                assert path.is_file() and os.access(path, os.W_OK)
+                assert path.read_text(encoding="utf-8") == before
+                seen.append(path)
+                barrier.wait(timeout=30)
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the main thread
+            failures.append(exc)
+
+    threads = [threading.Thread(target=run) for _ in range(runs)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert not failures, f"concurrent runs failed: {failures!r}"
+    assert len(seen) == runs
+    assert len(set(seen)) == runs, "no two runs share a cookie file"
+    assert all(not path.exists() for path in seen), "every private copy is cleaned up"
+    assert source.read_text(encoding="utf-8") == before
+    assert snapshot.read_text(encoding="utf-8") == before
+    assert [path.name for path in (tmp_path / ".cookies").iterdir()] == ["cookies.txt"]
 
 
 def test_a_fresh_export_reaches_yt_dlp_without_a_restart(

@@ -16,11 +16,13 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, Sequence, TypeVar
+from typing import Any, Callable, Iterator, Literal, Optional, Sequence, TypeVar
 from urllib.parse import urlparse
 
 import yt_dlp
@@ -58,6 +60,72 @@ OAUTH2_PASSWORD = ""
 #: message that says «خطای غیرمنتظره» sends the operator chasing the site
 #: instead of their own settings.
 OAUTH_REFUSED_CODE = "OAUTH_REFUSED"
+
+#: A cookie *filesystem* failure: the jar exists and is valid, but no writable
+#: copy of it could be made — so yt-dlp runs without cookies rather than being
+#: pointed at a file it rewrites on close (which on a read-only mount ends every
+#: run in ``OSError: [Errno 30]``). Distinct from "cookies missing/invalid":
+#: that one is about the jar, this one is about the disk.
+COOKIE_STORAGE_CODE = "COOKIE_STORAGE"
+
+#: yt-dlp's own warning texts, mapped to the failure class each one means —
+#: first match wins (most specific first). These strings are the *only* place
+#: the cause of a degraded YouTube extraction is ever spelled out ("Review any
+#: warnings presented before this message", says yt-dlp's own challenge hint),
+#: which is exactly why they are routed into our log by :class:`YdlLogAdapter`
+#: instead of being dropped by ``no_warnings``.
+_YDL_WARNING_CLASSES: tuple[tuple[tuple[str, ...], str], ...] = (
+    # The challenge was attempted and failed — formats will be missing.
+    (("n challenge solving failed", "signature solving failed"), "YTDLP_CHALLENGE"),
+    # The solver script could not be fetched from its remote source.
+    (("failed to download challenge solver",), "YTDLP_REMOTE_COMPONENTS"),
+    # The EJS solver script could not be prepared from any source at all.
+    (("no usable challenge solver", "challenge solver", "external javascript"), "YTDLP_EJS"),
+    # The cookie jar failed to load or parse mid-run.
+    (("cookie",), "YTDLP_COOKIES"),
+    # The JavaScript runtime (deno/node/bun/quickjs) is missing or refused.
+    (("runtime", "deno", "quickjs", "bun", "node"), "YTDLP_JS_RUNTIME"),
+)
+
+
+def classify_ydl_warning(text: str) -> str:
+    """Which failure class a yt-dlp warning/error belongs to (``YTDLP`` = other).
+
+    Five distinct problems all end in the same sentence ("some formats may be
+    missing"): a missing runtime, a missing EJS script, a refused remote fetch,
+    a failed n challenge, a broken jar. The tag makes them tellable apart in the
+    log without opening a debugger on yt-dlp.
+    """
+    lowered = text.lower()
+    for needles, code in _YDL_WARNING_CLASSES:
+        if any(needle in lowered for needle in needles):
+            return code
+    return "YTDLP"
+
+
+class YdlLogAdapter:
+    """Routes yt-dlp's console output into the bot's log, classified by cause.
+
+    ``no_warnings: True`` used to drop yt-dlp's warnings on the floor — and its
+    warnings are where every interesting reason lives: a skipped EJS source, a
+    refused script download, a failed n challenge. yt-dlp calls
+    ``debug``/``info``/``warning``/``error`` on whatever ``opts['logger']`` holds;
+    this maps them onto this module's logger with the class tag from
+    :func:`classify_ydl_warning`. yt-dlp's sentences carry URLs and reasons —
+    never cookie contents, which is why routing them is safe.
+    """
+
+    def debug(self, message: str) -> None:
+        logger.debug("yt-dlp: %s", message)
+
+    def info(self, message: str) -> None:
+        logger.info("yt-dlp: %s", message)
+
+    def warning(self, message: str) -> None:
+        logger.warning("yt-dlp [%s]: %s", classify_ydl_warning(message), message)
+
+    def error(self, message: str) -> None:
+        logger.error("yt-dlp [%s]: %s", classify_ydl_warning(message), message)
 
 # ---------------------------------------------------------------------------
 # Format selection (Telegram-optimised output)
@@ -330,6 +398,24 @@ def detect_js_runtimes(spec: str = "auto") -> dict[str, dict[str, str]]:
         if found:
             return {name: {"path": found}}
     return {}
+
+
+def js_runtime_boot_line(js_runtimes: dict[str, dict[str, str]]) -> str | None:
+    """The one boot warning for a missing JavaScript runtime (``None``: present).
+
+    A missing runtime is not a crash, but it is not cosmetic either: without one
+    YouTube's n/sig challenges cannot be solved at all and formats go missing —
+    so the sentence names the consequence and the fixes, instead of saying only
+    "not found". Shared by the boot log and the tests so the two cannot drift.
+    """
+    if js_runtimes:
+        return None
+    return (
+        "no JavaScript runtime (deno/node/bun/qjs) found — YouTube extraction is "
+        "degraded without one: n/sig challenges cannot be solved and some formats "
+        "will be missing. The Docker image ships Deno; on a host, install one or "
+        "point YTDLP_JS_RUNTIME at it."
+    )
 
 
 #: yt-dlp plugin package that turns the provider URL into actual PO tokens.
@@ -953,6 +1039,12 @@ class ExtractorService:
         pot_provider_url: str = "",
         cookies_from_browser: str = "",
         js_runtime: str = "auto",
+        #: Which *remote* sources yt-dlp may fetch EJS challenge-solver scripts
+        #: from (its ``--remote-components`` values: ``ejs:github`` / ``ejs:npm``).
+        #: Only consulted when neither the ``yt-dlp-ejs`` package nor yt-dlp's
+        #: cache has the script. Empty (default here) leaves yt-dlp's own policy;
+        #: the app passes ``settings.ytdlp_remote_components``.
+        remote_components: Sequence[str] = (),
         #: YouTube clients to ask for, in order. Empty = yt-dlp's own choice, which is
         #: the honest default for a caller that has not thought about it (a probe, a
         #: test); the app passes ``settings.ytdlp_youtube_clients``.
@@ -987,6 +1079,15 @@ class ExtractorService:
         self.proxy = proxy.strip()
         self.pot_provider_url = pot_provider_url.strip().rstrip("/")
         self.js_runtimes = detect_js_runtimes(js_runtime)
+        #: Lower-cased and de-duplicated, like the client list below: yt-dlp
+        #: compares these strings exactly (``'ejs:github'``, ``'ejs:npm'``).
+        self.remote_components = tuple(
+            dict.fromkeys(
+                component.strip().lower()
+                for component in remote_components
+                if component and component.strip()
+            )
+        )
         #: Lower-cased like yt-dlp will read them, and de-duplicated in order: a
         #: repeated client costs a second player request for nothing.
         self.youtube_clients = tuple(
@@ -1018,6 +1119,9 @@ class ExtractorService:
         self._browser_cookie_spec = cookies_from_browser.strip()
         self._browser_cookies_ok: bool | None = None
         self._warned_cookie_paths: set[Path] = set()
+        #: Jar sources already reported for :data:`COOKIE_STORAGE_CODE` — one
+        #: loud error per jar, not one per download.
+        self._cookie_storage_failures: set[str] = set()
         #: yt-dlp rewrites its cookiefile when a download ends, so it is handed a
         #: writable copy of the configured jar instead of the jar itself.
         self._cookie_copy: Path | None = None
@@ -1119,7 +1223,11 @@ class ExtractorService:
     ) -> dict[str, Any]:
         opts: dict[str, Any] = {
             "quiet": True,
-            "no_warnings": True,
+            # Deliberately *not* ``no_warnings``: yt-dlp's warnings are the only
+            # record of why an EJS script fetch or a challenge solve failed, and
+            # dropping them made those failures undiagnosable. The adapter routes
+            # them into our log, tagged by cause (``classify_ydl_warning``).
+            "logger": YdlLogAdapter(),
             "noprogress": True,  # progress is delivered via progress_hooks only
             "noplaylist": True,
             "socket_timeout": 15,
@@ -1134,6 +1242,14 @@ class ExtractorService:
             opts["proxy"] = self.proxy
         if self.js_runtimes:
             opts["js_runtimes"] = self.js_runtimes
+        if self.remote_components:
+            # yt-dlp 2026.08.19 spells these exactly as its ``--remote-components``
+            # values — ``'ejs:github'``, ``'ejs:npm'`` — and takes them as a
+            # *list*: a dict like ``{'ejs': 'github'}`` is discarded as an
+            # unsupported component with only a warning. This is what lets the
+            # n-challenge solver script be fetched when the ``yt-dlp-ejs``
+            # package is not installed.
+            opts["remote_components"] = list(self.remote_components)
         if args := self.extractor_args:
             opts["extractor_args"] = args
         if self.force_ipv4:
@@ -1240,16 +1356,77 @@ class ExtractorService:
         """
         return cookie_jar_is_usable(self.cookie_file)
 
-    def _writable_cookie_file(self) -> Path | None:
-        """Path handed to yt-dlp: a writable copy of the configured jar.
+    def _cookie_copy_targets(self) -> tuple[Path, ...]:
+        """Where a writable jar copy may live, best location first.
 
-        ``YoutubeDL.close()`` saves the jar back (``save_cookies``), so a
-        read-only file — exactly what a mounted ``cookies.txt:ro`` is — makes
-        *every* download end in ``PermissionError`` at the very end, after the
-        bytes were already fetched. Copying into the download area keeps
-        downloads working, leaves the mounted file untouched (an exporter is the
-        only writer), and still honours a fresh export: the copy is refreshed
-        whenever the source's size or mtime changes.
+        The download area (``downloads/.cookies`` — durable, per-deployment),
+        then a per-process directory under the system temp dir: a second chance
+        for the one case the first cannot serve (an unwritable downloads volume).
+        Never the source itself; see :meth:`_writable_cookie_file`.
+        """
+        runtime_dir = Path(tempfile.gettempdir()) / f"tdb-cookies-{os.getpid()}"
+        return (
+            self.download_dir / ".cookies" / "cookies.txt",
+            runtime_dir / "cookies.txt",
+        )
+
+    def _write_cookie_copy(self, source: Path, target: Path) -> OSError | None:
+        """Atomically copy the jar to ``target``; back comes the failure, if any.
+
+        Written to a private name and moved into place: yt-dlp runs in worker
+        threads, and a reader must never catch a half-written jar (it parses as
+        "no cookies" and turns into a bogus block).
+        """
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temp = target.parent / f".cookies-{os.getpid()}-{uuid.uuid4().hex}.tmp"
+            try:
+                shutil.copyfile(source, temp)
+                os.replace(temp, target)
+            except BaseException:
+                temp.unlink(missing_ok=True)
+                raise
+        except OSError as exc:
+            return exc
+        return None
+
+    def _report_cookie_storage_failure(
+        self, source: Path | None, attempts: Sequence[tuple[Path, OSError]]
+    ) -> None:
+        """One loud, secret-free error per jar that could not be copied anywhere.
+
+        The class is stable (:data:`COOKIE_STORAGE_CODE`) so the failure is
+        greppable and distinct from "cookies missing/invalid"; the detail is
+        paths and errnos only — never jar contents.
+        """
+        key = str(source)
+        if key in self._cookie_storage_failures:
+            return
+        self._cookie_storage_failures.add(key)
+        tried = "; ".join(f"{path}: {error}" for path, error in attempts)
+        logger.error(
+            "%s: no writable copy of COOKIE_FILE=%s could be made (%s) — yt-dlp runs "
+            "WITHOUT cookies: it rewrites its cookiefile when a run ends, so the jar "
+            "itself must never be handed over. Make the download directory or the "
+            "system temp directory writable, or unset COOKIE_FILE.",
+            COOKIE_STORAGE_CODE,
+            source,
+            tried,
+        )
+
+    def _writable_cookie_file(self) -> Path | None:
+        """Path the jar is copied to for yt-dlp: writable, and never the source.
+
+        ``YoutubeDL.close()`` saves the jar back (``save_cookies`` — an in-place
+        rewrite) whenever ``cookiefile`` is set, so a read-only file — exactly
+        what a mounted ``cookies.txt:ro`` is — makes *every* run end in
+        ``OSError: [Errno 30]`` at the very end, after the bytes were fetched.
+        The source is therefore never handed to yt-dlp: the copy keeps the
+        mounted file untouched (an exporter is the only writer) and still
+        honours a fresh export — it is refreshed whenever the source's size or
+        mtime changes. When no destination is writable at all, the request runs
+        without cookies and says ``COOKIE_STORAGE`` once, instead of pointing
+        yt-dlp at a file it cannot write.
         """
         source = self.cookie_file
         if source is None or not cookie_jar_is_usable(source):
@@ -1261,40 +1438,66 @@ class ExtractorService:
         stamp = (str(source), stat.st_mtime_ns, stat.st_size)
         if self._cookie_copy is not None and self._cookie_copy_stamp == stamp:
             return self._cookie_copy
-        copy_dir = self.download_dir / ".cookies"
-        target = copy_dir / "cookies.txt"
+        attempts: list[tuple[Path, OSError]] = []
+        for target in self._cookie_copy_targets():
+            error = self._write_cookie_copy(source, target)
+            if error is None:
+                logger.debug("using a writable copy of COOKIE_FILE=%s at %s", source, target)
+                self._cookie_copy = target
+                self._cookie_copy_stamp = stamp
+                return target
+            attempts.append((target, error))
+        self._report_cookie_storage_failure(source, attempts)
+        return None
+
+    def _isolate_cookie_copy(self, snapshot: Path) -> Path | None:
+        """A private copy of ``snapshot`` for exactly one yt-dlp run.
+
+        yt-dlp's save-at-close truncates and rewrites its cookiefile in place,
+        and two runs sharing one file can catch each other's half-written jar
+        (which parses as "no cookies" — a bogus block mid-flight). Every run
+        therefore gets its own copy, from the same locations as the snapshot.
+        """
+        attempts: list[tuple[Path, OSError]] = []
+        for directory in [target.parent for target in self._cookie_copy_targets()]:
+            run_copy = directory / f".run-{os.getpid()}-{uuid.uuid4().hex}.txt"
+            error = self._write_cookie_copy(snapshot, run_copy)
+            if error is None:
+                return run_copy
+            attempts.append((run_copy, error))
+        self._report_cookie_storage_failure(self.cookie_file, attempts)
+        return None
+
+    @contextmanager
+    def _ydl(self, opts: dict[str, Any]) -> Iterator[Any]:
+        """Open a ``YoutubeDL`` whose cookie file is private to this run.
+
+        The rule that makes a read-only jar mount safe lives here: *the only
+        cookiefile yt-dlp ever sees is a private, writable copy that is deleted
+        when the run ends* — or no cookiefile at all. Its rewrite-on-close then
+        lands on a disposable file, so neither the mounted source nor a shared
+        copy can ever be written (or torn) by a concurrent run.
+        """
+        run_opts = opts
+        run_copy: Path | None = None
+        cookiefile = opts.get("cookiefile")
+        if isinstance(cookiefile, str):
+            run_copy = self._isolate_cookie_copy(Path(cookiefile))
+            if run_copy is None:
+                run_opts = {key: value for key, value in opts.items() if key != "cookiefile"}
+            else:
+                run_opts = {**opts, "cookiefile": str(run_copy)}
         try:
-            copy_dir.mkdir(parents=True, exist_ok=True)
-            # Written to a private name and moved into place: yt-dlp runs in
-            # worker threads, and a reader must never catch a half-written jar
-            # (it parses as "no cookies" and turns into a bogus block).
-            temp = copy_dir / f".cookies-{os.getpid()}-{uuid.uuid4().hex}.tmp"
-            try:
-                shutil.copyfile(source, temp)
-                os.replace(temp, target)
-            except BaseException:
-                temp.unlink(missing_ok=True)
-                raise
-        except OSError as exc:
-            # A read-only *source* is the whole point of the copy, but a
-            # read-only downloads/ would leave no writable space at all. Hand
-            # yt-dlp the jar directly and let it surface normally if it cannot
-            # write it back.
-            logger.warning(
-                "could not copy COOKIE_FILE=%s into %s (%s) — passing it to yt-dlp "
-                "directly; yt-dlp rewrites the jar when a download ends and will fail "
-                "on a read-only file.",
-                source,
-                copy_dir,
-                exc,
-            )
-            self._cookie_copy = source
-            self._cookie_copy_stamp = stamp
-            return source
-        logger.debug("using a writable copy of COOKIE_FILE=%s at %s", source, target)
-        self._cookie_copy = target
-        self._cookie_copy_stamp = stamp
-        return target
+            with yt_dlp.YoutubeDL(run_opts) as ydl:
+                yield ydl
+        finally:
+            if run_copy is not None:
+                try:
+                    run_copy.unlink(missing_ok=True)
+                except OSError:
+                    logger.debug(
+                        "could not remove the private cookie copy %s", run_copy, exc_info=True
+                    )
 
     def cookie_jar_state(self) -> CookieJarState:
         """Describe the configured jar, its mount, and the freshness of the copy.
@@ -1453,7 +1656,7 @@ class ExtractorService:
     def _extract_attempt(self, url: str) -> MediaInfo:
         opts = self._base_opts(extract_only=True)
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
+            with self._ydl(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
         except DownloadError as exc:
             raise self._translate(exc) from exc
@@ -1523,7 +1726,7 @@ class ExtractorService:
         opts = self._base_opts(extract_only=True, allow_cookies=allow_cookies)
         opts.update({"extract_flat": "in_playlist", "playlistend": limit})
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
+            with self._ydl(opts) as ydl:
                 info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
         except DownloadError as exc:
             raise self._translate(exc) from exc
@@ -1602,7 +1805,7 @@ class ExtractorService:
             opts["progress_hooks"] = [progress_hook]
 
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
+            with self._ydl(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
         except DownloadError as exc:
             shutil.rmtree(target_dir, ignore_errors=True)

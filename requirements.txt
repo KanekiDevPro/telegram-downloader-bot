@@ -5,8 +5,17 @@ pydantic>=2.7
 pydantic-settings>=2.3
 redis>=5.0
 # yt-dlp plugin: fetches YouTube PO tokens from a provider (see YTDLP_POT_PROVIDER_URL).
-yt-dlp>=2024.12.13
+# 2026.08.19 is the floor the code is written against: the challenge-solver
+# (jsc/EJS) subsystem and the `remote_components` option arrive with this
+# generation — an older yt-dlp would silently ignore the EJS configuration while
+# looking configured.
+yt-dlp>=2026.08.19
 bgutil-ytdlp-pot-provider>=2.0.0
+# EJS challenge-solver scripts (the n/sig solvers YouTube's player protection
+# needs). yt-dlp takes them from this package first — offline and hash-checked —
+# and YTDLP_REMOTE_COMPONENTS (default ejs:github) is the fallback source for
+# when the package lags behind a player update.
+yt-dlp-ejs>=0.8.0
 # SOCKS support for yt-dlp: the WARP tunnel serves HTTP *and* SOCKS5 on one port
 # (see the warp service in docker-compose.yml), so `YTDLP_PROXY=socks5://warp:1080`
 # is a legitimate choice — and yt-dlp needs this for it. Missing it fails every

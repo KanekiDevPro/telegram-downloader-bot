@@ -324,6 +324,9 @@ async def main() -> int:
         # about the bot's path rather than about yt-dlp's defaults.
         youtube_clients=settings.ytdlp_youtube_clients,
         force_ipv4=settings.ytdlp_force_ipv4,
+        # The same EJS script sources, so a solved n challenge here means one on
+        # the bot (and a "n challenge solving failed" here names the same fix).
+        remote_components=settings.ytdlp_remote_components,
         # One attempt only: this probe is a diagnosis, not a download.
         retry_attempts=0,
     )

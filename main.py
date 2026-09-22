@@ -38,6 +38,7 @@ from services.doctor import http_reachable
 from services.extractor import (
     BrowserSpecError,
     ExtractorService,
+    js_runtime_boot_line,
     parse_browser_spec,
     pot_plugin_installed,
     youtube_login_hint,
@@ -245,6 +246,7 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         pot_provider_url=pot_provider,
         cookies_from_browser=settings.cookies_from_browser,
         js_runtime=settings.ytdlp_js_runtime,
+        remote_components=settings.ytdlp_remote_components,
         # What YouTube is allowed to *see*: a client list that avoids the PO-token
         # half of yt-dlp's table, and IPv4-only through the tunnel (see the two
         # settings for the measurement behind both).
@@ -312,11 +314,8 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         # kept working, without the route it was configured to use.
         logger.error("%s", proxy_health.boot_line(tunnel))
         await notify_admins(bot, settings.admin_ids, tunnel_notice)
-    if extractor.js_runtime_name == "none":
-        logger.warning(
-            "no JavaScript runtime (node/deno/bun/qjs) found — YouTube extraction is "
-            "degraded without one; set YTDLP_JS_RUNTIME or install a runtime."
-        )
+    if (missing_runtime := js_runtime_boot_line(extractor.js_runtimes)) is not None:
+        logger.warning("%s", missing_runtime)
     else:
         logger.info("yt-dlp JavaScript runtime: %s", extractor.js_runtime_name)
     if extractor.use_oauth2:

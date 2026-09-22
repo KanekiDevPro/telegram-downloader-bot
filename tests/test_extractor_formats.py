@@ -20,9 +20,12 @@ from services.extractor import (
     VIDEO_FORMAT_SELECTOR,
     BrowserSpecError,
     ExtractorService,
+    YdlLogAdapter,
+    classify_ydl_warning,
     cookie_jar_is_usable,
     detect_js_runtimes,
     format_selector,
+    js_runtime_boot_line,
     parse_browser_spec,
     pot_plugin_installed,
     pot_plugin_version,
@@ -137,6 +140,85 @@ def test_detected_runtime_reaches_yt_dlp(monkeypatch: pytest.MonkeyPatch) -> Non
     extractor = _extractor()
     assert extractor.js_runtime_name == "deno"
     assert extractor._base_opts(extract_only=True)["js_runtimes"] == {"deno": {"path": "/usr/bin/deno"}}
+
+
+def test_missing_js_runtime_names_the_consequence_not_just_the_absence() -> None:
+    """"Not found" alone sends nobody for Deno; the sentence must say what it
+    costs (unsolvable n challenges, missing formats) and what fixes it."""
+    warning = js_runtime_boot_line({})
+    assert warning is not None
+    assert "YTDLP_JS_RUNTIME" in warning and "challenge" in warning
+    assert js_runtime_boot_line({"deno": {"path": "/usr/bin/deno"}}) is None
+
+
+# ---------------------------------------------------------------------------
+# EJS challenge solvers (n/sig): script sources and warning routing
+# ---------------------------------------------------------------------------
+
+def test_remote_components_reach_yt_dlp_in_its_list_spelling(tmp_path: Path) -> None:
+    """2026.08.19 takes ``['ejs:github']`` / ``['ejs:npm']`` — its own
+    ``--remote-components`` values. The dict form (``{'ejs': 'github'}``) that
+    some guides show is silently discarded by this version — configured in
+    appearance only, which is the failure mode this test exists to prevent."""
+    extractor = _extractor(remote_components=["ejs:GitHub", " ejs:github ", "ejs:npm"])
+
+    opts = extractor._base_opts(extract_only=True)
+
+    assert opts["remote_components"] == ["ejs:github", "ejs:npm"], (
+        "lower-cased, de-duplicated, in order"
+    )
+
+
+def test_remote_components_key_is_absent_when_unconfigured(tmp_path: Path) -> None:
+    assert "remote_components" not in _extractor()._base_opts(extract_only=True)
+
+
+def test_remote_components_setting_parses_and_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert Settings(_env_file=None).ytdlp_remote_components == ["ejs:github"]  # type: ignore[call-arg]
+    monkeypatch.setenv("YTDLP_REMOTE_COMPONENTS", "ejs:github, ejs:npm")
+    assert Settings(_env_file=None).ytdlp_remote_components == ["ejs:github", "ejs:npm"]  # type: ignore[call-arg]
+    monkeypatch.setenv("YTDLP_REMOTE_COMPONENTS", "")
+    assert Settings(_env_file=None).ytdlp_remote_components == []  # type: ignore[call-arg]
+
+
+def test_generated_opts_route_warnings_instead_of_dropping_them(tmp_path: Path) -> None:
+    """``no_warnings`` used to swallow the *only* record of why a challenge
+    solve or a solver-script fetch failed — the diagnostics live in those
+    warnings, so they are routed into our log instead (tagged by cause)."""
+    opts = _extractor()._base_opts(extract_only=True)
+
+    assert "no_warnings" not in opts
+    assert isinstance(opts["logger"], YdlLogAdapter)
+
+
+@pytest.mark.parametrize(
+    ("text", "code"),
+    [
+        ("n challenge solving failed: Some formats may be missing.", "YTDLP_CHALLENGE"),
+        ("Signature solving failed: Some formats may be missing.", "YTDLP_CHALLENGE"),
+        ("[youtube] Failed to download challenge solver lib script", "YTDLP_REMOTE_COMPONENTS"),
+        ("No usable challenge solver lib script available", "YTDLP_EJS"),
+        ("Failed to load challenge solver core script from python package: boom", "YTDLP_EJS"),
+        ("Failed to load cookies from /cookies/cookies.txt: bad", "YTDLP_COOKIES"),
+        ("No supported JavaScript runtime found", "YTDLP_JS_RUNTIME"),
+        ("Requested format is not available", "YTDLP"),
+    ],
+)
+def test_yt_dlp_warnings_are_classified_by_cause(text: str, code: str) -> None:
+    assert classify_ydl_warning(text) == code
+
+
+def test_ydl_log_adapter_tags_every_level(caplog: pytest.LogCaptureFixture) -> None:
+    adapter = YdlLogAdapter()
+    with caplog.at_level("DEBUG"):
+        adapter.warning("n challenge solving failed: Some formats may be missing.")
+        adapter.error("boom")
+        adapter.debug("quiet detail")
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("[YTDLP_CHALLENGE]" in message for message in messages)
+    assert any("[YTDLP]" in message and "boom" in message for message in messages)
+    assert any("quiet detail" in message for message in messages)
 
 
 # ---------------------------------------------------------------------------

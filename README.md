@@ -188,7 +188,11 @@ into the image (nothing to go stale, and no login in an image layer), and a repl
 picked up on the very next download — the jar and its writable copy are re-checked per task, so
 even `docker compose restart bot` is only needed if you changed the mount itself. That copy exists
 because yt-dlp *rewrites* its cookiefile when a download ends: it lives in `downloads/.cookies/`
-and is refreshed whenever the source changes.
+and is refreshed whenever the source changes. Every run gets its own private copy of that
+snapshot — deleted when the run ends — so concurrent downloads can never rewrite the jar another
+run is reading, and the mounted source is never handed to yt-dlp at all. When no writable copy
+can be made anywhere, the run goes on *without* cookies and logs one `COOKIE_STORAGE` error
+(paths and errnos only) instead of failing every download with `Read-only file system`.
 
 The mounted *source* is a directory on purpose: bind-mounting the file itself makes Docker
 create a directory when the host file is missing (the state a fresh clone is in), and the
@@ -744,6 +748,13 @@ cookies are encrypted with the *host* user's keyring), instead of failing every 
 The bot also picks a JavaScript runtime automatically (`YTDLP_JS_RUNTIME=auto`): yt-dlp needs
 one to solve YouTube's player challenge, and without it warns that formats may be missing.
 The Docker image ships Deno; host installs use whichever of deno/node/bun/qjs is present.
+The solver *scripts* are separate from the runtime: they come from the `yt-dlp-ejs` package
+(in requirements.txt) first, and from `YTDLP_REMOTE_COMPONENTS` (default `ejs:github`, its
+`--remote-components` values) when the package lags behind a player update — with no script at
+all yt-dlp reports "n challenge solving failed" and YouTube serves fewer formats. yt-dlp's own
+warnings are routed into the log tagged by cause (`YTDLP_EJS`, `YTDLP_REMOTE_COMPONENTS`,
+`YTDLP_CHALLENGE`, `YTDLP_JS_RUNTIME`, `YTDLP_COOKIES`), so each of those failures is
+tellable apart without a debugger.
 
 **Application-layer evasion, where the network layer stops helping.** A tunnel changes the address
 but not what YouTube is asked to *believe*, so two settings travel with every request.
@@ -838,6 +849,7 @@ in-process queue, losing queued work on restart).
 | `COOKIES_FROM_BROWSER` | — | `BROWSER[+KEYRING][:PROFILE]`; probed at startup and ignored when unreachable |
 | `COOKIE_AUTO_EXPORT` | — | same syntax; re-export the jar from that profile after a login-shaped block (once per 30 min, never overwriting a working login), then probe it and report |
 | `YTDLP_JS_RUNTIME` | `auto` | JS runtime for yt-dlp (`auto`/`none`/`node`/`deno`/`bun`/`quickjs`) |
+| `YTDLP_REMOTE_COMPONENTS` | `ejs:github` | where yt-dlp may fetch EJS challenge-solver scripts from when the `yt-dlp-ejs` package does not carry them (its `--remote-components` values `ejs:github`/`ejs:npm`); empty = no remote fetching. With no solver script at all, the n challenge cannot be solved and YouTube serves fewer formats |
 | `YTDLP_YOUTUBE_CLIENTS` | `visionos,web_embedded,tv_downgraded,web` | which YouTube clients yt-dlp asks for, in order. The default is the token-free half of 
 yt-dlp's own client table, with `web` last (the one client that wants a PO token, which the provider above supplies); empty = let yt-dlp decide. `/doctor` checks the names against the installed yt-dlp and flags any that require a token or would be skipped |
 | `YTDLP_FORCE_IPV4` | `1` | force IPv4 for every yt-dlp connection (identical to `--force-ipv4`, applied as a family filter inside yt-dlp so IPv6 is never attempted). On by default because the tunnel's *IPv6* ranges are the flagged ones |
