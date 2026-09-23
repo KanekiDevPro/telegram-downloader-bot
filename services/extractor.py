@@ -181,13 +181,43 @@ def _video_selector(height: int) -> str:
     )
 
 
+#: What each audio tier really asks the post-processor for:
+#: ``tier → (preferredcodec, preferredquality)``. ``preferredquality`` above 10
+#: is a bitrate ceiling in kbps (yt-dlp spells it ``-b:a Nk``), which is exactly
+#: what these levels are — ceilings, like the video tiers: yt-dlp *copies* an
+#: already-AAC source into .m4a instead of re-encoding it (a copy is never worse
+#: than its source), so "small" shrinks what can be shrunk and keeps what cannot.
+#:
+#: Two entries are deliberately absent or bare:
+#: * ``m4a`` — the untouched source stream. No post-processor at all: that tier's
+#:   whole promise is "do not touch it".
+#: * ``wav`` — PCM has no quality knob; giving it a bitrate would be theatre.
+#:
+#: Opus tops out at 192k on purpose: libopus has nothing to gain above it, and
+#: "Best" that only makes the file bigger is not best anything.
+AUDIO_EXPORTS: dict[str, tuple[str, str | None]] = {
+    "mp3": ("mp3", "192"),
+    "mp3.best": ("mp3", "320"),
+    "mp3.high": ("mp3", "256"),
+    "mp3.small": ("mp3", "128"),
+    "m4a.high": ("m4a", "256"),
+    "m4a.balanced": ("m4a", "192"),
+    "m4a.small": ("m4a", "128"),
+    "opus.best": ("opus", "192"),
+    "opus.high": ("opus", "128"),
+    "opus.balanced": ("opus", "96"),
+    "opus.small": ("opus", "64"),
+    "wav": ("wav", None),
+}
+
+
 def format_selector(media_format: MediaFormat, quality: object = "") -> str:
     """yt-dlp ``-f`` value for the requested media type and quality tier.
 
     ``quality`` is a :data:`core.utils.Quality`: a height ceiling for video (``best``
-    means the existing no-ceiling chain), and ``mp3``/``m4a`` for audio — where m4a
-    is the untouched stream, so the *post-processor* is what differs, not the
-    selector (see ``_download_attempt``).
+    means the existing no-ceiling chain). Every audio tier shares one selector —
+    the *post-processor* is what differs between them (see :data:`AUDIO_EXPORTS`
+    and ``_download_attempt``), never the stream yt-dlp picks.
     """
     if media_format == "audio":
         return AUDIO_FORMAT_SELECTOR
@@ -1746,14 +1776,14 @@ class ExtractorService:
         """Download media to a per-job directory and return the produced file.
 
         ``quality`` picks the tier: a height ceiling for video, and for audio the
-        difference between the untouched m4a stream and an MP3 that ffmpeg has to
-        produce (the only case that needs ffmpeg at all).
+        container plus quality level to produce (see :data:`AUDIO_EXPORTS` —
+        ``m4a`` is the untouched stream and needs no ffmpeg at all).
         """
         tier = normalize_quality(quality, media_format)
-        if media_format == "audio" and tier == "mp3" and not self.ffmpeg_available:
+        if media_format == "audio" and tier != "m4a" and not self.ffmpeg_available:
             raise ExtractionError(
                 "FFMPEG_REQUIRED",
-                "تبدیل به MP3 نیاز به نصب ffmpeg دارد؛ لطفاً بعداً دوباره تلاش کنید.",
+                "تبدیل صدا به این فرمت نیاز به نصب ffmpeg دارد؛ لطفاً بعداً دوباره تلاش کنید.",
             )
         try:
             return await asyncio.wait_for(
@@ -1792,15 +1822,19 @@ class ExtractorService:
             extract_only=False, media_format=media_format, quality=quality
         )
         opts["outtmpl"] = str(target_dir / "%(title).120B [%(id)s].%(ext)s")
-        if media_format == "audio" and quality == "mp3":
-            # Only the MP3 tier re-encodes; m4a is whatever the site already serves.
-            opts["postprocessors"] = [
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }
-            ]
+        tier = normalize_quality(quality, media_format)
+        export = AUDIO_EXPORTS.get(tier) if media_format == "audio" else None
+        if export is not None:
+            # The only tier with no entry is `m4a` — the untouched stream — so
+            # "no postprocessors" still means exactly what it always meant.
+            codec, bitrate = export
+            postprocessor: dict[str, Any] = {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": codec,
+            }
+            if bitrate is not None:
+                postprocessor["preferredquality"] = bitrate
+            opts["postprocessors"] = [postprocessor]
         if progress_hook:
             opts["progress_hooks"] = [progress_hook]
 

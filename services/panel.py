@@ -21,7 +21,7 @@ import asyncpg
 from core import database
 from core.config import Settings, probe_url
 from core.i18n import DEFAULT_LANG, t
-from core.utils import today_local
+from core.utils import escape_html, today_local
 from services.cobalt import CobaltNodeState, CobaltService
 from services.doctor import fallback_health, http_reachable
 from services.queue import TaskQueue
@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 #: How long a helper probe may take when the panel is opened. Short: four lines of
 #: report must not become a ten-second wait on a phone.
 PROBE_TIMEOUT_S = 3.0
+
+#: How many accounts fit on one Users-screen page — a Telegram message is a
+#: screen to read, not a spreadsheet to scroll.
+USERS_PAGE_SIZE = 6
 
 #: The fallback engine's states, as the panel spells them (see doctor.FALLBACK_TITLES
 #: for the states themselves — this only renames them for a bilingual screen).
@@ -72,18 +76,87 @@ async def header(pool: asyncpg.Pool, lang: str = DEFAULT_LANG) -> str:
     )
 
 
-async def stats_text(pool: asyncpg.Pool, lang: str = DEFAULT_LANG) -> str:
-    """Users, downloads, cache, failures, pending payments — one query."""
-    stats = await database.admin_stats(pool, today_local())
+async def _languages_line(pool: asyncpg.Pool, lang: str) -> str:
+    """The language breakdown — a failure here hides none of the numbers above."""
     try:
         counts = await database.language_counts(pool)
-        languages = ", ".join(
+        return ", ".join(
             t("admin.language_count", lang, language=row["language"], count=row["count"])
             for row in counts
         ) or "—"
-    except Exception:  # a missing breakdown must not hide the numbers above it
+    except Exception:
         logger.exception("could not read the language breakdown")
-        languages = "—"
+        return "—"
+
+
+def _user_line(row: asyncpg.Record, lang: str) -> str:
+    """One account, as much of it as an operator needs and no more."""
+    username = f"@{row['username']}" if row["username"] else "—"
+    mark = f"{t('admin.users_vip_mark', lang)} " if row["is_premium"] else ""
+    return t(
+        "admin.users_line",
+        lang,
+        telegram_id=row["telegram_id"],
+        username=f"{mark}{escape_html(username)}",
+        language=row["language"],
+        joined=f"{row['created_at']:%Y-%m-%d}",
+    )
+
+
+async def users_text(pool: asyncpg.Pool, lang: str = DEFAULT_LANG, *, offset: int = 0) -> str:
+    """Totals over everybody, then one page of the newest accounts.
+
+    Two cheap reads rather than one clever one: the totals answer "how many",
+    the page answers "who". Newest first — the accounts an operator looks up are
+    almost always the ones that just arrived.
+    """
+    stats = await database.admin_stats(pool, today_local())
+    rows = await database.recent_users(pool, offset=offset, limit=USERS_PAGE_SIZE)
+    if rows:
+        listing = "\n".join(
+            (
+                t(
+                    "admin.users_head",
+                    lang,
+                    shown=f"{offset + 1}–{offset + len(rows)}",
+                    total=stats["users"],
+                ),
+                *(_user_line(row, lang) for row in rows),
+            )
+        )
+    else:
+        listing = t("admin.users_empty", lang)
+    return t(
+        "admin.users",
+        lang,
+        users=stats["users"],
+        premium=stats["premium"],
+        new_users=stats["new_users"],
+        active_today=stats["active_today"],
+        languages=await _languages_line(pool, lang),
+        listing=listing,
+    )
+
+
+async def users_search_text(pool: asyncpg.Pool, query: str, lang: str = DEFAULT_LANG) -> str:
+    """A lookup by id or @username — rendered, so the screen never leaks rows."""
+    rows = await database.search_users(pool, query)
+    shown = escape_html(query)
+    if not rows:
+        return t("admin.users_search_none", lang, query=shown)
+    return "\n".join(
+        (
+            t("admin.users_search_title", lang, query=shown, count=len(rows)),
+            "",
+            *(_user_line(row, lang) for row in rows),
+        )
+    )
+
+
+async def stats_text(pool: asyncpg.Pool, lang: str = DEFAULT_LANG) -> str:
+    """Users, downloads, cache, failures, pending payments — one query."""
+    stats = await database.admin_stats(pool, today_local())
+    languages = await _languages_line(pool, lang)
     return t(
         "admin.stats",
         lang,
@@ -161,7 +234,8 @@ async def health_text(
 
 
 def tools_text(lang: str = DEFAULT_LANG) -> str:
-    """What the buttons on this screen do, and how to reach them without them."""
+    """The maintenance legend on System: what the buttons do, and the commands
+    that do the same things without them."""
     return t("admin.tools", lang)
 
 

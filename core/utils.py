@@ -17,11 +17,80 @@ MediaFormat = Literal["video", "audio"]
 
 #: How good. A video tier is a *ceiling* (``bestvideo[height<=N]``), never an
 #: upscale — asking for 1080p on a 480p video gets the 480p file, which is what
-#: "up to 1080p" means on the button. ``m4a`` is the untouched audio stream
-#: (no re-encode, faster, plays everywhere Telegram does); ``mp3`` is ffmpeg's.
-Quality = Literal["best", "1080", "720", "480", "mp3", "m4a"]
+#: "up to 1080p" means on the button. An audio tier names the *container* to
+#: produce and, where the codec has a quality knob, the level on it — the
+#: mapping from tier to real encoder settings lives in ``services/extractor.py``.
+Quality = Literal[
+    "best",
+    "1080",
+    "720",
+    "480",
+    "mp3",
+    "mp3.best",
+    "mp3.high",
+    "mp3.small",
+    "m4a",
+    "m4a.high",
+    "m4a.balanced",
+    "m4a.small",
+    "opus.best",
+    "opus.high",
+    "opus.balanced",
+    "opus.small",
+    "wav",
+]
 VIDEO_QUALITIES: tuple[Quality, ...] = ("best", "1080", "720", "480")
-AUDIO_QUALITIES: tuple[Quality, ...] = ("mp3", "m4a")
+
+#: The audio containers this bot can genuinely deliver: the post-processor
+#: really builds each one (``services/extractor.py``), Telegram plays each as
+#: audio, and the fallback engine can be asked for each by name.
+AudioFormat = Literal["mp3", "m4a", "opus", "wav"]
+AUDIO_FORMATS: tuple[AudioFormat, ...] = ("mp3", "m4a", "opus", "wav")
+
+#: The quality presets a format may have, best first. ``wav`` has none on
+#: purpose: it is PCM — there is no bitrate to move, so offering "smaller WAV"
+#: would be a button that cannot do what it says.
+AudioLevel = Literal["best", "high", "balanced", "small"]
+AUDIO_LEVELS: tuple[AudioLevel, ...] = ("best", "high", "balanced", "small")
+AUDIO_FORMAT_LEVELS: dict[str, tuple[AudioLevel, ...]] = {
+    "mp3": AUDIO_LEVELS,
+    "m4a": AUDIO_LEVELS,
+    "opus": AUDIO_LEVELS,
+    "wav": (),
+}
+
+#: ``(format, level)`` → the tier name that travels in queues and cache keys.
+#: Two spellings predate the presets and are kept as the canonical name of their
+#: level — ``mp3`` (the balanced 192k re-encode) and ``m4a`` (the untouched
+#: source stream) — because cache rows and queued tasks already own them; a
+#: rename would silently orphan every cached file on the next deploy.
+AUDIO_TIERS: dict[tuple[str, str], Quality] = {
+    ("mp3", "best"): "mp3.best",
+    ("mp3", "high"): "mp3.high",
+    ("mp3", "balanced"): "mp3",
+    ("mp3", "small"): "mp3.small",
+    ("m4a", "best"): "m4a",
+    ("m4a", "high"): "m4a.high",
+    ("m4a", "balanced"): "m4a.balanced",
+    ("m4a", "small"): "m4a.small",
+    ("opus", "best"): "opus.best",
+    ("opus", "high"): "opus.high",
+    ("opus", "balanced"): "opus.balanced",
+    ("opus", "small"): "opus.small",
+}#: Every audio tier, in the order the menus offer them.
+AUDIO_QUALITIES: tuple[Quality, ...] = (
+    *(
+        AUDIO_TIERS[(fmt, level)]
+        for fmt in AUDIO_FORMATS
+        for level in AUDIO_LEVELS
+        if (fmt, level) in AUDIO_TIERS
+    ),
+    "wav",
+)
+
+#: The same level under the alias a button (or a pre-preset queue payload) may
+#: carry. Canonical names only ever come out of :func:`normalize_quality`.
+_TIER_ALIASES: dict[str, str] = {"mp3.balanced": "mp3", "m4a.best": "m4a", "wav.best": "wav"}
 
 #: What a request means when the user did not pick a tier: today's behaviour, and
 #: therefore also the cache key an existing row already owns.
@@ -39,9 +108,11 @@ def normalize_quality(value: object, media_format: str = "video") -> Quality:
 
     An unknown or absent quality is the default for the *format*, never an error:
     an old queued task carries no tier at all, and re-downloading it at "best" is
-    exactly what it asked for.
+    exactly what it asked for. Aliases resolve to their canonical spelling so a
+    cache key never depends on which button produced the same request.
     """
     text = str(value or "").strip().lower()
+    text = _TIER_ALIASES.get(text, text)
     allowed = AUDIO_QUALITIES if media_format == "audio" else VIDEO_QUALITIES
     for candidate in allowed:
         if text == candidate:

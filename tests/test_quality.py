@@ -220,3 +220,72 @@ def test_the_legacy_shape_says_the_same_thing() -> None:
     assert payload["isAudioOnly"] is True
     assert payload["aFormat"] == "best"
     assert payload["filenamePattern"] == "nerd"
+
+
+def test_every_audio_tier_asks_cobalt_for_its_own_container() -> None:
+    """Cobalt names formats, not levels — every preset of a container maps to
+    that container, so a fallback can never serve the wrong *kind* of file."""
+    for tier, expected in (
+        ("mp3.best", "mp3"),
+        ("mp3.small", "mp3"),
+        ("m4a.small", "best"),
+        ("opus.high", "opus"),
+        ("wav", "wav"),
+    ):
+        payload = _modern_payload("https://youtu.be/x", "audio", tier)
+        assert payload["audioFormat"] == expected, tier
+
+
+# ---------------------------------------------------------------------------
+# The presets: what a level really asks the encoder for
+# ---------------------------------------------------------------------------
+
+
+def test_two_old_spellings_keep_the_cache_keys_they_have_always_owned() -> None:
+    """``mp3`` and ``m4a`` predate the presets and stay canonical — a rename here
+    would silently orphan every cached file on the next deploy."""
+    assert normalize_quality("mp3.balanced", "audio") == "mp3"
+    assert normalize_quality("m4a.best", "audio") == "m4a"
+    assert cache_service.cache_key(
+        "https://x", "audio", "mp3.balanced"
+    ) == cache_service.cache_key("https://x", "audio", "mp3")
+    assert cache_service.cache_key(
+        "https://x", "audio", "m4a.best"
+    ) == cache_service.cache_key("https://x", "audio", "m4a")
+
+
+def test_every_audio_tier_maps_to_real_encoder_settings() -> None:
+    """Supported formats only: each tier is a post-processor yt-dlp/ffmpeg can
+    genuinely build, and wav — PCM — carries no bitrate at all."""
+    from services.extractor import AUDIO_EXPORTS
+
+    assert "m4a" not in AUDIO_EXPORTS, "the untouched stream keeps no post-processor"
+    for tier in AUDIO_QUALITIES:
+        if tier == "m4a":
+            continue
+        codec, bitrate = AUDIO_EXPORTS[tier]
+        assert codec in ("mp3", "m4a", "opus", "wav")
+        if codec == "wav":
+            assert bitrate is None, "PCM has no bitrate to set"
+        else:
+            assert bitrate is not None and 64 <= int(bitrate) <= 320, tier
+
+
+def test_the_smaller_button_really_makes_a_smaller_file() -> None:
+    """"Small size" is a promise about the encoder, not a label: within every
+    codec the bitrates fall monotonically from best to small — and the honest
+    ceilings are kept (opus gains nothing above 192, and the historical default
+    tier is exactly what it always was)."""
+    from services.extractor import AUDIO_EXPORTS
+
+    for codec in ("mp3", "m4a", "opus"):
+        levels = [
+            int(bitrate)
+            for tier in AUDIO_QUALITIES
+            if tier.startswith(codec) and tier in AUDIO_EXPORTS
+            for bitrate in AUDIO_EXPORTS[tier][1:]
+            if bitrate is not None
+        ]
+        assert levels == sorted(levels, reverse=True), codec
+    assert AUDIO_EXPORTS["opus.best"] == ("opus", "192")
+    assert AUDIO_EXPORTS["mp3"] == ("mp3", "192"), "the historical default is untouched"

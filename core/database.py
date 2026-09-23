@@ -740,6 +740,63 @@ async def count_users(pool: asyncpg.Pool) -> int:
     return int(await pool.fetchval("SELECT COUNT(*) FROM users"))
 
 
+async def recent_users(
+    pool: asyncpg.Pool, *, offset: int = 0, limit: int = 6
+) -> list[asyncpg.Record]:
+    """One page of accounts, newest first — the Users screen's listing.
+
+    Ordered by ``created_at`` (with the id as tie-break) so the pages are stable
+    while an operator flips through them: two rows created in the same
+    millisecond cannot swap places between one page and the next.
+    """
+    return list(
+        await pool.fetch(
+            """
+            SELECT telegram_id, username, language, is_premium, created_at
+              FROM users
+             ORDER BY created_at DESC, telegram_id DESC
+             OFFSET $1 LIMIT $2
+            """,
+            offset,
+            limit,
+        )
+    )
+
+
+async def search_users(
+    pool: asyncpg.Pool, query: str, *, limit: int = 6
+) -> list[asyncpg.Record]:
+    """Accounts matching a lookup: exact Telegram id, or a username fragment.
+
+    A digit-only query is an exact id match (ids are never "like" anything);
+    anything else is a username search with a leading ``@`` optional and the
+    LIKE wildcards neutralised, so a query can only ever find what it names.
+    """
+    text = query.strip().lstrip("@")
+    if not text:
+        return []
+    columns = "telegram_id, username, language, is_premium, created_at"
+    if text.isdigit():
+        rows = await pool.fetch(
+            f"SELECT {columns} FROM users WHERE telegram_id = $1 ORDER BY created_at DESC LIMIT $2",
+            int(text),
+            limit,
+        )
+        return list(rows)
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    rows = await pool.fetch(
+        f"""
+        SELECT {columns} FROM users
+         WHERE username ILIKE '%' || $1 || '%' ESCAPE '\\'
+         ORDER BY created_at DESC
+         LIMIT $2
+        """,
+        escaped,
+        limit,
+    )
+    return list(rows)
+
+
 async def set_state(pool: asyncpg.Pool, key: str, value: str) -> None:
     await pool.execute(
         """

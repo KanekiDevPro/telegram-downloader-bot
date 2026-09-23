@@ -194,27 +194,29 @@ MESSAGES: Final[Catalog] = {
         "en": "How the bot works, in a few short pages. Pick one:",
         "fa": "کارکرد ربات در چند صفحهٔ کوتاه. یکی را انتخاب کن:",
     },
-    "help.btn_how": {"en": "🔧 How it works", "fa": "🔧 چطور کار می‌کند"},
+    "help.btn_how": {"en": "📥 How to download", "fa": "📥 چطور دانلود کنم"},
+    "help.btn_audio": {"en": "🎵 Audio", "fa": "🎵 صدا"},
+    "help.btn_video": {"en": "🎬 Video", "fa": "🎬 ویدیو"},
     "help.btn_platforms": {
-        "en": "🌐 Supported platforms",
-        "fa": "🌐 سرویس‌های پشتیبانی‌شده",
+        "en": "📱 Supported platforms",
+        "fa": "📱 سرویس‌های پشتیبانی‌شده",
     },
-    "help.btn_problems": {"en": "🧩 Common problems", "fa": "🧩 مشکلات رایج"},
+    "help.btn_problems": {"en": "🛠 Common problems", "fa": "🛠 مشکلات رایج"},
     "download.title": {"en": "⬇️ <b>Download</b>", "fa": "⬇️ <b>دانلود</b>"},
     "download.how": {
         "en": (
             "Send me a link — or use <code>/download &lt;link&gt;</code> — and I fetch it in "
             "the background and deliver the file right here.\n\n"
-            "▫️ Video in 1080p/720p/480p, MP3 or M4A audio, or a post's photos — "
-            "whatever that link actually has.\n"
+            "▫️ Video in 1080p/720p/480p, audio as MP3, M4A, OPUS or WAV, or a post's "
+            "photos — whatever that link actually has.\n"
             "▫️ Every step is edited into one message, and a download that fails "
             "says why."
         ),
         "fa": (
             "یک لینک برایم بفرست — یا از <code>/download &lt;link&gt;</code> استفاده کن — تا در "
             "پس‌زمینه دانلود کنم و فایل همین‌جا تحویل بدهم.\n\n"
-            "▫️ ویدیو 1080p/720p/480p، صدای MP3 یا M4A، یا عکس‌های یک پست — هرچه آن "
-            "لینک واقعاً داشته باشد.\n"
+            "▫️ ویدیو 1080p/720p/480p، صدای MP3 یا M4A یا OPUS یا WAV، یا عکس‌های یک "
+            "پست — هرچه آن لینک واقعاً داشته باشد.\n"
             "▫️ همهٔ مراحل در همان یک پیام ویرایش می‌شوند، و اگر دانلودی نشود علتش گفته "
             "می‌شود."
         ),
@@ -224,7 +226,8 @@ MESSAGES: Final[Catalog] = {
             "1️⃣ Send a link (YouTube, Instagram, TikTok, Twitter/X, Spotify, SoundCloud, "
             "Facebook, Reddit and many more).\n"
             "2️⃣ Pick what you want — the bot only offers what that link actually has "
-            "(1080p/720p/480p video, MP3 or M4A audio, or the images of a photo post).\n"
+            "(1080p/720p/480p video, MP3/M4A/OPUS/WAV audio, or the images of a photo "
+            "post).\n"
             "3️⃣ The download happens in the background and the file is sent right here — "
             "stay and watch, or leave; it will arrive anyway.\n"
             "\n"
@@ -245,7 +248,7 @@ MESSAGES: Final[Catalog] = {
             "1️⃣ لینک رو بفرست (یوتیوب، اینستاگرام، تیک‌تاک، توییتر/X، اسپاتیفای، ساندکلاود، "
             "فیسبوک، ریدیت و خیلی‌های دیگر).\n"
             "2️⃣ انتخاب کن چی می‌خوای — ربات فقط گزینه‌هایی را نشان می‌دهد که آن لینک واقعاً "
-            "دارد (ویدیو 1080p/720p/480p، صدای MP3 یا M4A، یا عکس‌های یک پست عکسی).\n"
+            "دارد (ویدیو 1080p/720p/480p، صدای MP3/M4A/OPUS/WAV، یا عکس‌های یک پست عکسی).\n"
             "3️⃣ دانلود در پس‌زمینه انجام می‌شه و فایل همین‌جا برات فرستاده می‌شه — می‌تونی "
             "همون‌جا منتظر بمونی یا بری، خبرش می‌رسه.\n"
             "\n"
@@ -261,6 +264,47 @@ MESSAGES: Final[Catalog] = {
             "• /start — همین منو\n"
             "\n"
             "هر دانلود یک واحد از سهمیهٔ روزانه کم می‌کند؛ با /premium سهمیه چند برابر می‌شود."
+        ),
+    },
+    "help.audio": {
+        "en": (
+            "🎵 <b>Audio</b>\n\n"
+            "▫️ First pick the file type: <b>MP3</b> (plays everywhere), <b>M4A</b> "
+            "(smaller, same player), <b>OPUS</b> (smallest) or <b>WAV</b> (raw, "
+            "for editing).\n"
+            "▫️ Then the quality: 💎 Best, 🔥 High, ⚖️ Balanced, 📦 Small size. It is "
+            "a ceiling, never an upscale — and 💎 Best keeps the site's own stream "
+            "untouched whenever it can.\n"
+            "▫️ WAV skips the quality step: a raw file has no knob to turn.\n"
+            "▫️ The file always arrives as one playable message."
+        ),
+        "fa": (
+            "🎵 <b>صدا</b>\n\n"
+            "▫️ اول نوع فایل را انتخاب کن: <b>MP3</b> (هرجا پخش می‌شود)، <b>M4A</b> "
+            "(کم‌حجم‌تر، همان پخش‌کننده)، <b>OPUS</b> (کم‌حجم‌ترین) یا <b>WAV</b> (خام، "
+            "برای تدوین).\n"
+            "▫️ بعد کیفیت: 💎 بهترین، 🔥 بالا، ⚖️ متعادل، 📦 کم‌حجم. این‌ها سقف‌اند و "
+            "کیفیت را بالا نمی‌برند — و 💎 بهترین تا جایی که بشود همان فایل اصلی سایت را "
+            "دست‌نخورده نگه می‌دارد.\n"
+            "▫️ WAV مرحلهٔ کیفیت ندارد: فایل خام چیزی برای تنظیم ندارد.\n"
+            "▫️ فایل همیشه در یک پیام قابل پخش می‌رسد."
+        ),
+    },
+    "help.video": {
+        "en": (
+            "🎬 <b>Video</b>\n\n"
+            "▫️ 💻 Best quality — whatever the video itself has — or a ceiling: "
+            "1080p, 720p or 480p. A ceiling gives you the best version up to it; "
+            "nothing is ever upscaled.\n"
+            "▫️ Photo posts and galleries arrive as their images.\n"
+            "▫️ Private links, live streams and playlists are not supported."
+        ),
+        "fa": (
+            "🎬 <b>ویدیو</b>\n\n"
+            "▫️ 💻 بهترین کیفیت — هرچه خود ویدیو دارد — یا سقف: 1080p، 720p یا "
+            "480p. سقف یعنی بهترین نسخه تا همان حد؛ هیچ‌وقت کیفیت بالا نمی‌رود.\n"
+            "▫️ پست‌های عکسی و گالری‌ها به‌صورت عکس می‌رسند.\n"
+            "▫️ لینک خصوصی، پخش زنده و playlist پشتیبانی نمی‌شوند."
         ),
     },
     "help.platforms": {
@@ -343,16 +387,16 @@ MESSAGES: Final[Catalog] = {
         "بهترین نسخه تا همان حد 👇",
     },
     "intake.choose_audio": {
-        "en": "Pick the audio format 👇",
-        "fa": "فرمت صدا را انتخاب کن 👇",
+        "en": "Which audio format do you want? 👇",
+        "fa": "صدای لینک رو با چه فرمتی می‌خوای؟ 👇",
     },
     "intake.choose_media": {
         "en": "This looks like a photo post — I will send whatever media it contains 👇",
         "fa": "این لینک پست عکسی است — هر رسانه‌ای که داشته باشد می‌فرستم 👇",
     },
     "intake.no_format": {
-        "en": "Format: none of the choices are not an option; send the link again.",
-        "fa": "فرمت مشخص نشد؛ لینک را دوباره بفرست.",
+        "en": "That option is not available for this link — send the link again.",
+        "fa": "این گزینه برای این لینک نیست؛ لینک را دوباره بفرست.",
     },
     "intake.stale": {
         "en": "⚠️ This message is no longer live; send the link again.",
@@ -410,6 +454,23 @@ MESSAGES: Final[Catalog] = {
         "fa": "🎧 صدا — M4A (اصل، بدون تبدیل)",
     },
     "fmt.media": {"en": "🖼 Send the media of this post", "fa": "🖼 ارسال رسانهٔ این پست"},
+
+    # The two-step audio menu: the container first, then how hard to press its
+    # quality knob. The buttons say plain words on purpose — the bitrates behind
+    # them are engine detail (services/extractor.py), not something a menu should
+    # make anyone learn.
+    "fmt.fmt_mp3": {"en": "🎧 MP3", "fa": "🎧 MP3"},
+    "fmt.fmt_m4a": {"en": "🎧 M4A", "fa": "🎧 M4A"},
+    "fmt.fmt_opus": {"en": "🎧 OPUS", "fa": "🎧 OPUS"},
+    "fmt.fmt_wav": {"en": "🎧 WAV", "fa": "🎧 WAV"},
+    "audio.choose_level": {
+        "en": "🎚 How good should it be? 👇",
+        "fa": "🎚 چه کیفیتی می‌خوای؟ 👇",
+    },
+    "audio.level_best": {"en": "💎 Best quality", "fa": "💎 بهترین کیفیت"},
+    "audio.level_high": {"en": "🔥 High quality", "fa": "🔥 کیفیت بالا"},
+    "audio.level_balanced": {"en": "⚖️ Balanced", "fa": "⚖️ متعادل"},
+    "audio.level_small": {"en": "📦 Small size", "fa": "📦 کم‌حجم"},
 
     # ---------------------------------------------------------------------
     # Worker: the download's own narration
@@ -711,7 +772,58 @@ MESSAGES: Final[Catalog] = {
     # ---------------------------------------------------------------------
     "admin.only": {"en": "⛔️ Admins only.", "fa": "⛔️ فقط ادمین می‌تونه."},
     "admin.btn_trend": {"en": "📈 Trend", "fa": "📈 روند شکست‌ها"},
-    "admin.btn_blocks": {"en": "🧾 Failures", "fa": "🧾 شکست‌های اخیر"},
+    "admin.btn_blocks": {"en": "🚫 Blocks", "fa": "🚫 بلاک‌ها"},
+    "admin.btn_users": {"en": "👥 Users", "fa": "👥 کاربران"},
+    "admin.btn_failures": {"en": "❌ Recent failures", "fa": "❌ شکست‌های اخیر"},
+    "admin.btn_system": {"en": "🖥 System", "fa": "🖥 سیستم"},
+    "admin.btn_settings": {"en": "⚙️ Settings", "fa": "⚙️ تنظیمات"},
+    "admin.btn_reload": {"en": "🔄 Refresh", "fa": "🔄 تازه‌سازی"},
+    "admin.btn_search": {"en": "🔎 Search", "fa": "🔎 جستجو"},
+    "admin.btn_prev": {"en": "◀️ Prev", "fa": "◀️ قبلی"},
+    "admin.btn_next": {"en": "▶️ Next", "fa": "▶️ بعدی"},
+    "admin.failures_headline": {"en": "Recent failures", "fa": "شکست‌های اخیر"},
+    "admin.users": {
+        "en": (
+            "👥 <b>Users</b>\n"
+            "\n"
+            "👥 Total: <b>{users}</b> · 💎 VIP: {premium}\n"
+            "🐣 New today: {new_users} · ⚡️ Active today: {active_today}\n"
+            "🌐 Language mix: {languages}\n"
+            "\n"
+            "{listing}"
+        ),
+        "fa": (
+            "👥 <b>کاربران</b>\n"
+            "\n"
+            "👥 همه: <b>{users}</b> · 💎 ویژه: {premium}\n"
+            "🐣 امروز تازه: {new_users} · ⚡️ فعال امروز: {active_today}\n"
+            "🌐 ترکیب زبان‌ها: {languages}\n"
+            "\n"
+            "{listing}"
+        ),
+    },
+    "admin.users_head": {
+        "en": "🗂 Newest accounts ({shown} of {total}):",
+        "fa": "🗂 تازه‌ترین حساب‌ها ({shown} از {total}):",
+    },
+    "admin.users_line": {
+        "en": "• <code>{telegram_id}</code> {username} · {language} · {joined}",
+        "fa": "• <code>{telegram_id}</code> {username} · {language} · {joined}",
+    },
+    "admin.users_empty": {"en": "— no accounts yet.", "fa": "— هنوز حسابی نیست."},
+    "admin.users_vip_mark": {"en": "💎", "fa": "💎"},
+    "admin.users_search_prompt": {
+        "en": "🔎 Send an <code>@username</code> or a Telegram id:",
+        "fa": "🔎 یک <code>@username</code> یا شناسهٔ تلگرام بفرست:",
+    },
+    "admin.users_search_title": {
+        "en": "🔎 <b>Search:</b> <code>{query}</code> — {count} hit(s)",
+        "fa": "🔎 <b>جستجو:</b> <code>{query}</code> — {count} نتیجه",
+    },
+    "admin.users_search_none": {
+        "en": "🔎 Nobody matches <code>{query}</code>.",
+        "fa": "🔎 کسی با «<code>{query}</code>» پیدا نشد.",
+    },
     "admin.trend_headline": {
         "en": "Failure trend over the last {days} days",
         "fa": "روند {days} روزهٔ شکست‌ها",
@@ -725,7 +837,7 @@ MESSAGES: Final[Catalog] = {
         "en": "Everything below is read from the running stack; the buttons are the tools.",
         "fa": "همه‌چیز از استک در حال اجرا خوانده می‌شود؛ دکمه‌ها ابزارها هستند.",
     },
-    "admin.btn_stats": {"en": "📊 Stats", "fa": "📊 آمار"},
+    "admin.btn_stats": {"en": "📊 Statistics", "fa": "📊 آمار"},
     "admin.btn_health": {"en": "🩺 Health", "fa": "🩺 سلامت"},
     "admin.btn_queue": {"en": "🕒 Queue", "fa": "🕒 صف"},
     "admin.btn_tools": {"en": "🔧 Tools", "fa": "🔧 ابزارها"},
@@ -967,32 +1079,24 @@ MESSAGES: Final[Catalog] = {
     },
     "admin.tools": {
         "en": (
-            "🔧 <b>Tools</b>\n"
+            "🛠 <b>Maintenance</b>\n"
             "\n"
-            "• 🩺 YouTube doctor — the full chain (cookies, PO token, JS runtime, proxy) "
-            "plus a live probe, one verdict and the next fix.\n"
-            "• ♻️ Cookie re-export — read a browser profile into the jar now, verify it with "
-            "a probe, and tell every admin the outcome.\n"
-            "• 📣 Broadcast — one message to every user, with a preview first and a "
-            "report after.\n"
-            "• 💬 Support button — point the button in the user menu at a username or a "
-            "URL, or remove it.\n"
+            "• 🩺 Doctor — one live probe of the whole YouTube path: one verdict and "
+            "the next fix worth trying.\n"
+            "• ♻️ Cookie export — read a browser profile into the jar, right now.\n"
             "\n"
-            "The commands are still there: /doctor /refresh /blocks /trend /fixlogin "
-            "/broadcast."
+            "Everything here is on call as commands too: "
+            "/doctor /refresh /fixlogin /oauth /broadcast."
         ),
         "fa": (
-            "🔧 <b>ابزارها</b>\n"
+            "🛠 <b>نگهداری</b>\n"
             "\n"
-            "• 🩺 دکتر یوتیوب — کل زنجیره (کوکی، PO token، رانتایم JS، پروکسی) به‌همراه "
-            "پروب زنده، یک حکم و قدم بعدی.\n"
-            "• ♻️ اکسپورت دوبارهٔ کوکی — خواندن پروفایل مرورگر داخل جار، تأیید با پروب و "
-            "اطلاع نتیجه به همهٔ ادمین‌ها.\n"
-            "• 📣 پیام همگانی — یک پیام برای همهٔ کاربران، اول پیش‌نمایش و بعد گزارش.\n"
-            "• 💬 دکمهٔ پشتیبانی — دکمهٔ منوی کاربر به یوزرنیم یا URL وصل می‌شود، یا حذف.\n"
+            "• 🩺 دکتر — یک پروب زنده از کل مسیر یوتیوب: یک حکم و قدم بعدی که ارزش "
+            "امتحان دارد.\n"
+            "• ♻️ اکسپورت کوکی — خواندن پروفایل مرورگر داخل جار، همین حالا.\n"
             "\n"
-            "دستورها هم سر جای خودشان هستند: /doctor /refresh /blocks /trend /fixlogin "
-            "/broadcast."
+            "همهٔ این‌ها به‌صورت دستور هم کار می‌کنند: "
+            "/doctor /refresh /fixlogin /oauth /broadcast."
         ),
     },
     "admin.stale": {

@@ -38,8 +38,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from core import database
 from core.config import get_settings
 from core.i18n import DEFAULT_LANG, t
+from core.ui import Screen, edit_quietly
 from core.utils import escape_html
-from handlers.user import support_target
+from handlers.user import _back_to_menu, support_target
 from services import broadcast, cookie_refresh, login_wizard, panel
 from services.cobalt import CobaltService
 from services.cookie_refresh import RefreshOutcome, render_outcome
@@ -59,6 +60,7 @@ from services.telemetry import (
     DIGEST_DAYS,
     TREND_DAYS,
     build_digest,
+    build_recent_digest,
     build_trend,
     render_digest,
     render_trend,
@@ -133,15 +135,17 @@ async def publish_commands(bot: Bot, lang: str = DEFAULT_LANG) -> None:
 
 
 class AdminStates(StatesGroup):
-    """The panel's two typed inputs: an announcement, and the support contact.
+    """The panel's typed inputs: an announcement, a support contact, a lookup.
 
-    Both go through a confirmation instead of acting on what arrives: a broadcast
-    reaches every user and cannot be taken back, and a mistyped support handle is a
-    broken button for everybody until somebody notices. One extra tap each.
+    The first two go through a confirmation instead of acting on what arrives: a
+    broadcast reaches every user and cannot be taken back, and a mistyped support
+    handle is a broken button for everybody until somebody notices. The lookup is
+    harmless either way — it only reads.
     """
 
     broadcast = State()
     support = State()
+    user_search = State()
 
 
 def _chunks(text: str, limit: int = CHUNK_LIMIT) -> list[str]:
@@ -484,19 +488,29 @@ async def on_alert_check(
 
 #: The panel's own callback namespace (``admin:<screen>``).
 PANEL_HOME = "admin:home"
+#: The dashboard's sections, as the hub lists them.
 _PANEL_SCREENS: frozenset[str] = frozenset(
     {
         "home",
         "stats",
-        "health",
-        "queue",
-        "tools",
+        "users",
         "broadcast",
-        "support",
-        "trend",
         "blocks",
+        "trend",
+        "failures",
+        "system",
+        "settings",
     }
 )
+#: Screens an *older* keyboard may still name. They render as their modern
+#: section (queue and health live on System now, tools split between System and
+#: Settings) — a forwarded panel from last week must not dead-end.
+_PANEL_ALIASES: dict[str, str] = {
+    "health": "system",
+    "queue": "system",
+    "tools": "system",
+    "support": "settings",
+}
 #: The two confirmations (they are not screens: they act).
 BC_SEND = "bc:send"
 BC_CANCEL = "bc:cancel"
@@ -506,34 +520,56 @@ SUP_CLEAR = "sup:clear"
 
 
 def _panel_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """The four reading screens, in two rows, plus the way back to the user menu."""
+    """The dashboard hub: eight sections in pairs, then the way to the user menu.
+
+    Categories, not one giant list — everything an operator can *read*
+    (Statistics, Users, Blocks, Trends, Failures) sits with its peers, actions
+    and configuration have their own homes (Broadcast, System, Settings), and
+    every section is one screen deep from here. The back button leaves the panel
+    entirely: an admin is also a user of the same one-message UI.
+    """
     builder = InlineKeyboardBuilder()
     builder.button(text=t("admin.btn_stats", lang), callback_data="admin:stats")
-    builder.button(text=t("admin.btn_health", lang), callback_data="admin:health")
-    builder.button(text=t("admin.btn_queue", lang), callback_data="admin:queue")
-    builder.button(text=t("admin.btn_tools", lang), callback_data="admin:tools")
+    builder.button(text=t("admin.btn_users", lang), callback_data="admin:users")
+    builder.button(text=t("admin.btn_broadcast", lang), callback_data="admin:broadcast")
+    builder.button(text=t("admin.btn_blocks", lang), callback_data="admin:blocks")
+    builder.button(text=t("admin.btn_trend", lang), callback_data="admin:trend")
+    builder.button(text=t("admin.btn_failures", lang), callback_data="admin:failures")
+    builder.button(text=t("admin.btn_system", lang), callback_data="admin:system")
+    builder.button(text=t("admin.btn_settings", lang), callback_data="admin:settings")
     builder.adjust(2)
     builder.button(text=t("menu.back", lang), callback_data="menu:home")
     builder.adjust(2)
     return builder.as_markup()
 
 
-def _tools_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """Everything an operator *does* from here.
+def _system_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """System's own actions, then the way back to the hub.
 
     The first two call the *same* callbacks the cookie-jar alert uses, so an
     operator who taps here and one who taps there get identical behaviour — one
-    implementation and one set of tests. The last two are the panel's newer
-    actions: an announcement, and the support button every user sees.
+    implementation and one set of tests. The reload re-reads this screen; fixlogin
+    and oauth stay commands (they are long guided flows) and are named in the text.
     """
     builder = InlineKeyboardBuilder()
     builder.button(text=t("admin.btn_doctor", lang), callback_data=DOCTOR_CALLBACK)
     builder.button(text=t("admin.btn_refresh", lang), callback_data=REFRESH_CALLBACK)
-    builder.button(text=t("admin.btn_broadcast", lang), callback_data="admin:broadcast")
-    builder.button(text=t("admin.btn_support", lang), callback_data="admin:support")
-    builder.button(text=t("admin.btn_trend", lang), callback_data="admin:trend")
-    builder.button(text=t("admin.btn_blocks", lang), callback_data="admin:blocks")
+    builder.button(text=t("admin.btn_reload", lang), callback_data="admin:system")
     builder.adjust(2)
+    builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def _section_keyboard(lang: str, screen: str) -> InlineKeyboardMarkup:
+    """A read-only section: re-read it, or leave to its parent — the hub.
+
+    One shape for every report screen, so the buttons never move around between
+    them: refresh on the left, back on the right, and "back" is always the
+    section's *parent* (the dashboard hub), never "wherever".
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("admin.btn_reload", lang), callback_data=f"admin:{screen}")
     builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
     builder.adjust(2)
     return builder.as_markup()
@@ -548,23 +584,59 @@ def _broadcast_keyboard(lang: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def _done_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """A finished flow's only question is "where to now" — the hub."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def _users_keyboard(lang: str, *, offset: int, total: int) -> InlineKeyboardMarkup:
+    """The Users screen: a lookup, paging while there is more, and the way back.
+
+    The arrows appear only when they have somewhere to go — a disabled-looking
+    button that wraps around is how paging becomes a guessing game. Rows are
+    computed from what is actually drawn, so the layout stays honest when one
+    arrow is missing.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("admin.btn_search", lang), callback_data="usr:search")
+    widths = [1]
+    nav = 0
+    if offset > 0:
+        builder.button(
+            text=t("admin.btn_prev", lang),
+            callback_data=f"usr:page:{max(0, offset - panel.USERS_PAGE_SIZE)}",
+        )
+        nav += 1
+    if offset + panel.USERS_PAGE_SIZE < total:
+        builder.button(
+            text=t("admin.btn_next", lang),
+            callback_data=f"usr:page:{offset + panel.USERS_PAGE_SIZE}",
+        )
+        nav += 1
+    if nav:
+        widths.append(nav)  # prev and next share a row; one alone is fine too
+    builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
+    widths.append(1)
+    builder.adjust(*widths)
+    return builder.as_markup()
+
+
 def _support_keyboard(lang: str, *, configured: bool) -> InlineKeyboardMarkup:
-    """Write the contact, or remove it (shown only when there is one to remove)."""
+    """Write the contact, or remove it (shown only when there is one to remove).
+
+    This *is* the Settings screen's keyboard, so its back leaves for the hub —
+    the prompt screen that SUP_EDIT opens is the one that comes back here.
+    """
     builder = InlineKeyboardBuilder()
     builder.button(text=t("admin.support_set", lang), callback_data=SUP_EDIT)
     if configured:
         builder.button(text=t("admin.support_clear", lang), callback_data=SUP_CLEAR)
     builder.adjust(2)
-    builder.button(text=t("admin.btn_back", lang), callback_data="admin:tools")
+    builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
     builder.adjust(2)
-    return builder.as_markup()
-
-
-def _report_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """A report screen: nothing to operate here, only the way back to the tools."""
-    builder = InlineKeyboardBuilder()
-    builder.button(text=t("admin.btn_back", lang), callback_data="admin:tools")
-    builder.adjust(1)
     return builder.as_markup()
 
 
@@ -574,36 +646,54 @@ async def panel_screen(
     queue: TaskQueue,
     cobalt: CobaltService | None,
     lang: str = DEFAULT_LANG,
-) -> tuple[str, InlineKeyboardMarkup]:
-    """One screen of the panel: its text and its buttons.
+    *,
+    offset: int = 0,
+) -> Screen:
+    """One screen of the panel: its text and its buttons, as a whole page.
 
     Every screen is built on demand rather than cached: "how deep is the queue" has
-    an answer that is worth one query, precisely because it changes.
+    an answer that is worth one query, precisely because it changes. Each returns
+    its *own* keyboard — never a shared menu under foreign text — whose one ⬅️
+    leads to this screen's parent: the hub for every section. Names an older
+    keyboard still uses resolve to their modern section via ``_PANEL_ALIASES``.
     """
     settings = get_settings()
     if screen == "stats":
-        return await panel.stats_text(pool, lang), _panel_keyboard(lang)
-    if screen == "health":
-        text = await panel.health_text(pool, queue, settings, cobalt, lang)
-        return text, _panel_keyboard(lang)
-    if screen == "queue":
-        return await panel.queue_text(queue, settings, lang), _panel_keyboard(lang)
-    if screen == "tools":
-        return panel.tools_text(lang), _tools_keyboard(lang)
+        return Screen(await panel.stats_text(pool, lang), _section_keyboard(lang, "stats"))
+    if screen == "users":
+        return await _users_screen(pool, lang, offset=offset)
     if screen == "broadcast":
         return await _broadcast_screen(pool, lang)
-    if screen == "support":
-        return await _support_screen(pool, lang)
     if screen == "trend":
         trend = await build_trend(pool, days=TREND_DAYS)
         headline = t("admin.trend_headline", lang, days=TREND_DAYS)
-        return render_trend(trend, headline=headline), _report_keyboard(lang)
+        return Screen(render_trend(trend, headline=headline), _section_keyboard(lang, "trend"))
     if screen == "blocks":
-        return await _failure_report(pool, cobalt, lang), _report_keyboard(lang)
-    return await panel.header(pool, lang), _panel_keyboard(lang)
+        return Screen(await _failure_report(pool, cobalt, lang), _section_keyboard(lang, "blocks"))
+    if screen == "failures":
+        # The short window on purpose: Trends owns the long view, this screen
+        # answers "is it failing *right now*" — and what to do about it.
+        digest = await build_recent_digest(pool)
+        text = render_digest(digest, headline=t("admin.failures_headline", lang))
+        return Screen(text, _section_keyboard(lang, "failures"))
+    if screen in ("system", "health", "queue", "tools"):
+        health = await panel.health_text(pool, queue, settings, cobalt, lang)
+        queue_line = await panel.queue_text(queue, settings, lang)
+        text = "\n".join((health, "", queue_line, "", panel.tools_text(lang)))
+        return Screen(text, _system_keyboard(lang))
+    if screen in ("settings", "support"):
+        return await _support_screen(pool, lang)
+    return Screen(await panel.header(pool, lang), _panel_keyboard(lang))
 
 
-async def _broadcast_screen(pool: asyncpg.Pool, lang: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _users_screen(pool: asyncpg.Pool, lang: str, *, offset: int = 0) -> Screen:
+    """Totals over everybody, then one page of the newest accounts."""
+    text = await panel.users_text(pool, lang, offset=offset)
+    total = await database.count_users(pool)
+    return Screen(text, _users_keyboard(lang, offset=offset, total=total))
+
+
+async def _broadcast_screen(pool: asyncpg.Pool, lang: str) -> Screen:
     """What a broadcast will reach, before anyone writes it.
 
     The count is read here rather than remembered from the last run: an operator
@@ -612,16 +702,16 @@ async def _broadcast_screen(pool: asyncpg.Pool, lang: str) -> tuple[str, InlineK
     total = await database.count_users(pool)
     builder = InlineKeyboardBuilder()
     builder.button(text=t("admin.broadcast_start", lang), callback_data=BC_START)
-    builder.button(text=t("admin.btn_back", lang), callback_data="admin:tools")
+    builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
     builder.adjust(2)
-    return t("admin.broadcast_intro", lang, users=total), builder.as_markup()
+    return Screen(t("admin.broadcast_intro", lang, users=total), builder.as_markup())
 
 
-async def _support_screen(pool: asyncpg.Pool, lang: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _support_screen(pool: asyncpg.Pool, lang: str) -> Screen:
     """Where the support button points right now, and how to change it."""
     contact = await database.get_support_contact(pool)
     shown = contact or t("admin.support_none", lang)
-    return (
+    return Screen(
         t("admin.support_intro", lang, contact=escape_html(shown)),
         _support_keyboard(lang, configured=bool(contact)),
     )
@@ -641,8 +731,8 @@ async def cmd_admin(
     if not settings.is_admin(user.id if user else None):
         await message.answer(t("admin.only", lang))
         return
-    text, keyboard = await panel_screen("home", pool, queue, cobalt, lang)
-    await message.answer(text, reply_markup=keyboard)
+    screen = await panel_screen("home", pool, queue, cobalt, lang)
+    await message.answer(screen.text, reply_markup=screen.keyboard)
 
 
 @router.callback_query(F.data == "menu:admin")
@@ -663,14 +753,11 @@ async def on_menu_admin(
         await cb.answer(t("admin.only", lang), show_alert=True)
         return
     message = cb.message if isinstance(cb.message, Message) else None
-    text, keyboard = await panel_screen("home", pool, queue, cobalt, lang)
+    screen = await panel_screen("home", pool, queue, cobalt, lang)
     await cb.answer()
     if message is None:
         return
-    try:
-        await message.edit_text(text, reply_markup=keyboard)
-    except TelegramBadRequest:
-        logger.debug("panel edit skipped", exc_info=True)
+    await _edit(message, screen.text, reply_markup=screen.keyboard)
 
 
 @router.callback_query(F.data.startswith("admin:"))
@@ -697,15 +784,89 @@ async def on_panel_button(
         await cb.answer(t("admin.stale", lang), show_alert=True)
         return
     await cb.answer()
-    text, keyboard = await panel_screen(
-        screen if screen in _PANEL_SCREENS else "home", pool, queue, cobalt, lang
-    )
+    known = screen if screen in _PANEL_SCREENS or screen in _PANEL_ALIASES else "home"
+    page = await panel_screen(known, pool, queue, cobalt, lang)
+    # Identical content (a tap on the screen already open) is answered with
+    # silence — see core.ui.edit_quietly; a duplicate panel helps nobody.
+    await _edit(message, page.text, reply_markup=page.keyboard)
+
+
+# ---------------------------------------------------------------------------
+# The Users section: paging and lookup (reads only)
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data.startswith("usr:page:"))
+async def on_users_page(
+    cb: CallbackQuery,
+    pool: asyncpg.Pool,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """A paging arrow: the Users screen again, one page further along."""
+    if not get_settings().is_admin(cb.from_user.id):
+        await cb.answer(t("admin.only", lang), show_alert=True)
+        return
+    message = cb.message if isinstance(cb.message, Message) else None
+    if message is None:
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    raw = (cb.data or "").rsplit(":", 1)[-1]
     try:
-        await message.edit_text(text, reply_markup=keyboard)
-    except TelegramBadRequest:
-        # Identical content (a tap on the screen already open) is not an error worth
-        # a new message; a message that cannot be edited at all is.
-        logger.debug("panel edit skipped (%s)", screen, exc_info=True)
+        offset = max(0, int(raw))
+    except ValueError:
+        offset = 0
+    await cb.answer()
+    screen = await _users_screen(pool, lang, offset=offset)
+    await _edit(message, screen.text, reply_markup=screen.keyboard)
+
+
+@router.callback_query(F.data == "usr:search")
+async def on_users_search(
+    cb: CallbackQuery, state: FSMContext, lang: str = DEFAULT_LANG
+) -> None:
+    """Ask for the lookup query; the next message from this admin is it."""
+    if not get_settings().is_admin(cb.from_user.id):
+        await cb.answer(t("admin.only", lang), show_alert=True)
+        return
+    message = cb.message if isinstance(cb.message, Message) else None
+    if message is None:
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    await cb.answer()
+    await state.set_state(AdminStates.user_search)
+    await _edit(
+        message,
+        t("admin.users_search_prompt", lang),
+        reply_markup=_back_to_menu(lang, to="admin:users"),
+    )
+
+
+@router.message(AdminStates.user_search)
+async def on_users_search_value(
+    message: Message, state: FSMContext, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
+) -> None:
+    """The lookup itself — answered as a screen, never as raw table output.
+
+    A read only (the section changes nothing), so the query is not even logged:
+    who looked somebody up is an audit fact, what they typed is that user's
+    business.
+    """
+    user = message.from_user
+    if not get_settings().is_admin(user.id if user else None):
+        await state.clear()
+        await message.answer(t("admin.only", lang))
+        return
+    query = (message.text or "").strip()
+    await state.clear()
+    if not query:
+        await message.answer(
+            t("admin.users_search_prompt", lang),
+            reply_markup=_back_to_menu(lang, to="admin:users"),
+        )
+        return
+    text = await panel.users_search_text(pool, query, lang)
+    await message.answer(text, reply_markup=_back_to_menu(lang, to="admin:users"))
+    logger.info("user lookup ran for admin %s", user.id if user else "?")
 
 
 # ---------------------------------------------------------------------------
@@ -836,16 +997,13 @@ def _oauth_failure_text(outcome: OAuthOutcome) -> str:
 
 
 async def _edit(message: Message, text: str, **kwargs: Any) -> None:
-    """Replace a panel message in place, tolerating one Telegram will not touch.
+    """Rewrite a panel message, tolerating anything Telegram will not touch.
 
-    A panel message that cannot be edited (too old, or already carrying exactly
-    this text) is not an error worth interrupting an operator with: the *action*
-    behind the button is what matters, and it has already happened.
+    The panel's contract, spelled out in ``core.ui.edit_quietly`` (this is it,
+    under the name every handler here already knows): the *action* behind a
+    button has already happened, so a failed status rewrite is nobody's error.
     """
-    try:
-        await message.edit_text(text, **kwargs)
-    except TelegramBadRequest:
-        logger.debug("could not edit the panel message", exc_info=True)
+    await edit_quietly(message, text, **kwargs)
 
 
 @router.message(Command("broadcast"))
@@ -876,7 +1034,16 @@ async def on_broadcast_start(
         return
     await cb.answer()
     await state.set_state(AdminStates.broadcast)
-    await _edit(message, t("admin.broadcast_prompt", lang))
+    # The prompt is a screen too: it carries its own [Cancel], not the keyboard
+    # of the screen it replaced — and tapping it must never re-arm the flow.
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("admin.broadcast_cancel", lang), callback_data=BC_CANCEL)
+    builder.adjust(1)
+    await _edit(
+        message,
+        t("admin.broadcast_prompt", lang),
+        reply_markup=builder.as_markup(),
+    )
 
 
 @router.message(AdminStates.broadcast)
@@ -928,7 +1095,11 @@ async def on_broadcast_cancel(cb: CallbackQuery, state: FSMContext, lang: str = 
     message = cb.message if isinstance(cb.message, Message) else None
     await cb.answer()
     if message is not None:
-        await _edit(message, t("admin.broadcast_cancelled", lang))
+        await _edit(
+            message,
+            t("admin.broadcast_cancelled", lang),
+            reply_markup=_done_keyboard(lang),
+        )
 
 
 @router.callback_query(F.data == BC_SEND)
@@ -955,8 +1126,16 @@ async def on_broadcast_send(
         return
     await cb.answer(t("admin.broadcast_sending", lang, sent=0, total=0))
 
+    empty = InlineKeyboardMarkup(inline_keyboard=[])
+
     async def progress(sent: int, total: int) -> None:
-        await _edit(message, t("admin.broadcast_sending", lang, sent=sent, total=total))
+        # An *empty* keyboard, on purpose: the confirm buttons must be gone the
+        # moment sending starts, or a second tap could look like a second offer.
+        await _edit(
+            message,
+            t("admin.broadcast_sending", lang, sent=sent, total=total),
+            reply_markup=empty,
+        )
 
     try:
         report = await broadcast.deliver(bot, pool, announcement, on_progress=progress)
@@ -974,6 +1153,7 @@ async def on_broadcast_send(
             blocked=report.blocked,
             failed=report.failed,
         ),
+        reply_markup=_done_keyboard(lang),
     )
     logger.info(
         "broadcast sent by admin %s: %s/%s (%s blocked, %s failed)",
@@ -999,7 +1179,11 @@ async def on_support_edit(
         return
     await cb.answer()
     await state.set_state(AdminStates.support)
-    await _edit(message, t("admin.support_prompt", lang))
+    await _edit(
+        message,
+        t("admin.support_prompt", lang),
+        reply_markup=_back_to_menu(lang, to="admin:settings"),
+    )
 
 
 @router.message(AdminStates.support)

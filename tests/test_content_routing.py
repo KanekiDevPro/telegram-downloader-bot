@@ -76,9 +76,28 @@ def test_video_links_are_offered_quality_tiers() -> None:
 def test_music_links_are_offered_audio_formats() -> None:
     routing = content.routing_for("https://soundcloud.com/a/b")
 
-    assert [choice.quality for choice in routing.choices] == ["m4a", "mp3"]
+    # Every tier the pipeline can genuinely build — canonical spellings first
+    # (mp3 = the balanced 192k re-encode, m4a = the untouched stream), because
+    # queues and cache rows already own those names.
+    assert [choice.quality for choice in routing.choices] == [
+        "mp3.best",
+        "mp3.high",
+        "mp3",
+        "mp3.small",
+        "m4a",
+        "m4a.high",
+        "m4a.balanced",
+        "m4a.small",
+        "opus.best",
+        "opus.high",
+        "opus.balanced",
+        "opus.small",
+        "wav",
+    ]
     assert all(choice.media_format == "audio" for choice in routing.choices)
     assert routing.header_key == "intake.choose_audio"
+    assert routing.audio_formats == ("mp3", "m4a", "opus", "wav"), "the format grid is step one"
+    assert routing.media_choice is None
 
 
 def test_photo_posts_are_not_offered_a_quality_menu() -> None:
@@ -90,12 +109,26 @@ def test_photo_posts_are_not_offered_a_quality_menu() -> None:
 
 
 def test_an_ambiguous_post_is_offered_media_and_audio() -> None:
-    choices = content.routing_for("https://x.com/user/status/12345").choices
+    routing = content.routing_for("https://x.com/user/status/12345")
 
-    assert [choice.label_key for choice in choices] == [
+    assert routing.media_choice is not None
+    assert routing.media_choice.label_key == "fmt.media"
+    assert routing.audio_formats == ("mp3", "m4a", "opus", "wav")
+    assert [choice.label_key for choice in routing.choices] == [
         "fmt.media",
-        "fmt.audio_m4a",
-        "fmt.audio_mp3",
+        "audio.level_best",
+        "audio.level_high",
+        "audio.level_balanced",
+        "audio.level_small",
+        "audio.level_best",
+        "audio.level_high",
+        "audio.level_balanced",
+        "audio.level_small",
+        "audio.level_best",
+        "audio.level_high",
+        "audio.level_balanced",
+        "audio.level_small",
+        "fmt.fmt_wav",
     ]
 
 

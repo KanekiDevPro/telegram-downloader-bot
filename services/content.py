@@ -32,7 +32,13 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qsl, unquote, urlparse
 
-from core.utils import MediaFormat, Quality
+from core.utils import (
+    AUDIO_FORMATS,
+    AUDIO_LEVELS,
+    AUDIO_TIERS,
+    MediaFormat,
+    Quality,
+)
 
 #: What the link most likely holds.
 ContentKind = Literal["video", "audio", "image", "gallery", "media"]
@@ -53,7 +59,14 @@ class Routing:
 
     kind: ContentKind
     header_key: str
+    #: Every request that may legitimately finish this link's flow — the menu's
+    #: vocabulary, and what ``find_choice`` accepts.
     choices: tuple[Choice, ...]
+    #: The "send this post's own media" button, for links that *are* posts.
+    media_choice: Choice | None = None
+    #: The two-step audio menu: which formats deserve a button here (empty when
+    #: the link cannot produce audio at all).
+    audio_formats: tuple[str, ...] = ()
 
     @property
     def solo(self) -> Choice | None:
@@ -76,12 +89,49 @@ _VIDEO_CHOICES: tuple[Choice, ...] = (
     Choice("fmt.video_480", "video", "480"),
 )
 
-#: Audio: the untouched stream first (it is lossless-from-source and never cheaper
-#: than the MP3 re-encode it would replace), then the universally-compatible MP3.
-_AUDIO_CHOICES: tuple[Choice, ...] = (
-    Choice("fmt.audio_m4a", "audio", "m4a"),
-    Choice("fmt.audio_mp3", "audio", "mp3"),
-)
+#: The audio menu is two taps deep on purpose: first the *container* the user
+#: wants to receive (a file named .mp3 is a different promise than one named
+#: .m4a), then — for the codecs that have a quality knob — how hard to press it.
+#: The button labels stay plain words ("Best", "Small size"); the bitrates are an
+#: engine detail (services/extractor.py) that no menu should make anyone learn.
+AUDIO_FORMAT_LABELS: dict[str, str] = {
+    "mp3": "fmt.fmt_mp3",
+    "m4a": "fmt.fmt_m4a",
+    "opus": "fmt.fmt_opus",
+    "wav": "fmt.fmt_wav",
+}
+
+_LEVEL_LABELS: dict[str, str] = {
+    "best": "audio.level_best",
+    "high": "audio.level_high",
+    "balanced": "audio.level_balanced",
+    "small": "audio.level_small",
+}
+
+
+def audio_level_choices(codec: str) -> tuple[Choice, ...]:
+    """The presets a codec genuinely has, best first (``()`` for e.g. wav).
+
+    Built from :data:`core.utils.AUDIO_TIERS`, so a button and the tier it
+    submits cannot drift apart — wav is absent there (PCM has no knob), and this
+    returns ``()`` for it: its whole menu is the format button itself.
+    """
+    return tuple(
+        Choice(_LEVEL_LABELS[level], "audio", AUDIO_TIERS[(codec, level)])
+        for level in AUDIO_LEVELS
+        if (codec, level) in AUDIO_TIERS
+    )
+
+
+def _audio_choices() -> tuple[Choice, ...]:
+    """Every audio request accepted for a link, format by format, best first."""
+    per_format = (
+        choice for fmt in AUDIO_FORMATS for choice in audio_level_choices(fmt)
+    )
+    return (*per_format, Choice(AUDIO_FORMAT_LABELS["wav"], "audio", "wav"))
+
+
+_AUDIO_CHOICES: tuple[Choice, ...] = _audio_choices()
 
 #: Everything else: "send the media of this post" is a *video* request to the engine,
 #: because that is the request that fetches whatever the post holds — and the image
@@ -89,6 +139,9 @@ _AUDIO_CHOICES: tuple[Choice, ...] = (
 _MEDIA_CHOICE = Choice("fmt.media", "video", "best")
 
 _MEDIA_CHOICES: tuple[Choice, ...] = (_MEDIA_CHOICE, *_AUDIO_CHOICES)
+
+#: Kinds whose links can yield audio, and therefore get the format buttons.
+_AUDIO_MENU_KINDS: frozenset[str] = frozenset({"audio", "media"})
 
 #: Extensions that *are* the answer. A URL ending in ``.jpg`` is not a page that
 #: might contain a photo — it is the photo, whatever host serves it. This is the
@@ -352,7 +405,13 @@ def classify(url: str) -> ContentKind:
 def routing_for(url: str) -> Routing:
     """The header and the buttons this link deserves."""
     kind = classify(url)
-    return Routing(kind=kind, header_key=_HEADERS[kind], choices=_CHOICES[kind])
+    return Routing(
+        kind=kind,
+        header_key=_HEADERS[kind],
+        choices=_CHOICES[kind],
+        media_choice=_MEDIA_CHOICE if kind == "media" else None,
+        audio_formats=AUDIO_FORMATS if kind in _AUDIO_MENU_KINDS else (),
+    )
 
 
 def find_choice(url: str, media_format: str, quality: str) -> Choice | None:

@@ -55,8 +55,11 @@ from services.subscription import effective_daily_limit, is_admin, is_premium_ac
 logger = logging.getLogger(__name__)
 router = Router(name="user")
 
-#: The callback prefix for a format choice: ``fmt:<media_format>:<quality>``.
+#: The callback prefix for a final choice: ``fmt:<media_format>:<quality>``.
 FMT_PREFIX = "fmt:"
+#: The callback prefix for the audio menu's first step: ``audf:<codec>`` (open
+#: that codec's quality presets) — ``audf:back`` returns to the question.
+AUDF_PREFIX = "audf:"
 LANG_PREFIX = "lang:"
 
 
@@ -66,43 +69,33 @@ class DownloadStates(StatesGroup):
     waiting_format = State()
 
 
-def _main_menu(
-    lang: str, *, admin: bool = False, support: bool = False
-) -> InlineKeyboardMarkup:
+def _main_menu(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup:
     """HOME — the navigation hub everything hangs off: Download, Profile, Help.
 
     Deliberate shape, not a flat list. Download gets the top row to itself: it is
-    why most people came. Premium and Language live under Profile now — they are
-    account concerns, and a home carrying every action is a wall of buttons. The
-    support button exists only when an operator has actually configured a
-    contact — a button nobody filled in is worse than no button, because it is
-    a promise the bot cannot keep. And the admin panel button is drawn for
+    why most people came. Premium, Language and the support contact live under
+    Profile and Help now — they are account or help concerns, and a home carrying
+    every action is a wall of buttons. And the admin panel button is drawn for
     admins only (an admin is never offered «💎 Go VIP» either: they hold it
-    permanently, so the
-    button could only lead to a screen explaining that they cannot buy what they
-    already have).
+    permanently, so the button could only lead to a screen explaining that they
+    cannot buy what they already have).
     """
     builder = InlineKeyboardBuilder()
     builder.button(text=t("menu.download", lang), callback_data="menu:download")
     builder.button(text=t("menu.profile", lang), callback_data="menu:profile")
     builder.button(text=t("menu.help", lang), callback_data="menu:help")
-    if support:
-        builder.button(text=t("menu.support", lang), callback_data="menu:support")
     if admin:
         # The panel used to be reachable only by remembering that `/admin` exists:
         # an operator had no way to tell a missing permission from a missing
         # feature. It is a button now, on the one screen they always open.
         builder.button(text=t("menu.admin", lang), callback_data="menu:admin")
-    builder.adjust(1, 2, 2)
+    builder.adjust(1, 2, 1)
     return builder.as_markup()
 
 
-async def _menu_for(
-    pool: asyncpg.Pool | None, user: asyncpg.Record, lang: str
-) -> InlineKeyboardMarkup:
-    """The menu as this user should see it (admins know it, the DB knows support)."""
-    contact = await database.get_support_contact(pool) if pool is not None else ""
-    return _main_menu(lang, admin=is_admin(user), support=bool(contact))
+def _menu_for(user: asyncpg.Record, lang: str) -> InlineKeyboardMarkup:
+    """The home screen as this user should see it (admins get the panel button)."""
+    return _main_menu(lang, admin=is_admin(user))
 
 
 def _back_to_menu(lang: str, *, to: str = "menu:home") -> InlineKeyboardMarkup:
@@ -118,26 +111,71 @@ def _back_to_menu(lang: str, *, to: str = "menu:home") -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def _format_keyboard(url: str, lang: str) -> InlineKeyboardMarkup:
+def _fmt_callback(media_format: str, quality: str) -> str:
+    """The callback a choice button carries: ``fmt:<media_format>:<quality>``."""
+    return f"{FMT_PREFIX}{media_format}:{quality}"
+
+
+def _question_keyboard(url: str, lang: str) -> InlineKeyboardMarkup:
     """What can be asked for *this* link — and nothing else.
 
-    One button per offered choice, in the order ``services/content.py`` puts them
-    (best first for video, the untouched stream first for audio), and a way back to
-    the menu so a user who changed their mind is not stuck in a question.
-
-    Two per row, with the way back on a row of its own: the quality tiers are short
-    labels that pair up naturally, and a link that only has one thing to offer
-    (an image post) is never shown this keyboard at all — it is downloaded.
+    Video tiers are one tap (they are already quality words), but audio is two
+    steps on purpose: the *file type* first (a .mp3 and a .opus are different
+    promises), then its quality presets. A codec with no knob to turn — wav —
+    skips straight to the request from its own button. The way back to the menu
+    is always the last row, so a user who changed their mind is never stuck in a
+    question.
     """
+    routing = content.routing_for(url)
     builder = InlineKeyboardBuilder()
-    for choice in content.routing_for(url).choices:
+    if routing.media_choice is not None:
         builder.button(
-            text=t(choice.label_key, lang),
-            callback_data=f"{FMT_PREFIX}{choice.media_format}:{choice.quality}",
+            text=t(routing.media_choice.label_key, lang),
+            callback_data=_fmt_callback(
+                routing.media_choice.media_format, routing.media_choice.quality
+            ),
         )
+    for codec in routing.audio_formats:
+        builder.button(
+            text=t(content.AUDIO_FORMAT_LABELS[codec], lang),
+            callback_data=(
+                f"{AUDF_PREFIX}{codec}"
+                if content.audio_level_choices(codec)
+                else _fmt_callback("audio", codec)
+            ),
+        )
+    if not routing.audio_formats and routing.media_choice is None:
+        # No audio menu and no post to describe — the choices *are* the buttons:
+        # the video quality tiers, already quality words in one step.
+        for choice in routing.choices:
+            builder.button(
+                text=t(choice.label_key, lang),
+                callback_data=_fmt_callback(choice.media_format, choice.quality),
+            )
     builder.adjust(2)
     builder.button(text=t("menu.back", lang), callback_data="menu:home")
     builder.adjust(2)  # ...the back button then starts a new row of its own
+    return builder.as_markup()
+
+
+def _level_keyboard(codec: str, lang: str) -> InlineKeyboardMarkup:
+    """A codec's quality presets, and the way back to the question before it.
+
+    Plain words (best / high / balanced / small size) rather than bitrates: the
+    numbers behind them are encoder settings (see services/extractor.py) and a
+    menu is no place to make anyone learn them. Back here means *the previous
+    screen* — the format question — not Home: nobody should lose their place by
+    looking at the next step.
+    """
+    builder = InlineKeyboardBuilder()
+    for choice in content.audio_level_choices(codec):
+        builder.button(
+            text=t(choice.label_key, lang),
+            callback_data=_fmt_callback(choice.media_format, choice.quality),
+        )
+    builder.adjust(2)
+    builder.button(text=t("menu.back", lang), callback_data=f"{AUDF_PREFIX}back")
+    builder.adjust(2)
     return builder.as_markup()
 
 
@@ -183,6 +221,8 @@ def _help_keyboard(lang: str) -> InlineKeyboardMarkup:
     """The help hub: its pages, the support contact, and the way home."""
     builder = InlineKeyboardBuilder()
     builder.button(text=t("help.btn_how", lang), callback_data="help:how")
+    builder.button(text=t("help.btn_audio", lang), callback_data="help:audio")
+    builder.button(text=t("help.btn_video", lang), callback_data="help:video")
     builder.button(text=t("help.btn_platforms", lang), callback_data="help:platforms")
     builder.button(text=t("help.btn_problems", lang), callback_data="help:problems")
     builder.button(text=t("menu.support", lang), callback_data="menu:support")
@@ -196,6 +236,8 @@ def _help_keyboard(lang: str) -> InlineKeyboardMarkup:
 #: its text cannot drift apart.
 _HELP_PAGES: dict[str, str] = {
     "help:how": "help.body",
+    "help:audio": "help.audio",
+    "help:video": "help.video",
     "help:platforms": "help.platforms",
     "help:problems": "help.problems",
 }
@@ -276,7 +318,7 @@ async def cmd_start(
         return
     await message.answer(
         _welcome_text(user["username"] or t("misc.friend", lang), lang),
-        reply_markup=await _menu_for(pool, user, lang),
+        reply_markup=_menu_for(user, lang),
     )
 
 
@@ -334,7 +376,7 @@ async def on_menu_home(
     await _edit_or_reply(
         message,
         _welcome_text(user["username"] or t("misc.friend", lang), lang),
-        reply_markup=await _menu_for(pool, user, lang),
+        reply_markup=_menu_for(user, lang),
     )
 
 
@@ -462,7 +504,7 @@ async def cmd_language(
     await database.set_user_language(pool, user["telegram_id"], chosen)
     await message.answer(
         t("language.set", chosen, name=lang_button(chosen)),
-        reply_markup=_main_menu(chosen),
+        reply_markup=_main_menu(chosen, admin=is_admin(user)),
     )
 
 
@@ -540,7 +582,7 @@ async def on_language_chosen(
     await _edit_or_reply(
         message,
         _welcome_text(user["username"] or t("misc.friend", chosen), chosen),
-        reply_markup=await _menu_for(pool, user, chosen),
+        reply_markup=_menu_for(user, chosen),
     )
 
 
@@ -809,7 +851,9 @@ async def _queue_url_flow(
         return
     await state.set_state(DownloadStates.waiting_format)
     await state.update_data(url=url)
-    await _edit_or_reply(status, _media_question(url, lang), reply_markup=_format_keyboard(url, lang))
+    await _edit_or_reply(
+        status, _media_question(url, lang), reply_markup=_question_keyboard(url, lang)
+    )
 
 
 def _media_question(url: str, lang: str) -> str:
@@ -836,6 +880,52 @@ async def _probe_supported(url: str) -> bool:
         )
     except Exception:
         return True  # probe failure must not block the user — worker will decide
+
+
+@router.callback_query(DownloadStates.waiting_format, F.data.startswith(AUDF_PREFIX))
+async def on_audio_format(
+    cb: CallbackQuery,
+    state: FSMContext,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """An audio-format tap: the question narrows to that codec's quality.
+
+    Two screens, one state: the link stays in the FSM, and the same message is
+    edited from the format grid to the preset grid (and back — ``audf:back`` is
+    the level screen's parent, the question itself). A codec without presets
+    never reaches here: its button submits the request directly.
+    """
+    message = callback_message(cb)
+    if message is None:
+        await cb.answer(t("intake.stale", lang), show_alert=True)
+        return
+    data = await state.get_data()
+    url = data.get("url")
+    if not url:
+        await cb.answer(t("intake.link_expired", lang), show_alert=True)
+        await state.clear()
+        return
+    spec = (cb.data or "")[len(AUDF_PREFIX) :]
+    if spec == "back":
+        await cb.answer()
+        await _edit_or_reply(
+            message,
+            _media_question(url, lang),
+            reply_markup=_question_keyboard(url, lang),
+        )
+        return
+    # Deliberately strict (same rule as find_choice): the codec must have been a
+    # button on *this* link's question — an audio menu has no business opening
+    # for a video link, however the tap was spelled.
+    if spec not in content.routing_for(url).audio_formats or not content.audio_level_choices(
+        spec
+    ):
+        await cb.answer(t("intake.no_format", lang), show_alert=True)
+        return
+    await cb.answer()
+    await _edit_or_reply(
+        message, t("audio.choose_level", lang), reply_markup=_level_keyboard(spec, lang)
+    )
 
 
 @router.callback_query(DownloadStates.waiting_format, F.data.startswith(FMT_PREFIX))

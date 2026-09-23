@@ -258,15 +258,24 @@ def video_quality_param(quality: object) -> str:
 def audio_format_param(media_format: MediaFormat, quality: object) -> str:
     """Which audio format to ask Cobalt for.
 
-    ``mp3`` is Cobalt's own re-encode (the tier the user picked). ``m4a`` means "the
-    original stream, untouched" — Cobalt spells that ``best``, and it never
-    re-encodes then, which is exactly the promise the M4A button makes. The file may
-    come back as ``.opus`` instead of ``.m4a``; it is still the untouched stream, and
-    Telegram plays it as audio.
+    Cobalt names formats, not quality levels — the level the user picked is the
+    primary engine's business (and its alone), so every tier of a container maps
+    to that container's name here. Two translations carry the history: ``m4a``
+    means "the original stream, untouched" and Cobalt spells that ``best`` (it
+    never re-encodes then, which is exactly the promise that button makes — the
+    file may come back as ``.opus`` and Telegram still plays it as audio), and
+    every ``mp3`` level is Cobalt's own ``mp3`` re-encode.
     """
     if media_format != "audio":
         return ""
-    return "best" if normalize_quality(quality, "audio") == "m4a" else "mp3"
+    tier = normalize_quality(quality, "audio")
+    if tier == "wav":
+        return "wav"
+    if tier.startswith("opus"):
+        return "opus"
+    if tier.startswith("m4a"):
+        return "best"
+    return "mp3"
 
 
 def _legacy_payload(url: str, media_format: MediaFormat, quality: object = "") -> dict[str, Any]:

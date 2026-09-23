@@ -280,9 +280,28 @@ async def test_a_refused_command_menu_does_not_stop_startup() -> None:
 
 
 async def test_every_screen_renders_for_an_admin(
-    stats: dict[str, Any], healthy: Any, stored: dict[str, str]
+    stats: dict[str, Any],
+    healthy: Any,
+    stored: dict[str, str],
+    users_db: list[dict[str, Any]],
+    telemetry: None,
 ) -> None:
-    for screen in ("home", "stats", "health", "queue", "tools", "broadcast", "support"):
+    for screen in (
+        "home",
+        "stats",
+        "users",
+        "broadcast",
+        "blocks",
+        "trend",
+        "failures",
+        "system",
+        "settings",
+        # …and the names an older keyboard still carries:
+        "health",
+        "queue",
+        "tools",
+        "support",
+    ):
         text, keyboard = await admin_module.panel_screen(
             screen, healthy, _queue(), _cobalt(), lang="fa"
         )
@@ -384,20 +403,184 @@ def test_an_unknown_state_is_shown_as_it_is() -> None:
 
 
 def test_every_panel_button_has_somewhere_to_go() -> None:
+    """Every destination any panel keyboard can produce must be answered in the
+    module — including the templated ones (``usr:page:<offset>``), which appear
+    in the source as an f-string prefix rather than as a literal."""
     source = inspect.getsource(admin_module)
-    offered = {"admin:stats", "admin:health", "admin:queue", "admin:tools", "admin:home"}
-    offered |= {data for _, data in _buttons(admin_module._tools_keyboard("en"))}
+    offered = {"admin:home", "menu:home"}
+    offered |= {data for _, data in _buttons(admin_module._panel_keyboard("en"))}
+    offered |= {data for _, data in _buttons(admin_module._section_keyboard("en", "stats"))}
+    offered |= {data for _, data in _buttons(admin_module._system_keyboard("en"))}
+    offered |= {data for _, data in _buttons(admin_module._users_keyboard("en", offset=0, total=50))}
+    offered |= {data for _, data in _buttons(admin_module._users_keyboard("en", offset=6, total=50))}
     offered |= {data for _, data in _buttons(admin_module._broadcast_keyboard("en"))}
+    offered |= {data for _, data in _buttons(admin_module._done_keyboard("en"))}
     offered |= {data for _, data in _buttons(admin_module._support_keyboard("en", configured=True))}
+    offered |= {data for _, data in _buttons(admin_module._back_to_menu("en", to="admin:users"))}
 
     from services.cookie_watch import DOCTOR_CALLBACK, REFRESH_CALLBACK
 
-    missing = [
-        data
-        for data in sorted(offered - {DOCTOR_CALLBACK, REFRESH_CALLBACK})
-        if f'"{data}"' not in source
-    ]
+    def has_handler(data: str) -> bool:
+        if data in (DOCTOR_CALLBACK, REFRESH_CALLBACK):
+            return True  # the cookie-jar alert's own buttons — handled here too
+        if f'"{data}"' in source:
+            return True
+        prefix = ":".join(data.split(":")[:2])
+        return f'"{prefix}:' in source
+
+    missing = [data for data in sorted(offered) if not has_handler(data)]
     assert missing == [], missing
+
+
+def test_the_hub_is_eight_sections_and_leaves_to_the_user_menu() -> None:
+    """The dashboard's map, pinned: categories in pairs, and the one ⬅️ that
+    leaves the panel for the user menu every admin also has."""
+    keyboard = admin_module._panel_keyboard("en")
+
+    assert dict(_buttons(keyboard)) == {
+        "📊 Statistics": "admin:stats",
+        "👥 Users": "admin:users",
+        "📣 Broadcast": "admin:broadcast",
+        "🚫 Blocks": "admin:blocks",
+        "📈 Trend": "admin:trend",
+        "❌ Recent failures": "admin:failures",
+        "🖥 System": "admin:system",
+        "⚙️ Settings": "admin:settings",
+        "⬅️ Back": "menu:home",
+    }
+
+
+@pytest.fixture
+def users_db(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Eight accounts and a count, without a database — enough for a page and a
+    "next" arrow. Rows are plain dicts: what the screen reads is all they are."""
+    rows = [
+        {
+            "telegram_id": 4200 + i,
+            "username": "ali" if i == 0 else None,
+            "language": "fa" if i % 2 else "en",
+            "is_premium": i == 0,
+            "created_at": datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc),
+        }
+        for i in range(8)
+    ]
+
+    async def recent_users(pool: Any, *, offset: int = 0, limit: int = 6) -> list[dict[str, Any]]:
+        return rows[offset : offset + limit]
+
+    async def search_users(pool: Any, query: str, *, limit: int = 6) -> list[dict[str, Any]]:
+        return rows[:1]
+
+    async def count_users(pool: Any) -> int:
+        return 120
+
+    monkeypatch.setattr(panel_module.database, "recent_users", recent_users)
+    monkeypatch.setattr(panel_module.database, "search_users", search_users)
+    monkeypatch.setattr(panel_module.database, "count_users", count_users)
+    return rows
+
+
+@pytest.fixture
+def telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The report builders, without a database — their shapes are pinned in
+    test_telemetry; here only the screen wiring is under test."""
+    from services.telemetry import BlockDigest
+
+    digest = BlockDigest(window="window", counts={"ip": 1}, top_host=("x.com", 1))
+
+    async def build(pool: Any, **kwargs: Any) -> Any:
+        return digest
+
+    async def failure_report(pool: Any, cobalt: Any, lang: str = "en") -> str:
+        return "weekly digest"
+
+    monkeypatch.setattr(admin_module, "build_trend", build)
+    monkeypatch.setattr(admin_module, "build_digest", build)
+    monkeypatch.setattr(admin_module, "build_recent_digest", build)
+    monkeypatch.setattr(
+        admin_module, "render_trend", lambda trend, *, headline=None: "trend line"
+    )
+    monkeypatch.setattr(admin_module, "_failure_report", failure_report)
+
+
+async def test_every_section_comes_back_to_the_hub(
+    stats: dict[str, Any],
+    stored: dict[str, str],
+    users_db: list[dict[str, Any]],
+    telemetry: None,
+    healthy: Any,
+) -> None:
+    """Back is the *parent* — the hub — on every section: never "wherever", and
+    never a screen that dead-ends because its keyboard went missing."""
+    for screen in (
+        "stats",
+        "users",
+        "broadcast",
+        "blocks",
+        "trend",
+        "failures",
+        "system",
+        "settings",
+    ):
+        _, keyboard = await admin_module.panel_screen(
+            screen, healthy, _queue(), _cobalt(), lang="en"
+        )
+
+        assert _buttons(keyboard), screen
+        assert admin_module.PANEL_HOME in {data for _, data in _buttons(keyboard)}, screen
+
+
+async def test_the_users_screen_counts_totals_and_never_dumps_the_table(
+    stats: dict[str, Any], users_db: list[dict[str, Any]]
+) -> None:
+    text, keyboard = await admin_module.panel_screen("users", object(), _queue(), None, lang="en")
+
+    assert "120" in text, "totals over everybody"
+    assert "fa: 90" in text, "and the language mix"
+    assert "ali" in text, "the newest accounts, one page of them"
+    destinations = dict(_buttons(keyboard))
+    assert destinations["🔎 Search"] == "usr:search"
+    assert destinations["▶️ Next"] == "usr:page:6", "a next page while there is more"
+    assert destinations["⬅️ Back to panel"] == admin_module.PANEL_HOME
+
+
+async def test_the_lookup_is_its_own_step_and_answers_with_a_screen(
+    users_db: list[dict[str, Any]],
+) -> None:
+    bot = RecordingBot()
+    state = _fsm()
+
+    await admin_module.on_users_search(_callback(bot, "usr:search"), state, lang="en")
+
+    assert await state.get_state() == admin_module.AdminStates.user_search.state
+    assert "username" in bot.screens[-1], "the prompt names what to send"
+
+    await admin_module.on_users_search_value(_message("@ali", bot), state, object(), lang="en")
+
+    assert await state.get_state() is None, "a lookup leaves no step behind"
+    assert "4200" in bot.screens[-1], "the account it found"
+    assert ("⬅️ Back", "admin:users") in _buttons(bot.keyboards[-1])
+
+
+@pytest.mark.parametrize(
+    "data",
+    ("admin:users", "admin:failures", "admin:system", "admin:settings", "usr:search", "usr:page:0"),
+)
+async def test_a_crafted_admin_callback_still_needs_the_right_id(data: str) -> None:
+    """Every route repeats the check server-side: a forwarded keyboard travels
+    with its message, and admin authority does not."""
+    bot = RecordingBot()
+    cb = _callback(bot, data, STRANGER_ID)
+
+    if data == "usr:search":
+        await admin_module.on_users_search(cb, _fsm(), lang="en")
+    elif data.startswith("usr:"):
+        await admin_module.on_users_page(cb, object(), lang="en")
+    else:
+        await admin_module.on_panel_button(cb, object(), _queue(), None, lang="en")
+
+    assert bot.answers and bot.answers[0].show_alert is True
+    assert bot.screens == [], "nothing is rendered"
 
 
 # ---------------------------------------------------------------------------

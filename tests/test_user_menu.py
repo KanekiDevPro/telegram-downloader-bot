@@ -254,15 +254,16 @@ def test_an_admins_profile_does_not_offer_the_store_either() -> None:
 
 def test_only_an_admin_is_offered_the_panel() -> None:
     assert "menu:admin" not in dict(_buttons(user_module._main_menu(EN))).values()
-    assert "menu:admin" not in dict(
-        _buttons(user_module._main_menu(EN, support=True))
-    ).values()
+    assert "menu:admin" in dict(_buttons(user_module._main_menu(EN, admin=True))).values()
 
 
-def test_the_support_button_appears_only_when_somebody_configured_it() -> None:
+def test_the_support_button_lives_under_help_and_home_stays_clean() -> None:
+    """Home is three destinations and nothing more; the support contact is Help's
+    business — its entry point is always there, and its *screen* is the one that
+    honestly says whether anybody has configured a contact yet."""
     assert "menu:support" not in dict(_buttons(user_module._main_menu(FA))).values()
 
-    markup = user_module._main_menu(FA, support=True)
+    markup = user_module._help_keyboard(FA)
 
     assert dict(_buttons(markup))["💬 پشتیبانی"] == "menu:support"
 
@@ -665,9 +666,11 @@ async def test_help_is_a_hub_of_short_pages() -> None:
     assert "راهنما" in text
     assert "لینک رو بفرست" not in text, "the wall of text is one tap away, not in the hub"
     assert dict(_buttons(bot.keyboards[-1])) == {
-        "🔧 چطور کار می‌کند": "help:how",
-        "🌐 سرویس‌های پشتیبانی‌شده": "help:platforms",
-        "🧩 مشکلات رایج": "help:problems",
+        "📥 چطور دانلود کنم": "help:how",
+        "🎵 صدا": "help:audio",
+        "🎬 ویدیو": "help:video",
+        "📱 سرویس‌های پشتیبانی‌شده": "help:platforms",
+        "🛠 مشکلات رایج": "help:problems",
         "💬 پشتیبانی": "menu:support",
         "⬅️ بازگشت": "menu:home",
     }
@@ -719,7 +722,7 @@ def test_no_menu_button_is_left_without_a_handler() -> None:
     from handlers import admin as admin_module
 
     source = inspect.getsource(user_module) + inspect.getsource(admin_module)
-    offered = {data for _, data in _buttons(user_module._main_menu(FA, admin=True, support=True))}
+    offered = {data for _, data in _buttons(user_module._main_menu(FA, admin=True))}
     offered |= {data for _, data in _buttons(user_module._back_to_menu(FA))}
     offered |= {data for _, data in _buttons(user_module._profile_keyboard(FA))}
     offered |= {data for _, data in _buttons(user_module._help_keyboard(FA))}
@@ -780,10 +783,28 @@ def test_a_video_link_is_offered_quality_tiers_and_no_audio_only_tier() -> None:
 
 
 def test_a_music_link_is_offered_audio_formats_and_no_video_tier() -> None:
-    choices = content_module.routing_for("https://soundcloud.com/a/b").choices
+    """Every tier this bot can genuinely build, spelled the way queues and cache
+    keys have always spelled the two original ones (``mp3`` = balanced 192k,
+    ``m4a`` = untouched stream) — a rename here would orphan every cached file."""
+    routing = content_module.routing_for("https://soundcloud.com/a/b")
 
-    assert [choice.quality for choice in choices] == ["m4a", "mp3"]
-    assert all(choice.media_format == "audio" for choice in choices)
+    assert routing.audio_formats == ("mp3", "m4a", "opus", "wav")
+    assert [choice.quality for choice in routing.choices] == [
+        "mp3.best",
+        "mp3.high",
+        "mp3",
+        "mp3.small",
+        "m4a",
+        "m4a.high",
+        "m4a.balanced",
+        "m4a.small",
+        "opus.best",
+        "opus.high",
+        "opus.balanced",
+        "opus.small",
+        "wav",
+    ]
+    assert all(choice.media_format == "audio" for choice in routing.choices)
 
 
 def test_a_photo_post_is_not_offered_a_quality_menu() -> None:
@@ -799,13 +820,12 @@ def test_an_ambiguous_post_is_offered_media_and_audio() -> None:
     """Nothing is hidden that might be true: a status can be a clip, a picture or a
     gallery, so the honest menu offers "whatever is there" plus the audio formats."""
 
-    choices = content_module.routing_for("https://x.com/user/status/12345").choices
+    routing = content_module.routing_for("https://x.com/user/status/12345")
 
-    assert [choice.label_key for choice in choices] == [
-        "fmt.media",
-        "fmt.audio_m4a",
-        "fmt.audio_mp3",
-    ]
+    assert routing.media_choice is not None
+    assert routing.media_choice.label_key == "fmt.media"
+    assert routing.audio_formats == ("mp3", "m4a", "opus", "wav")
+    assert len(routing.choices) == 14, "the post's own media plus every audio tier"
 
 
 async def test_the_question_matches_the_link(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -828,9 +848,13 @@ async def test_the_question_matches_the_link(monkeypatch: pytest.MonkeyPatch) ->
     )
 
     assert t("intake.choose_audio", FA) in bot.edits[-1]
-    assert ("🎧 صدا — M4A (اصل، بدون تبدیل)", "fmt:audio:m4a") in _buttons(bot.keyboards[-1])
-    # Two per row, with the way back on its own: the tiers pair up naturally.
-    assert [len(row) for row in bot.keyboards[-1].inline_keyboard] == [2, 1]
+    # The question is the *format* grid — the quality presets are one tap deeper.
+    assert ("🎧 MP3", "audf:mp3") in _buttons(bot.keyboards[-1])
+    assert ("🎧 WAV", "fmt:audio:wav") in _buttons(bot.keyboards[-1]), (
+        "wav has no quality knob and submits from here"
+    )
+    # Two per row, with the way back on its own: the formats pair up naturally.
+    assert [len(row) for row in bot.keyboards[-1].inline_keyboard] == [2, 2, 1]
 
 
 def test_a_photo_post_is_offered_nothing_else() -> None:
@@ -1177,19 +1201,87 @@ def test_every_registered_callback_answers() -> None:
 
 
 def test_the_home_screen_is_navigation_only() -> None:
-    """Home is a hub: account actions live under the screen that owns them, and
-    the endpoints that were removed for good (`menu:status`, `menu:subscribe`)
-    must not come back — a button is a promise, and every promise needs a
-    handler that keeps it."""
+    """Home is a hub: account actions live under the screen that owns them (and
+    the support contact under Help), and the endpoints that were removed for good
+    (`menu:status`, `menu:subscribe`) must not come back — a button is a promise,
+    and every promise needs a handler that keeps it."""
     offered = {
-        data for _, data in _buttons(user_module._main_menu(FA, admin=True, support=True))
+        data for _, data in _buttons(user_module._main_menu(FA, admin=True))
     }
 
     assert offered == {
         "menu:download",
         "menu:profile",
         "menu:help",
-        "menu:support",
         "menu:admin",
     }
     assert not offered & {"menu:status", "menu:subscribe"}
+
+
+def test_the_audio_menu_is_two_taps_deep_and_wav_skips_the_second() -> None:
+    """Format first (a .mp3 and a .opus are different promises), then the quality
+    presets. WAV is PCM — its whole menu is the format button itself."""
+    for codec, expected in (("mp3", 4), ("m4a", 4), ("opus", 4), ("wav", 0)):
+        assert len(content_module.audio_level_choices(codec)) == expected, codec
+
+    question = dict(_buttons(user_module._question_keyboard("https://soundcloud.com/a/b", EN)))
+    assert question["🎧 MP3"] == "audf:mp3"
+    assert question["🎧 M4A"] == "audf:m4a"
+    assert question["🎧 OPUS"] == "audf:opus"
+    assert question["🎧 WAV"] == "fmt:audio:wav"
+
+    levels = dict(_buttons(user_module._level_keyboard("mp3", EN)))
+    assert levels == {
+        "💎 Best quality": "fmt:audio:mp3.best",
+        "🔥 High quality": "fmt:audio:mp3.high",
+        "⚖️ Balanced": "fmt:audio:mp3",
+        "📦 Small size": "fmt:audio:mp3.small",
+        "⬅️ Back": "audf:back",
+    }, "plain words on the buttons — bitrates are engine detail"
+
+
+async def test_the_quality_screen_replaces_the_format_screen_and_can_go_back() -> None:
+    """Two taps, one message: the presets edit in place, and Back returns to the
+    question — not to Home. Nobody loses their place by looking one step ahead."""
+    bot = RecordingBot()
+
+    await user_module.on_audio_format(
+        _callback(bot, "audf:mp3"), await _state("https://soundcloud.com/a/b"), lang=EN
+    )
+
+    assert bot.texts == [], "the question is edited, not re-sent"
+    assert dict(_buttons(bot.keyboards[-1]))["⬅️ Back"] == "audf:back"
+
+    await user_module.on_audio_format(
+        _callback(bot, "audf:back"), await _state("https://soundcloud.com/a/b"), lang=EN
+    )
+
+    assert t("intake.choose_audio", EN) in bot.edits[-1], "back is the question itself"
+    assert "🎧 MP3" in dict(_buttons(bot.keyboards[-1]))
+
+
+async def test_an_audio_menu_is_refused_on_a_link_that_has_none() -> None:
+    """Crafted taps run nothing: a video link offers no audio formats to open."""
+    bot = RecordingBot()
+
+    await user_module.on_audio_format(_callback(bot, "audf:opus"), await _state(), lang=EN)
+
+    assert bot.answers and bot.answers[0].show_alert is True
+    assert bot.texts == [] and bot.edits == []
+
+
+async def test_entering_a_screen_replaces_the_whole_keyboard() -> None:
+    """The navigation promise, pinned: a screen swap carries *only* that screen's
+    controls — Profile keeps Language/VIP/Back and nothing from Home survives."""
+    bot = RecordingBot()
+
+    await user_module.on_menu_profile(
+        _callback(bot, "menu:profile"), _user(), object(), _fake_queue(), lang=FA
+    )
+
+    assert dict(_buttons(bot.keyboards[-1])) == {
+        "🌐 زبان": "profile:language",
+        "💎 ارتقا به ویژه (VIP)": "menu:premium",
+        "⬅️ بازگشت": "menu:home",
+    }
+    assert bot.texts == [], "the same message, edited"
