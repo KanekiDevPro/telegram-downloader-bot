@@ -432,7 +432,7 @@ def test_every_panel_button_has_somewhere_to_go() -> None:
     assert missing == [], missing
 
 
-def test_the_hub_is_eight_sections_and_leaves_to_the_user_menu() -> None:
+def test_the_hub_is_nine_sections_and_leaves_to_the_user_menu() -> None:
     """The dashboard's map, pinned: categories in pairs, and the one ⬅️ that
     leaves the panel for the user menu every admin also has."""
     keyboard = admin_module._panel_keyboard("en")
@@ -444,6 +444,7 @@ def test_the_hub_is_eight_sections_and_leaves_to_the_user_menu() -> None:
         "🚫 Blocks": "admin:blocks",
         "📈 Trend": "admin:trend",
         "❌ Recent failures": "admin:failures",
+        "👥 Groups": "admin:groups",
         "🖥 System": "admin:system",
         "⚙️ Settings": "admin:settings",
         "⬅️ Back": "menu:home",

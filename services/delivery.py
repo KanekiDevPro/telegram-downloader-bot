@@ -14,6 +14,7 @@ JSON list in the one column cache rows have — several pictures are several
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -22,6 +23,7 @@ from typing import Any
 
 import asyncpg
 from aiogram import Bot
+from aiogram.enums import ChatAction
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     InputMediaAudio,
@@ -33,7 +35,8 @@ from aiogram.types import (
 )
 
 from core.i18n import DEFAULT_LANG, t
-from core.utils import escape_html
+from core.utils import default_quality, escape_html, normalize_quality
+from services.extractor import audio_bitrate, audio_is_original
 
 #: What one media group may hold — aiogram's own union, spelled out so a list of
 #: ``InputMediaPhoto`` can be handed over without a cast (lists are invariant).
@@ -41,38 +44,239 @@ MediaItem = InputMediaAudio | InputMediaDocument | InputMediaLivePhoto | InputMe
 
 logger = logging.getLogger(__name__)
 
-#: The replay's caption, resolved in the *user's* language: every real caller passes
-#: its own (the gateway and the worker both know it), and the default is only for a
-#: caller that has nothing to say about language at all.
-def cached_caption(lang: str = DEFAULT_LANG) -> str:
-    return t("work.cache_caption", lang)
+#: The bot's own @handle, recorded once at boot (``main.py``) and stamped on every
+#: media card. A file saved out of its chat and opened weeks later should still say
+#: which bot produced it — but a card never shows a blank field, so before boot (and
+#: in tests) the line is simply omitted.
+_BOT_USERNAME = ""
 
 
-def source_line(url: str, lang: str = DEFAULT_LANG) -> str:
-    """The ``🔗 link`` line, or an empty string when there is no link to name.
+def set_bot_username(username: str) -> None:
+    """Record what ``get_me`` answered at boot, without the ``@``."""
+    global _BOT_USERNAME
+    _BOT_USERNAME = (username or "").lstrip("@")
 
-    Part of every caption on purpose: a file that arrives in a chat is looked at days
-    later, out of context, and “which video was this?” has exactly one cheap answer.
-    It is the link *the user sent* — for a Spotify track that is the Spotify URL, not
-    the YouTube video the song was fetched from.
+
+def bot_username() -> str:
+    """The handle every card's 🤖 line carries (``""`` before boot)."""
+    return _BOT_USERNAME
+
+
+def group_add_link() -> str:
+    """Telegram's own «add me to a group» flow for this bot (``""`` before boot).
+
+    The ``?startgroup`` deep link is what makes Telegram open its group picker —
+    the bot's real address with Telegram's documented parameter, nothing invented.
+    Before ``get_me`` answers there is no name to build it from, and a wrong link
+    is worse than no button at all.
     """
-    return t("work.caption_source", lang, url=escape_html(url)) if url else ""
+    return f"https://t.me/{_BOT_USERNAME}?startgroup=true" if _BOT_USERNAME else ""
+
+
+#: Which ephemeral chat action says «working on it» per delivered kind. The Bot
+#: API has no "uploading audio" slot — the voice action is its audio upload — so
+#: a song pulses that one, and everything else pulses its own shape.
+_UPLOAD_ACTIONS: dict[str, ChatAction] = {
+    "video": ChatAction.UPLOAD_VIDEO,
+    "audio": ChatAction.UPLOAD_VOICE,
+    "photo": ChatAction.UPLOAD_PHOTO,
+    "photo_group": ChatAction.UPLOAD_PHOTO,
+}
+
+
+def upload_action(kind: str) -> ChatAction:
+    """The upload indicator for a delivery shape (documents for anything else)."""
+    return _UPLOAD_ACTIONS.get(kind, ChatAction.UPLOAD_DOCUMENT)
+
+
+class ActionPulse:
+    """An ephemeral «alive» indicator while work runs: Telegram chat actions.
+
+    Not a message — nothing lands in the chat, so the two-message contract holds.
+    One bounded task sends the action every few seconds (Telegram drops it after
+    ~5s, so the heartbeat keeps the indicator lit) and is cancelled with the
+    work: success, failure and shutdown all stop it, and nothing survives the
+    media. A grace delay before the first action means a short job never
+    flickers the indicator at all.
+    """
+
+    #: Before the first action: shorter jobs are done before anyone notices.
+    GRACE_S = 1.5
+    #: Between actions: Telegram's own indicator expires in ~5 seconds.
+    HEARTBEAT_S = 4.0
+
+    def __init__(
+        self,
+        bot: Bot,
+        chat_id: int,
+        action: ChatAction = ChatAction.TYPING,
+        *,
+        grace: float | None = None,
+        heartbeat: float | None = None,
+    ) -> None:
+        self._bot = bot
+        self._chat_id = chat_id
+        self._action = action
+        self._grace = self.GRACE_S if grace is None else grace
+        self._heartbeat = self.HEARTBEAT_S if heartbeat is None else heartbeat
+        self._task: "asyncio.Task[None] | None" = None
+
+    async def __aenter__(self) -> "ActionPulse":
+        self._task = asyncio.create_task(self._run())
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await self.stop()
+
+    async def stop(self) -> None:
+        """Cancel the pulse and wait for it to die — idempotent."""
+        task, self._task = self._task, None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def _run(self) -> None:
+        await asyncio.sleep(self._grace)
+        while True:
+            try:
+                await self._bot.send_chat_action(self._chat_id, self._action)
+            except Exception:  # noqa: BLE001 — the indicator is best-effort, never fatal
+                # A chat that refuses actions — or a bot stub without them — is
+                # not worth another attempt, and certainly not worth failing the
+                # download over.
+                return
+            await asyncio.sleep(self._heartbeat)
+
+
+def format_duration(seconds: float | int | None) -> str:
+    """``150`` → ``"2:30"``, ``3725`` → ``"1:02:05"`` — ``""`` when unknown.
+
+    A song's length said the way a player says it, or not at all.
+    """
+    try:
+        total = int(seconds or 0)
+    except (TypeError, ValueError):
+        return ""
+    if total <= 0:
+        return ""
+    minutes, sec = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02d}:{sec:02d}" if hours else f"{minutes}:{sec:02d}"
+
+
+def media_card(
+    *,
+    title: str = "",
+    url: str = "",
+    quality: str = "",
+    size: str = "",
+    audio: bool = False,
+    artist: str = "",
+    album: str = "",
+    duration: str = "",
+    lang: str = DEFAULT_LANG,
+) -> str:
+    """The standard block for anything downloadable — screen or caption alike.
+
+    A video answers "what is this" in four lines: 🎬 what it is, 🔗 where it came
+    from (the link *the user sent*, so a Spotify track names the Spotify URL), 🎞
+    which version this is (quality and, when it is known, its size), 🤖 who made
+    it. A song speaks its own language instead — 🎵 the title, 🎤 who made it, 💿
+    which release, ⏱ how long, 🎧 what this file is — because music is
+    identified by its credits, not by a filename, and the link becomes its
+    footnote. A missing fact omits its line — never «None», never an empty field —
+    so a card read at any moment is complete.
+    """
+    lines: list[str] = []
+    clean_title = title.strip()
+    if clean_title and clean_title != url.strip():
+        # A title that *is* the URL (the extractor's own fallback) would say it
+        # twice; the 🔗 line already carries it.
+        key = "media.line_music" if audio else "media.line_title"
+        lines.append(t(key, lang, title=escape_html(clean_title[:120])))
+    if artist.strip():
+        lines.append(t("media.line_artist", lang, artist=escape_html(artist.strip())))
+    if album.strip():
+        lines.append(t("media.line_album", lang, album=escape_html(album.strip())))
+    if duration.strip():
+        lines.append(t("media.line_duration", lang, duration=escape_html(duration.strip())))
+    quality_line = ""
+    if quality or size:
+        # Quality and size are one fact — which version this is — on one line.
+        if quality and size:
+            shown = f"{quality} · {size}" if audio else f"{quality} • {size}"
+        else:
+            shown = quality or size
+        key = "media.line_audio_quality" if audio else "media.line_quality"
+        quality_line = t(key, lang, quality=escape_html(shown))
+    url_line = t("media.line_url", lang, url=escape_html(url)) if url else ""
+    if audio:
+        # A song's identity is its credits and its sound; the link is the footnote.
+        lines.extend(line for line in (quality_line, url_line) if line)
+    else:
+        lines.extend(line for line in (url_line, quality_line) if line)
+    if _BOT_USERNAME:
+        lines.append(t("media.line_bot", lang, bot=escape_html(f"@{_BOT_USERNAME}")))
+    return "\n".join(lines)
+
+
+def quality_label(media_format: str, quality: object, lang: str = DEFAULT_LANG) -> str:
+    """What the quality line says: ``1080p``, ``MP3 · 320 kbps``, ``M4A · Original``…
+
+    Audio names its *rate*, not a mood: the file is exactly the kbps the button
+    promised — or the site's own untouched stream, said so in plain words. Raw and
+    lossless output simply name their container: no knob, no claim.
+    """
+    if media_format != "audio":
+        tier = normalize_quality(quality, "video")
+        return (
+            t("media.quality_max", lang)
+            if tier == "best"
+            else t("media.quality_p", lang, height=tier)
+        )
+    tier = normalize_quality(quality, "audio")
+    name = tier.split(".")[0].upper()
+    kbps = audio_bitrate(tier)
+    if kbps:
+        return f"{name} · {kbps} kbps"
+    if audio_is_original(tier):
+        return f"{name} · {t('media.original', lang)}"
+    return name
+
+
+def label_for_request(request: str, lang: str = DEFAULT_LANG) -> str:
+    """The 🎞 text of a cache row's request key (``"audio:mp3.high"``, ``"video"``).
+
+    The request key is all a replay knows about *which* version this file is —
+    ``quality_key``'s spelling (``format`` alone for the default tier, ``format:tier``
+    for a deliberate one), so the label goes through the same normalisation the
+    rest of the pipeline uses.
+    """
+    media_format, _, tier = (request or "").partition(":")
+    if media_format not in ("audio", "video"):
+        return ""
+    return quality_label(media_format, tier or default_quality(media_format), lang)
 
 
 def replay_caption(record: asyncpg.Record, lang: str = DEFAULT_LANG) -> str:
-    """The caption a replayed cache hit gets: the replay line, plus its source link.
+    """The caption a replayed cache hit gets: the same media card as a fresh send.
 
-    A cached file is the same file, so it gets the same caption — including the link,
-    which the cached row still holds (``original_url``). Whether the bot has seen a
-    link before is an implementation detail, and it must not be visible in the chat.
+    A cached file is the same file, so it gets the same caption. Whether the bot has
+    seen a link before is an implementation detail, and it must not be visible in
+    the chat. The row knows the request, the original link and (since the column
+    arrived) the title — an older row simply omits that line rather than faking
+    one.
     """
-    base = cached_caption(lang)
-    try:
-        url = str(record["original_url"] or "")
-    except (KeyError, IndexError, TypeError):  # a stub row without the column
-        return base
-    line = source_line(url, lang)
-    return f"{base}\n{line}" if line else base
+    request = _field(record, "quality")
+    return media_card(
+        title=_field(record, "title"),
+        url=_field(record, "original_url"),
+        quality=label_for_request(request, lang),
+        audio=request.startswith("audio"),
+        lang=lang,
+    )
 
 #: Telegram's own ceiling on one media group; a larger album is sent in batches.
 MEDIA_GROUP_MAX = 10
@@ -81,12 +285,21 @@ MEDIA_GROUP_MAX = 10
 _LEGACY_KINDS = frozenset({"audio", "video"})
 
 __all__ = [
-    "cached_caption",
+    "ActionPulse",
+    "bot_username",
+    "format_duration",
+    "group_add_link",
+    "label_for_request",
     "MEDIA_GROUP_MAX",
+    "media_card",
     "join_file_ids",
+    "quality_label",
+    "replay_caption",
     "send_album",
     "send_cached_file",
+    "set_bot_username",
     "split_file_ids",
+    "upload_action",
 ]
 
 
@@ -111,9 +324,15 @@ def join_file_ids(ids: Sequence[str]) -> str:
 
 
 def _field(row: Any, name: str) -> str:
-    """One column of a cache row — empty when the row predates it (or is a fake)."""
+    """One column of a cache row — empty when the row predates it (or is a fake).
+
+    Takes a database record, a mapping or a namedtuple-shaped stand-in: tests
+    hand over plain dicts, the worker hands over asyncpg rows.
+    """
     with contextlib.suppress(KeyError, IndexError, TypeError):
         return str(row[name] or "")
+    with contextlib.suppress(AttributeError):
+        return str(getattr(row, name) or "")
     return ""
 
 
@@ -164,13 +383,13 @@ async def send_cached_file(
 ) -> bool:
     """Send a cached file, falling back to a document on type mismatch.
 
-    ``caption`` defaults to the catalogue's replay line in ``lang``; callers that
+    ``caption`` defaults to the media card a replay gets in ``lang``; callers that
     know the user's language should pass it (both of them do).
 
     Returns False when the stored ``file_id`` is no longer usable.
     """
     if caption is None:
-        caption = cached_caption(lang)
+        caption = replay_caption(cached, lang)
     ids = split_file_ids(_field(cached, "telegram_file_id"))
     if not ids:
         logger.info("cache row %s holds no usable file_id — dropping entry", _field(cached, "url_hash"))

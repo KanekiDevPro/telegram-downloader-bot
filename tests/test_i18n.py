@@ -52,6 +52,25 @@ def test_every_key_exists_in_every_language() -> None:
     assert missing == {}, "a key with one language is a user reading a raw key"
 
 
+def test_the_new_analytics_and_rate_keys_speak_both_languages() -> None:
+    """This batch's strings are real in FA and EN — not raw keys, not one-language."""
+    for key in (
+        "admin.btn_groups",
+        "admin.groups_headline",
+        "admin.groups_totals",
+        "admin.groups_top",
+        "admin.groups_line",
+        "admin.groups_empty",
+        "admin.groups_unknown",
+        "admin.groups_failures",
+        "admin.groups_code",
+        "audio.source_rate",
+    ):
+        assert key in MESSAGES, f"{key} missing from the catalogue"
+        for lang in LANGS:
+            assert MESSAGES[key].get(lang), f"{key} missing in {lang}"
+
+
 def test_no_language_has_a_key_nobody_else_has() -> None:
     extra = {
         key: [lang for lang in entry if lang not in LANGS]
@@ -183,8 +202,10 @@ def test_every_message_renders_in_every_language(key: str, lang: str) -> None:
 
 
 def test_t_formats_and_escapes_nothing_it_was_not_asked_to() -> None:
-    assert t("intake.queued", "en", depth=3) == "⏳ Added to the queue (position ≈ 3)."
-    assert t("intake.queued", "fa", depth=3).endswith("(موقعیت تقریبی: 3).")
+    assert t("media.line_quality", "en", quality="720p") == "🎞 720p"
+    # ...and escaping is the caller's job in both languages alike.
+    assert t("media.line_title", "en", title="<b>x</b>") == "🎬 <b>x</b>"
+    assert t("media.line_title", "fa", title="<b>x</b>") == "🎬 <b>x</b>"
 
 
 def test_t_refuses_a_key_nobody_defined() -> None:

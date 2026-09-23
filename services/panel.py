@@ -233,6 +233,57 @@ async def health_text(
     )
 
 
+async def groups_text(pool: asyncpg.Pool, lang: str = DEFAULT_LANG) -> str:
+    """The Groups screen: totals, the busiest groups, and what kills downloads.
+
+    Everything here is an aggregate the *database* computed (SQL ``GROUP BY``,
+    not a table scanned into Python) — and only what the rows can honestly
+    answer. A group with no recorded name shows its chat id: inventing a name
+    would be worse than the id.
+    """
+    summary = await database.group_usage_summary(pool)
+    totals = t(
+        "admin.groups_totals",
+        lang,
+        total=f"{summary['total']:,}",
+        ok=f"{summary['successes']:,}",
+        failed=f"{summary['failed']:,}",
+        groups=f"{summary['groups']:,}",
+    )
+    lines = [t("admin.groups_headline", lang), "", totals, ""]
+    top = await database.top_groups(pool, limit=5)
+    if not top:
+        lines.append(t("admin.groups_empty", lang))
+    else:
+        lines.append(t("admin.groups_top", lang))
+        for rank, row in enumerate(top, start=1):
+            name = str(row["chat_title"] or "").strip() or t(
+                "admin.groups_unknown", lang, id=row["chat_id"]
+            )
+            lines.append(
+                t(
+                    "admin.groups_line",
+                    lang,
+                    rank=rank,
+                    name=escape_html(name),
+                    total=f"{row['total']:,}",
+                    failed=f"{row['failed']:,}",
+                )
+            )
+    if summary["failed"]:
+        lines += ["", t("admin.groups_failures", lang, failed=f"{summary['failed']:,}")]
+        for row in await database.group_failure_codes(pool):
+            lines.append(
+                t(
+                    "admin.groups_code",
+                    lang,
+                    code=escape_html(str(row["code"])),
+                    count=f"{row['count']:,}",
+                )
+            )
+    return "\n".join(lines)
+
+
 def tools_text(lang: str = DEFAULT_LANG) -> str:
     """The maintenance legend on System: what the buttons do, and the commands
     that do the same things without them."""

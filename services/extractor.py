@@ -22,7 +22,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, Optional, Sequence, TypeVar
+from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Sequence, TypeVar
 from urllib.parse import urlparse
 
 import yt_dlp
@@ -208,7 +208,49 @@ AUDIO_EXPORTS: dict[str, tuple[str, str | None]] = {
     "opus.balanced": ("opus", "96"),
     "opus.small": ("opus", "64"),
     "wav": ("wav", None),
+    "flac": ("flac", None),
 }
+
+
+def audio_bitrate(quality: object) -> int | None:
+    """The kbps a tier encodes at — ``None`` where nothing is re-encoded.
+
+    The number is what the file *is*, never what it aspires to be: the untouched
+    source stream has no rate of its own to name (its quality is the site's, and
+    a bigger re-encode of it would only be a bigger file), and raw or lossless
+    output has no knob at all. The menu shows this number so nobody has to learn
+    the tier names behind it.
+    """
+    spec = AUDIO_EXPORTS.get(normalize_quality(quality, "audio"))
+    return int(spec[1]) if spec and spec[1] else None
+
+
+def audio_is_original(quality: object) -> bool:
+    """Whether this tier copies the site's own stream instead of re-encoding it.
+
+    ``m4a`` — spelled without a level on purpose, the one tier with no export.
+    """
+    return normalize_quality(quality, "audio") not in AUDIO_EXPORTS
+
+
+def audio_size_estimate(quality: object, duration_s: float) -> int | None:
+    """~bytes of the output: rate × duration, with the container padded in.
+
+    ``None`` where the figure would be fiction — an untouched stream whose rate
+    is unknown, a lossless encode whose size depends on the music itself. What
+    comes out is always shown with a ``~``: it is arithmetic, not a measurement.
+    """
+    if duration_s <= 0:
+        return None
+    kbps = audio_bitrate(quality)
+    if kbps:
+        return int(duration_s * kbps * 1000 / 8 * 1.04)
+    if normalize_quality(quality, "audio") == "wav":
+        # CD-shaped PCM (44.1 kHz / 16-bit stereo) plus RIFF overhead. A raw
+        # file's real size follows the source's sample rate, so this stays ~8%
+        # loose and the caller keeps the tilde.
+        return int(duration_s * 176_400 * 1.02)
+    return None
 
 
 def format_selector(media_format: MediaFormat, quality: object = "") -> str:
@@ -943,6 +985,62 @@ def classify_block(error: ExtractionError, url: str, cookie_file: Path | None) -
     return "site"
 
 
+#: The standard quality ladder ("1080p", "720p"…). A source that pads its frames
+#: (1088 lines, a common encoder artifact) is *named* by the rung it stands for.
+_QUALITY_RUNGS = (2160, 1440, 1080, 720, 480, 360, 240, 144)
+_RUNG_TOLERANCE = 16
+
+
+def quality_label_p(
+    width: int | str | None, height: int | str | None
+) -> Optional[int]:
+    """The conventional quality name — 1920x1080 → 1080p, never "1920p".
+
+    A landscape video is named after its vertical lines; a portrait phone video
+    (1080x1920) is "1080p" too — its *short* edge names it, and every player
+    agrees. Width alone never names anything: a pixel width is not a resolution
+    label. And a frame a few lines off the ladder (1088) is named by the rung it
+    stands for.
+    """
+    try:
+        wide = int(width) if width else 0
+        tall = int(height) if height else 0
+    except (TypeError, ValueError):
+        return None
+    if not tall:
+        return None
+    short = min(wide, tall) if wide else tall
+    for rung in _QUALITY_RUNGS:
+        if abs(short - rung) <= _RUNG_TOLERANCE:
+            return rung
+    return short
+
+
+@dataclass(frozen=True, slots=True)
+class VideoOption:
+    """One downloadable resolution of a link: what the menu may honestly offer.
+
+    ``height`` is yt-dlp's own number — the vocabulary the format selector's
+    ``[height<=N]`` ceilings speak — while :attr:`label_p` is the name the user
+    sees (1920x1080 is "1080p"; the two differ for portrait video). ``size_bytes``
+    is what the finished file is expected to weigh — the video stream plus the
+    audio it will be muxed with — and ``size_exact`` is whether every part
+    reported an exact ``filesize`` (vs yt-dlp's estimate), which is the difference
+    between "14 MB" and "~14 MB" on a button. ``0`` means the site said nothing,
+    and the size is then *omitted* rather than invented.
+    """
+
+    height: int
+    size_bytes: int = 0
+    size_exact: bool = False
+    width: int = 0
+
+    @property
+    def label_p(self) -> int:
+        """The conventional name of this quality (see :func:`quality_label_p`)."""
+        return quality_label_p(self.width, self.height) or self.height
+
+
 @dataclass(frozen=True)
 class MediaInfo:
     source_url: str
@@ -958,6 +1056,21 @@ class MediaInfo:
     #: It is what makes the caption honest about a quality *tier*: "up to 1080p" on a
     #: 720p upload is not a lie, but saying 720p is a fact.
     height: Optional[int] = None
+    #: What that quality is *called*: 1920x1080 → 1080p (a portrait phone video is
+    #: 1080p as well). Displays use this; ``height`` stays the engine's number.
+    label_p: Optional[int] = None
+    #: The resolutions this link can actually be downloaded in, best first — the
+    #: menu is drawn from this, never from a static tier table (see
+    #: :func:`video_options`). Empty when the site reports no format list.
+    video_options: tuple[VideoOption, ...] = ()
+    #: The source's own audio rate (see :func:`_audio_rate_kbps`) — what the menu
+    #: uses to stop offering re-encodes *above* it. ``None`` means the site said
+    #: nothing, and the whole ladder stays.
+    audio_kbps: Optional[int] = None
+    #: Whether that rate is a measurement (``tbr``) rather than a declared one
+    #: (``abr``) — the menu may prefix a ``~`` for it, and must not otherwise
+    #: pretend a number is exact when it is only an approximation.
+    audio_kbps_approx: bool = False
 
 
 @dataclass(frozen=True)
@@ -973,6 +1086,10 @@ class DownloadResult:
     info: MediaInfo
     media_format: MediaFormat
     extra_paths: tuple[Path, ...] = ()
+    #: The tier that was asked for — the one thing the *result* cannot tell from
+    #: the file (a 192k and a 320k MP3 are the same extension), and what the
+    #: caption names when the site reports no height.
+    quality: str = ""
 
 
 @dataclass(frozen=True)
@@ -1025,6 +1142,7 @@ def _to_media_info(source_url: str, info: dict[str, Any]) -> MediaInfo:
             (f.get("filesize") or f.get("filesize_approx") or 0)
             for f in info.get("requested_formats") or []
         )
+    audio_kbps, audio_kbps_approx = _audio_rate_kbps(info)
     return MediaInfo(
         source_url=source_url,
         title=str(info.get("title") or source_url),
@@ -1036,7 +1154,128 @@ def _to_media_info(source_url: str, info: dict[str, Any]) -> MediaInfo:
         filesize_approx=int(filesize) if filesize else None,
         is_live=bool(info.get("is_live")),
         height=_reported_height(info),
+        label_p=quality_label_p(_reported_width(info), _reported_height(info)),
+        video_options=video_options(info),
+        audio_kbps=audio_kbps,
+        audio_kbps_approx=audio_kbps_approx,
     )
+
+
+def _audio_rate_kbps(info: Mapping[str, Any]) -> tuple[Optional[int], bool]:
+    """The source's own audio rate — ``(kbps, approximate)``, or ``(None, False)``.
+
+    Read from the ``formats`` list the extraction already returned (never a
+    second call). The stream that matters is the one an audio request would
+    actually fetch: an audio-only stream, and the highest rated one of those.
+    Its declared ``abr`` is the honest number; ``tbr`` is the same thing measured
+    and comes back flagged approximate. A muxed video's ``tbr`` is *not* read —
+    that number is video+audio together and would cap the ladder with a lie.
+    Nothing declared → ``None``, and the menu keeps its whole ladder.
+    """
+    best: Optional[int] = None
+    best_exact = True
+    for stream in (info.get("formats") or []):
+        if not isinstance(stream, dict):
+            continue
+        if stream.get("acodec") in (None, "none"):
+            continue
+        if stream.get("vcodec") not in (None, "none"):
+            continue
+        abr = stream.get("abr")
+        tbr = stream.get("tbr")
+        if isinstance(abr, (int, float)) and abr > 0:
+            value, exact = int(round(abr)), True
+        elif isinstance(tbr, (int, float)) and tbr > 0:
+            value, exact = int(round(tbr)), False
+        else:
+            continue
+        if best is None or value > best:
+            best, best_exact = value, exact
+    return best, (not best_exact if best is not None else False)
+
+
+def _reported_width(info: dict[str, Any]) -> Optional[int]:
+    """The pixel width of whatever reported the height (see ``_reported_height``).
+
+    Only ever used *alongside* a height — see ``quality_label_p``: width alone is
+    not a resolution label and must never become one.
+    """
+    for candidate in (info, *(info.get("requested_formats") or [])):
+        if not isinstance(candidate, dict):
+            continue
+        width = candidate.get("width")
+        if isinstance(width, (int, float)) and width > 0:
+            return int(width)
+    return None
+
+
+def video_options(info: Mapping[str, Any]) -> tuple[VideoOption, ...]:
+    """The downloadable resolutions of a link, best first — sizes included.
+
+    One entry per height yt-dlp can actually produce, built from the ``formats``
+    list the extraction already returned (never a second network call). A DASH
+    height is priced honestly: its video stream has no audio of its own, so the
+    size shown is that stream *plus* the audio it will be muxed with. Where a
+    height has several candidates (HEVC and AVC, say) the download may pick any
+    of them, so the size becomes an estimate even if the parts were exact —
+    "~" is a promise, not decoration.
+    """
+    formats = [f for f in (info.get("formats") or []) if isinstance(f, dict)]
+    if not formats:
+        height = info.get("height")
+        size = info.get("filesize") or info.get("filesize_approx") or 0
+        if height:
+            return (
+                VideoOption(
+                    int(height), int(size), bool(info.get("filesize")),
+                    int(info.get("width") or 0),
+                ),
+            )
+        return ()
+    audio_parts = [
+        f
+        for f in formats
+        if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")
+    ]
+    best_audio = max(
+        audio_parts,
+        key=lambda f: f.get("filesize") or f.get("filesize_approx") or 0,
+        default=None,
+    )
+    per_label: dict[int, list[tuple[int, bool, int, int]]] = {}
+    for stream in formats:
+        height = stream.get("height")
+        if not height or stream.get("vcodec") in (None, "none"):
+            continue
+        width = stream.get("width") or 0
+        size = stream.get("filesize") or stream.get("filesize_approx") or 0
+        exact = bool(stream.get("filesize"))
+        if stream.get("acodec") in (None, "none") and best_audio is not None:
+            # A DASH video stream is silent on its own; the mux adds audio, so the
+            # honest weight of this option is the pair.
+            size = size + (
+                best_audio.get("filesize") or best_audio.get("filesize_approx") or 0
+            )
+            exact = exact and bool(best_audio.get("filesize"))
+        label = quality_label_p(width, height) or int(height)
+        per_label.setdefault(label, []).append(
+            (int(size or 0), exact, int(height), int(width or 0))
+        )
+    options: list[VideoOption] = []
+    for label in sorted(per_label, reverse=True):
+        candidates = per_label[label]
+        if len(candidates) == 1:
+            size, exact, height, width = candidates[0]
+        else:
+            # Several streams share one name (a portrait and a landscape cut, HEVC
+            # and AVC): the engine picks by preference, so the size cannot be
+            # promised — show the largest as an estimate, and let the strongest
+            # stream's height name the tier a tap asks the selector for.
+            _, _, height, width = max(candidates, key=lambda c: c[2])
+            size = max(c[0] for c in candidates)
+            exact = False
+        options.append(VideoOption(height, size, exact, width))
+    return tuple(options)
 
 
 def _reported_height(info: dict[str, Any]) -> Optional[int]:

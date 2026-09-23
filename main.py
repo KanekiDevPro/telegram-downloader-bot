@@ -31,7 +31,7 @@ from handlers.admin import router as admin_router
 from handlers.payment import router as payment_router
 from handlers.user import router as user_router
 from middlewares.user_middleware import UserMiddleware
-from services import cobalt_cookies, proxy_health
+from services import cobalt_cookies, delivery, proxy_health
 from services.cobalt import CobaltService
 from services.cookie_watch import CookieJarWatcher, run_cookie_watch
 from services.doctor import http_reachable
@@ -650,6 +650,9 @@ async def main() -> None:
             "    http://localhost:8081 instead of the in-network service name.\n"
             "  - want the official cloud API? Clear TELEGRAM_API_BASE_URL in .env."
         ) from exc
+    # Every media card carries 🤖 @who — one get_me at boot answers it for every
+    # caption and screen from here on (services/delivery.py owns the value).
+    delivery.set_bot_username(me.username or "")
     logger.info("authorized as @%s (id=%s)", me.username or "?", me.id)
     logger.info("upload target: %s (max %s MB)", session_target(settings), settings.upload_limit_mb)
 

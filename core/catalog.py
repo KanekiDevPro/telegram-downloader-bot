@@ -37,9 +37,8 @@ MESSAGES: Final[Catalog] = {
             "▫️ Pinterest • Vimeo • Twitch • Dailymotion\n"
             "▫️ and dozens of other sites\n"
             "\n"
-            "⚙️ Downloads run in the background and the file lands <b>right here</b>: you "
-            "follow the progress in the same message, and a link that cannot be downloaded "
-            "says why instead of failing silently.\n"
+            "Send a link and I'll show you what's on it — the file lands <b>right "
+            "here</b>, and a link that cannot be downloaded says why.\n"
             "\n"
             "👇 Start with the buttons below:"
         ),
@@ -52,8 +51,8 @@ MESSAGES: Final[Catalog] = {
             "▫️ پینترست • ویمیو • توییچ • دیلی‌موشن\n"
             "▫️ و ده‌ها سرویس دیگر\n"
             "\n"
-            "⚙️ دانلود در پس‌زمینه انجام می‌شود و فایل <b>همین‌جا</b> برایت ارسال می‌شود؛ "
-            "پیشرفت را در همان پیام می‌بینی، و اگر لینکی دانلود نشد علتش گفته می‌شود.\n"
+            "لینک رو بفرست تا گزینه‌های موجود رو بهت نشون بدم — فایل <b>همین‌جا</b> "
+            "برات می‌رسه، و اگر لینکی دانلود نشد علتش گفته می‌شه.\n"
             "\n"
             "👇 از دکمه‌های زیر شروع کن:"
         ),
@@ -77,11 +76,11 @@ MESSAGES: Final[Catalog] = {
     "cmd.status": {"en": "Download status", "fa": "وضعیت دانلود"},
     "menu.profile": {"en": "👤 My profile", "fa": "👤 پروفایل من"},
     "menu.premium": {"en": "💎 Go VIP", "fa": "💎 ارتقا به ویژه (VIP)"},
-    "menu.help": {"en": "❓ Help", "fa": "❓ راهنما"},
     "menu.language": {"en": "🌐 Language", "fa": "🌐 زبان"},
     "menu.download": {"en": "⬇️ Download", "fa": "⬇️ دانلود"},
     # The one menu button an operator fills in: its target lives in the database.
     "menu.support": {"en": "💬 Support", "fa": "💬 پشتیبانی"},
+    "menu.add_group": {"en": "👥 Add to a group", "fa": "👥 افزودن به گروه"},
     # Drawn only for ids in ADMIN_IDS: the panel is not a hidden feature, it is just
     # not a user's business.
     "menu.admin": {"en": "🛠 Admin panel", "fa": "🛠 پنل مدیریت"},
@@ -187,172 +186,27 @@ MESSAGES: Final[Catalog] = {
     },
 
     # ---------------------------------------------------------------------
-    # Help
+    # Download
     # ---------------------------------------------------------------------
-    "help.title": {"en": "❓ <b>Help</b>", "fa": "❓ <b>راهنما</b>"},
-    "help.intro": {
-        "en": "How the bot works, in a few short pages. Pick one:",
-        "fa": "کارکرد ربات در چند صفحهٔ کوتاه. یکی را انتخاب کن:",
-    },
-    "help.btn_how": {"en": "📥 How to download", "fa": "📥 چطور دانلود کنم"},
-    "help.btn_audio": {"en": "🎵 Audio", "fa": "🎵 صدا"},
-    "help.btn_video": {"en": "🎬 Video", "fa": "🎬 ویدیو"},
-    "help.btn_platforms": {
-        "en": "📱 Supported platforms",
-        "fa": "📱 سرویس‌های پشتیبانی‌شده",
-    },
-    "help.btn_problems": {"en": "🛠 Common problems", "fa": "🛠 مشکلات رایج"},
     "download.title": {"en": "⬇️ <b>Download</b>", "fa": "⬇️ <b>دانلود</b>"},
     "download.how": {
         "en": (
-            "Send me a link — or use <code>/download &lt;link&gt;</code> — and I fetch it in "
-            "the background and deliver the file right here.\n\n"
-            "▫️ Video in 1080p/720p/480p, audio as MP3, M4A, OPUS or WAV, or a post's "
-            "photos — whatever that link actually has.\n"
-            "▫️ Every step is edited into one message, and a download that fails "
-            "says why."
+            "Send me a link — YouTube, Instagram, TikTok, X, Spotify or dozens of "
+            "other sites — and I'll show you what's on it.\n\n"
+            "🎬 video · 🎵 audio · 🖼️ photos\n\n"
+            "Quality and format depend on what the link holds."
         ),
         "fa": (
-            "یک لینک برایم بفرست — یا از <code>/download &lt;link&gt;</code> استفاده کن — تا در "
-            "پس‌زمینه دانلود کنم و فایل همین‌جا تحویل بدهم.\n\n"
-            "▫️ ویدیو 1080p/720p/480p، صدای MP3 یا M4A یا OPUS یا WAV، یا عکس‌های یک "
-            "پست — هرچه آن لینک واقعاً داشته باشد.\n"
-            "▫️ همهٔ مراحل در همان یک پیام ویرایش می‌شوند، و اگر دانلودی نشود علتش گفته "
-            "می‌شود."
-        ),
-    },
-    "help.body": {
-        "en": (
-            "1️⃣ Send a link (YouTube, Instagram, TikTok, Twitter/X, Spotify, SoundCloud, "
-            "Facebook, Reddit and many more).\n"
-            "2️⃣ Pick what you want — the bot only offers what that link actually has "
-            "(1080p/720p/480p video, MP3/M4A/OPUS/WAV audio, or the images of a photo "
-            "post).\n"
-            "3️⃣ The download happens in the background and the file is sent right here — "
-            "stay and watch, or leave; it will arrive anyway.\n"
-            "\n"
-            "Progress is edited into the same message, and a download that fails says why. "
-            "Private links, live streams and playlists are not supported.\n"
-            "\n"
-            "<b>Commands</b>\n"
-            "• /profile — your account, status and today's quota\n"
-            "• /premium — VIP subscription\n"
-            "• /status — account summary\n"
-            "• /language — English / فارسی\n"
-            "• /cancel — leave the current step\n"
-            "• /start — this menu\n"
-            "\n"
-            "Every download uses one unit of the daily quota; /premium multiplies it."
-        ),
-        "fa": (
-            "1️⃣ لینک رو بفرست (یوتیوب، اینستاگرام، تیک‌تاک، توییتر/X، اسپاتیفای، ساندکلاود، "
-            "فیسبوک، ریدیت و خیلی‌های دیگر).\n"
-            "2️⃣ انتخاب کن چی می‌خوای — ربات فقط گزینه‌هایی را نشان می‌دهد که آن لینک واقعاً "
-            "دارد (ویدیو 1080p/720p/480p، صدای MP3/M4A/OPUS/WAV، یا عکس‌های یک پست عکسی).\n"
-            "3️⃣ دانلود در پس‌زمینه انجام می‌شه و فایل همین‌جا برات فرستاده می‌شه — می‌تونی "
-            "همون‌جا منتظر بمونی یا بری، خبرش می‌رسه.\n"
-            "\n"
-            "پیشرفت دانلود را در همان پیام می‌بینی، و اگر لینکی دانلود نشد علتش گفته می‌شه. "
-            "لینک خصوصی، پخش زنده و playlist دانلود نمی‌شه.\n"
-            "\n"
-            "<b>دستورها</b>\n"
-            "• /profile — پروفایل، وضعیت و سهمیهٔ امروز\n"
-            "• /premium — اشتراک ویژه (VIP)\n"
-            "• /status — خلاصهٔ وضعیت حساب\n"
-            "• /language — English / فارسی\n"
-            "• /cancel — لغو مرحلهٔ فعلی\n"
-            "• /start — همین منو\n"
-            "\n"
-            "هر دانلود یک واحد از سهمیهٔ روزانه کم می‌کند؛ با /premium سهمیه چند برابر می‌شود."
-        ),
-    },
-    "help.audio": {
-        "en": (
-            "🎵 <b>Audio</b>\n\n"
-            "▫️ First pick the file type: <b>MP3</b> (plays everywhere), <b>M4A</b> "
-            "(smaller, same player), <b>OPUS</b> (smallest) or <b>WAV</b> (raw, "
-            "for editing).\n"
-            "▫️ Then the quality: 💎 Best, 🔥 High, ⚖️ Balanced, 📦 Small size. It is "
-            "a ceiling, never an upscale — and 💎 Best keeps the site's own stream "
-            "untouched whenever it can.\n"
-            "▫️ WAV skips the quality step: a raw file has no knob to turn.\n"
-            "▫️ The file always arrives as one playable message."
-        ),
-        "fa": (
-            "🎵 <b>صدا</b>\n\n"
-            "▫️ اول نوع فایل را انتخاب کن: <b>MP3</b> (هرجا پخش می‌شود)، <b>M4A</b> "
-            "(کم‌حجم‌تر، همان پخش‌کننده)، <b>OPUS</b> (کم‌حجم‌ترین) یا <b>WAV</b> (خام، "
-            "برای تدوین).\n"
-            "▫️ بعد کیفیت: 💎 بهترین، 🔥 بالا، ⚖️ متعادل، 📦 کم‌حجم. این‌ها سقف‌اند و "
-            "کیفیت را بالا نمی‌برند — و 💎 بهترین تا جایی که بشود همان فایل اصلی سایت را "
-            "دست‌نخورده نگه می‌دارد.\n"
-            "▫️ WAV مرحلهٔ کیفیت ندارد: فایل خام چیزی برای تنظیم ندارد.\n"
-            "▫️ فایل همیشه در یک پیام قابل پخش می‌رسد."
-        ),
-    },
-    "help.video": {
-        "en": (
-            "🎬 <b>Video</b>\n\n"
-            "▫️ 💻 Best quality — whatever the video itself has — or a ceiling: "
-            "1080p, 720p or 480p. A ceiling gives you the best version up to it; "
-            "nothing is ever upscaled.\n"
-            "▫️ Photo posts and galleries arrive as their images.\n"
-            "▫️ Private links, live streams and playlists are not supported."
-        ),
-        "fa": (
-            "🎬 <b>ویدیو</b>\n\n"
-            "▫️ 💻 بهترین کیفیت — هرچه خود ویدیو دارد — یا سقف: 1080p، 720p یا "
-            "480p. سقف یعنی بهترین نسخه تا همان حد؛ هیچ‌وقت کیفیت بالا نمی‌رود.\n"
-            "▫️ پست‌های عکسی و گالری‌ها به‌صورت عکس می‌رسند.\n"
-            "▫️ لینک خصوصی، پخش زنده و playlist پشتیبانی نمی‌شوند."
-        ),
-    },
-    "help.platforms": {
-        "en": (
-            "🌐 <b>Supported platforms</b>\n\n"
-            "YouTube • Twitter/X • Instagram • TikTok • Spotify • SoundCloud • "
-            "Facebook • Reddit • Pinterest • Vimeo • Twitch • Dailymotion — and "
-            "dozens of other sites.\n\n"
-            "A direct file link (an image, a CDN attachment) is fetched as it is."
-        ),
-        "fa": (
-            "🌐 <b>سرویس‌های پشتیبانی‌شده</b>\n\n"
-            "یوتیوب • توییتر/X • اینستاگرام • تیک‌تاک • اسپاتیفای • ساندکلاود • "
-            "فیسبوک • ریدیت • پینترست • ویمیو • توییچ • دیلی‌موشن — و ده‌ها سایت دیگر.\n\n"
-            "لینک مستقیم یک فایل (عکس، فایل CDN) همان‌طور که هست دریافت می‌شود."
-        ),
-    },
-    "help.problems": {
-        "en": (
-            "🧩 <b>Common problems</b>\n\n"
-            "▫️ <b>The link does not download?</b> The message says why — private "
-            "links, live streams and playlists are not supported.\n"
-            "▫️ <b>Changed your mind?</b> Send a new link at any moment, or "
-            "<code>/cancel</code> to leave a step.\n"
-            "▫️ <b>Wrong format?</b> Ask again from the same link — a file already "
-            "fetched comes back instantly.\n"
-            "▫️ Anything else: 💬 Support."
-        ),
-        "fa": (
-            "🧩 <b>مشکلات رایج</b>\n\n"
-            "▫️ <b>لینک دانلود نمی‌شود؟</b> پیام، علتش را می‌گوید — لینک خصوصی، پخش زنده "
-            "و playlist پشتیبانی نمی‌شوند.\n"
-            "▫️ <b>نظرت عوض شده؟</b> هر لحظه لینک تازه بفرست، یا برای ترک مرحلهٔ فعلی "
-            "<code>/cancel</code>.\n"
-            "▫️ <b>فرمت اشتباه؟</b> از همان لینک دوباره بخواه — فایلی که قبلاً گرفته شده "
-            "سریع برمی‌گردد.\n"
-            "▫️ هر چیز دیگر: 💬 پشتیبانی."
+            "لینک رو بفرست — یوتیوب، اینستاگرام، تیک‌تاک، ایکس، اسپاتیفای یا ده‌ها "
+            "سایت دیگه — تا گزینه‌های موجود رو بهت نشون بدم.\n\n"
+            "🎬 ویدیو · 🎵 صدا · 🖼️ تصاویر\n\n"
+            "کیفیت و فرمت بسته به محتوای لینک قابل انتخابه."
         ),
     },
 
     # ---------------------------------------------------------------------
     # Link intake: the wait, the questions, the answers
     # ---------------------------------------------------------------------
-    "intake.analyse": {"en": "🔍 Analysing the link…", "fa": "🔍 در حال تحلیل لینک…"},
-    "intake.queueing": {
-        "en": "🔍 Analysing and queueing… ⏳",
-        "fa": "🔍 در حال تحلیل و ارسال به صف پردازش... ⏳",
-    },
     "intake.invalid_link": {
         "en": "❌ That link is not valid — it has to start with http:// or https://.",
         "fa": "❌ لینک نامعتبر است. لینک باید با http:// یا https:// شروع شود.",
@@ -379,16 +233,17 @@ MESSAGES: Final[Catalog] = {
         "en": "Another step is still running; use /cancel to start over.",
         "fa": "یک مرحلهٔ دیگه هنوز در جریانه؛ با /cancel از نو شروع کن.",
     },
-    "intake.choose_what": {"en": "What do you want? 👇", "fa": "چی می‌خوای؟ 👇"},
+    "intake.choose_what": {
+        "en": "What should I download for you? 👇",
+        "fa": "چی می‌خوای دانلود کنی؟ 👇",
+    },
     "intake.choose_quality": {
-        "en": "Pick a quality — the bot never upscales, so a lower ceiling simply gives "
-        "you the best version up to it 👇",
-        "fa": "کیفیت را انتخاب کن — ربات هرگز کیفیت را بالا نمی‌برد، پس سقف پایین‌تر یعنی "
-        "بهترین نسخه تا همان حد 👇",
+        "en": "🎞 Pick the quality 👇",
+        "fa": "🎞 کیفیتش رو انتخاب کن 👇",
     },
     "intake.choose_audio": {
-        "en": "Which audio format do you want? 👇",
-        "fa": "صدای لینک رو با چه فرمتی می‌خوای؟ 👇",
+        "en": "🎵 Pick the audio format 👇",
+        "fa": "🎵 فرمت صدا رو انتخاب کن 👇",
     },
     "intake.choose_media": {
         "en": "This looks like a photo post — I will send whatever media it contains 👇",
@@ -409,22 +264,6 @@ MESSAGES: Final[Catalog] = {
     "intake.documents_only": {
         "en": "Send me links, text, or a link inside a caption — I download media.",
         "fa": "لینک بفرست (یا لینک داخل کپشن) — من رسانه دانلود می‌کنم.",
-    },
-    "intake.photo_auto": {
-        "en": "🖼 A photo post — downloading its media now 👇",
-        "fa": "🖼 پست عکسی است — همین حالا رسانه‌اش دانلود می‌شود 👇",
-    },
-    "intake.queued": {
-        "en": "⏳ Added to the queue (position ≈ {depth}).",
-        "fa": "⏳ لینک در صف پردازش قرار گرفت (موقعیت تقریبی: {depth}).",
-    },
-    "intake.queued_background": {
-        "en": "Downloading and sending happen in the background — I will tell you right here.",
-        "fa": "دانلود و ارسال در پس‌زمینه انجام می‌شه — همین‌جا خبرت می‌کنیم.",
-    },
-    "intake.cache_hit": {
-        "en": "⚡️ This link was downloaded before — the file came from the cache.",
-        "fa": "⚡️ این لینک قبلاً دانلود شده — فایل از حافظهٔ کش ارسال شد.",
     },
     "intake.quota_exhausted": {
         "en": "⛔️ Your daily quota ({used} of {limit}) is used up — /premium raises it.",
@@ -463,36 +302,57 @@ MESSAGES: Final[Catalog] = {
     "fmt.fmt_m4a": {"en": "🎧 M4A", "fa": "🎧 M4A"},
     "fmt.fmt_opus": {"en": "🎧 OPUS", "fa": "🎧 OPUS"},
     "fmt.fmt_wav": {"en": "🎧 WAV", "fa": "🎧 WAV"},
-    "audio.choose_level": {
-        "en": "🎚 How good should it be? 👇",
-        "fa": "🎚 چه کیفیتی می‌خوای؟ 👇",
+    "fmt.fmt_flac": {"en": "🎧 FLAC", "fa": "🎧 FLAC"},
+    # The format's quality presets are labelled with their real bitrates in the
+    # menu (handlers/user.py) — these keys name the one preset that is not one.
+    "audio.choose_level_fmt": {
+        "en": "🎚 Pick the {format} quality 👇",
+        "fa": "🎚 کیفیت {format} رو انتخاب کن 👇",
     },
-    "audio.level_best": {"en": "💎 Best quality", "fa": "💎 بهترین کیفیت"},
-    "audio.level_high": {"en": "🔥 High quality", "fa": "🔥 کیفیت بالا"},
-    "audio.level_balanced": {"en": "⚖️ Balanced", "fa": "⚖️ متعادل"},
-    "audio.level_small": {"en": "📦 Small size", "fa": "📦 کم‌حجم"},
+    # The one tier that is not a bitrate: the site's own stream, copied untouched
+    # (the 💎 comes from the level marker in handlers/user.py, like every row).
+    "audio.original_long": {
+        "en": "Original · no re-encode",
+        "fa": "کیفیت اصلی · بدون تبدیل",
+    },
+    # Shown only when the ladder was trimmed to the source's own rate — the rows
+    # are the information, this one line is their footnote.
+    "audio.source_rate": {
+        "en": "ℹ️ Source quality: {rate}",
+        "fa": "ℹ️ کیفیت منبع: {rate}",
+    },
+
+    # ---------------------------------------------------------------------
+    # The media card: the standard block for anything downloadable — the screen
+    # that asks and the caption that arrives are the same four lines, so the
+    # answer always names the question. A missing fact omits its line (see
+    # services/delivery.py:media_card); "{height}p" and the card lines are
+    # language-neutral and live in the catalogue anyway, one home per string.
+    # ---------------------------------------------------------------------
+    "media.line_title": {"en": "🎬 {title}", "fa": "🎬 {title}"},
+    # A song introduces itself as a song: 🎵 its title, 🎤 who made it — the card
+    # speaks the content's language, not one generic label for everything.
+    "media.line_music": {"en": "🎵 {title}", "fa": "🎵 {title}"},
+    "media.line_artist": {"en": "🎤 {artist}", "fa": "🎤 {artist}"},
+    "media.line_album": {"en": "💿 {album}", "fa": "💿 {album}"},
+    "media.line_duration": {"en": "⏱ {duration}", "fa": "⏱ {duration}"},
+    "media.line_url": {"en": "🔗 {url}", "fa": "🔗 {url}"},
+    "media.line_quality": {"en": "🎞 {quality}", "fa": "🎞 {quality}"},
+    "media.line_audio_quality": {"en": "🎧 {quality}", "fa": "🎧 {quality}"},
+    "media.line_bot": {"en": "🤖 {bot}", "fa": "🤖 {bot}"},
+    "media.quality_max": {"en": "Best available", "fa": "بیشترین کیفیت موجود"},
+    "media.quality_p": {"en": "{height}p", "fa": "{height}p"},
+    # The quality line of a copied stream: named honestly, never a bitrate.
+    "media.original": {"en": "Original", "fa": "اصلی"},
+    # The one compact state a long download shows, appended to the card and
+    # removed with it: never a sentence, never a second message.
+    "media.wait": {"en": "⏳", "fa": "⏳"},
+    "media.progress": {"en": "⏳ {percent:.0f}%", "fa": "⏳ {percent:.0f}%"},
+    "media.retry": {"en": "🔄 Try again", "fa": "🔄 دوباره تلاش کن"},
 
     # ---------------------------------------------------------------------
     # Worker: the download's own narration
     # ---------------------------------------------------------------------
-    "work.processing": {"en": "🔄 Processing the link…", "fa": "🔄 در حال پردازش لینک…"},
-    "work.cache_resend": {
-        "en": "⚡️ Already downloaded — sending from the cache…",
-        "fa": "⚡️ لینک قبلاً دانلود شده؛ در حال ارسال از کش…",
-    },
-    "work.cache_done": {"en": "✅ Sent (from the cache)", "fa": "✅ ارسال شد (از حافظهٔ کش)"},
-    "work.cache_caption": {
-        "en": "📥 From the cache (a previous download) ⚡️",
-        "fa": "📥 ارسال از حافظهٔ کش (دانلود قبلی) ⚡️",
-    },
-    "work.spotify_lookup": {
-        "en": "🎵 Fetching this song…",
-        "fa": "🎵 در حال آماده‌سازی این آهنگ…",
-    },
-    "work.retry": {
-        "en": "⏳ Attempt {attempt} of {attempts}…",
-        "fa": "⏳ تلاش {attempt} از {attempts}…",
-    },
     "work.live": {"en": "⛔️ Live streams cannot be downloaded.", "fa": "⛔️ پخش زنده قابل دانلود نیست."},
     "work.too_big": {
         "en": "⛔️ The file ({size}) is larger than the {limit} MB limit.",
@@ -510,35 +370,23 @@ MESSAGES: Final[Catalog] = {
         "en": "⛔️ Today's download quota ({limit}) is used up.",
         "fa": "⛔️ سهمیهٔ دانلود امروز ({limit}) تمام شده است.",
     },
-    "work.downloading": {"en": "⬇️ Downloading: <b>{title}</b>", "fa": "⬇️ در حال دانلود: <b>{title}</b>"},
-    "work.progress": {
-        "en": "⬇️ Downloading: {percent:.0f}% ({done} / {total})",
-        "fa": "⬇️ دانلود: {percent:.0f}% ({done} / {total})",
-    },
     "work.fallback": {
         "en": "🛠 The main route could not serve this link; downloading through the fallback…",
         "fa": "🛠 مسیر اصلی به این لینک دسترسی نداشت؛ از مسیر جایگزین دانلود می‌شود…",
     },
-    "work.uploading": {"en": "⬆️ Uploading to Telegram…", "fa": "⬆️ در حال ارسال به تلگرام…"},
-    "work.done": {"en": "✅ Downloaded and sent.", "fa": "✅ دانلود و ارسال شد."},
-    "work.failed": {"en": "❌ The download failed:\n{error}", "fa": "❌ دانلود انجام نشد:\n{error}"},
-    "work.unexpected": {"en": "unexpected error", "fa": "خطای نامشخص"},
-    "work.internal_error": {
-        "en": "internal error: {detail}",
-        "fa": "خطای داخلی: {detail}",
+    # The failure lands on the card the user is already watching: what went wrong
+    # in their words ({error} is chosen by the engine's error *code* — see
+    # core/i18n:error_message), then what to do about it. The technical detail is
+    # the log's, never the chat's.
+    "work.failed": {
+        "en": "❌ Download failed.\n{error}",
+        "fa": "❌ دانلود نشد.\n{error}",
     },
-    "work.caption_platform": {"en": "🌐 {platform}", "fa": "🌐 {platform}"},
-    # A music link is captioned as the song, not as the site it was fetched from:
-    # the file carries the same metadata as its tags, so the caption agrees with the
-    # client's own player.
-    "work.caption_artist": {"en": "🎤 {artist}", "fa": "🎤 {artist}"},
-    "work.caption_album": {"en": "💿 {album}", "fa": "💿 {album}"},
-    "work.caption_size": {"en": "📦 {size}", "fa": "📦 {size}"},
-    "work.caption_duration": {"en": "⏱ {duration}", "fa": "⏱ {duration}"},
-    "work.caption_quality": {"en": "🎬 {resolution}", "fa": "🎬 کیفیت {resolution}"},
-    # The line an operator asks for and a user never notices they wanted: where this
-    # file came from. Same in both languages — it is a URL, and Telegram linkifies it.
-    "work.caption_source": {"en": "🔗 {url}", "fa": "🔗 {url}"},
+    "work.unexpected": {"en": "an unknown problem", "fa": "یه مشکل ناشناخته"},
+    "work.internal_error": {
+        "en": "Something went wrong on our side.",
+        "fa": "یه مشکلی سمت ما پیش اومد.",
+    },
     "work.login_block": {
         "en": (
             "🔒 This link can only be downloaded with a signed-in account, and the bot's "
@@ -775,6 +623,37 @@ MESSAGES: Final[Catalog] = {
     "admin.btn_blocks": {"en": "🚫 Blocks", "fa": "🚫 بلاک‌ها"},
     "admin.btn_users": {"en": "👥 Users", "fa": "👥 کاربران"},
     "admin.btn_failures": {"en": "❌ Recent failures", "fa": "❌ شکست‌های اخیر"},
+    "admin.btn_groups": {"en": "👥 Groups", "fa": "👥 گروه‌ها"},
+    "admin.groups_headline": {"en": "👥 Group usage", "fa": "👥 آمار گروه‌ها"},
+    "admin.groups_totals": {
+        "en": (
+            "📥 Total group downloads: {total}\n"
+            "✅ Successful: {ok}\n"
+            "❌ Failed: {failed}\n"
+            "👥 Active groups: {groups}"
+        ),
+        "fa": (
+            "📥 کل دانلودهای گروهی: {total}\n"
+            "✅ موفق: {ok}\n"
+            "❌ ناموفق: {failed}\n"
+            "👥 گروه‌های فعال: {groups}"
+        ),
+    },
+    "admin.groups_top": {"en": "🔥 Top groups", "fa": "🔥 پرکاربردترین گروه‌ها"},
+    "admin.groups_line": {
+        "en": "{rank}. {name} — {total} downloads · {failed} failed",
+        "fa": "{rank}. {name} — {total} دانلود · {failed} ناموفق",
+    },
+    "admin.groups_unknown": {"en": "Group ID: {id}", "fa": "شناسهٔ گروه: {id}"},
+    "admin.groups_empty": {
+        "en": "— no group downloads recorded yet.",
+        "fa": "— هنوز دانلود گروهی ثبت نشده.",
+    },
+    "admin.groups_failures": {
+        "en": "❌ Group failures: {failed}",
+        "fa": "❌ شکست‌های گروهی: {failed}",
+    },
+    "admin.groups_code": {"en": "{code} — {count}", "fa": "{code} — {count}"},
     "admin.btn_system": {"en": "🖥 System", "fa": "🖥 سیستم"},
     "admin.btn_settings": {"en": "⚙️ Settings", "fa": "⚙️ تنظیمات"},
     "admin.btn_reload": {"en": "🔄 Refresh", "fa": "🔄 تازه‌سازی"},

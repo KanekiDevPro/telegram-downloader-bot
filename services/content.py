@@ -98,37 +98,54 @@ AUDIO_FORMAT_LABELS: dict[str, str] = {
     "mp3": "fmt.fmt_mp3",
     "m4a": "fmt.fmt_m4a",
     "opus": "fmt.fmt_opus",
+    "flac": "fmt.fmt_flac",
     "wav": "fmt.fmt_wav",
 }
 
-_LEVEL_LABELS: dict[str, str] = {
-    "best": "audio.level_best",
-    "high": "audio.level_high",
-    "balanced": "audio.level_balanced",
-    "small": "audio.level_small",
-}
 
+def audio_tier_levels(codec: str) -> tuple[tuple[str, Quality], ...]:
+    """``((level, tier), ...)`` for a codec, best first — ``()`` for e.g. wav.
 
-def audio_level_choices(codec: str) -> tuple[Choice, ...]:
-    """The presets a codec genuinely has, best first (``()`` for e.g. wav).
-
-    Built from :data:`core.utils.AUDIO_TIERS`, so a button and the tier it
-    submits cannot drift apart — wav is absent there (PCM has no knob), and this
-    returns ``()`` for it: its whole menu is the format button itself.
+    The one place the level→tier map is read, so the menu that renders the tiers
+    and the vocabulary that validates the taps share both order and spelling.
     """
     return tuple(
-        Choice(_LEVEL_LABELS[level], "audio", AUDIO_TIERS[(codec, level)])
+        (level, AUDIO_TIERS[(codec, level)])
         for level in AUDIO_LEVELS
         if (codec, level) in AUDIO_TIERS
     )
 
 
+def audio_level_choices(codec: str) -> tuple[Choice, ...]:
+    """The presets a codec genuinely has, best first (``()`` for e.g. wav).
+
+    Validation vocabulary: what a tap may ask for. The *labels* are deliberately
+    not here — a level row names its real bitrate and estimated size
+    (``handlers/user.py:_level_keyboard``) — so the tuple carries the format's
+    own key and no screen ever shows it.
+    """
+    return tuple(
+        Choice(AUDIO_FORMAT_LABELS[codec], "audio", tier)
+        for _level, tier in audio_tier_levels(codec)
+    )
+
+
 def _audio_choices() -> tuple[Choice, ...]:
-    """Every audio request accepted for a link, format by format, best first."""
+    """Every audio request accepted for a link, format by format, best first.
+
+    A format with no presets (wav, flac — raw and lossless output) *is* its own
+    request: its button submits directly and it appears here by its own name.
+    """
     per_format = (
         choice for fmt in AUDIO_FORMATS for choice in audio_level_choices(fmt)
     )
-    return (*per_format, Choice(AUDIO_FORMAT_LABELS["wav"], "audio", "wav"))
+    # The knob-less formats *are* their own request — spelled as literals so the
+    # tier type stays honest (the routing tests pin both).
+    direct = (
+        Choice(AUDIO_FORMAT_LABELS[fmt], "audio", fmt)
+        for fmt in ("flac", "wav")
+    )
+    return (*per_format, *direct)
 
 
 _AUDIO_CHOICES: tuple[Choice, ...] = _audio_choices()

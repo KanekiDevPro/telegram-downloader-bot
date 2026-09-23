@@ -19,20 +19,82 @@ from typing import Any, Literal
 import pytest
 
 from core.utils import (
+    AUDIO_FORMAT_LEVELS,
+    AUDIO_FORMATS,
     AUDIO_QUALITIES,
     DEFAULT_AUDIO_QUALITY,
     DEFAULT_VIDEO_QUALITY,
     VIDEO_QUALITIES,
+    is_video_height,
     normalize_quality,
     quality_key,
 )
 from services import cache as cache_service
-from services.cobalt import _legacy_payload, _modern_payload
-from services.extractor import ExtractionError, ExtractorService, format_selector
+from services.cobalt import _legacy_payload, _modern_payload, audio_format_param
+from services.extractor import (
+    ExtractionError,
+    ExtractorService,
+    VideoOption,
+    audio_bitrate,
+    audio_is_original,
+    audio_size_estimate,
+    format_selector,
+    quality_label_p,
+)
 
 # ---------------------------------------------------------------------------
 # yt-dlp: what a tier means
 # ---------------------------------------------------------------------------
+
+
+def test_an_audio_tier_names_its_real_bitrate() -> None:
+    assert audio_bitrate("mp3.best") == 320
+    assert audio_bitrate("mp3.high") == 256
+    assert audio_bitrate("mp3") == 192
+    assert audio_bitrate("mp3.small") == 128
+    assert audio_bitrate("opus.best") == 192
+    assert audio_bitrate("opus.small") == 64
+    assert audio_bitrate("m4a.high") == 256
+
+
+def test_the_untouched_stream_has_no_bitrate_to_name() -> None:
+    assert audio_bitrate("m4a") is None
+    assert audio_is_original("m4a") is True
+    assert audio_is_original("mp3.best") is False
+    # Raw and lossless output are real exports — just knob-less ones.
+    assert audio_is_original("wav") is False
+    assert audio_is_original("flac") is False
+
+
+def test_an_audio_size_estimate_is_rate_times_length() -> None:
+    estimate = audio_size_estimate("mp3.best", 150)
+    assert estimate is not None and 5_500_000 <= estimate <= 6_500_000
+    small = audio_size_estimate("mp3.small", 150)
+    assert small is not None and small < estimate
+    # WAV is CD-shaped PCM arithmetic — bigger than any lossy tier.
+    wav = audio_size_estimate("wav", 150)
+    assert wav is not None and wav > estimate
+
+
+def test_no_estimate_where_the_number_would_be_fiction() -> None:
+    assert audio_size_estimate("m4a", 150) is None, "untouched stream, unknown rate"
+    assert audio_size_estimate("flac", 150) is None, "lossless size depends on the music"
+    assert audio_size_estimate("mp3.best", 0) is None
+
+
+def test_flac_is_a_real_format_with_no_fake_quality_knob() -> None:
+    assert "flac" in AUDIO_FORMATS
+    assert AUDIO_FORMAT_LEVELS["flac"] == ()
+    assert normalize_quality("flac", "audio") == "flac"
+    assert normalize_quality("flac.best", "audio") == "flac", "aliases resolve"
+
+
+def test_the_fallback_refuses_a_format_it_cannot_serve() -> None:
+    """Cobalt has no FLAC service — the hand-over refuses instead of mislabeling."""
+    assert audio_format_param("audio", "flac") == ""
+    assert audio_format_param("audio", "wav") == "wav"
+    assert audio_format_param("audio", "mp3.best") == "mp3"
+    assert audio_format_param("video", "best") == "", "audio requests only"
 
 
 def test_best_keeps_the_tuned_no_ceiling_chain() -> None:
@@ -67,11 +129,52 @@ def test_audio_ignores_the_video_tiers() -> None:
 
 
 def test_an_unknown_tier_is_the_default_for_that_format() -> None:
-    assert normalize_quality("2160", "video") == DEFAULT_VIDEO_QUALITY
     assert normalize_quality("", "video") == DEFAULT_VIDEO_QUALITY
     assert normalize_quality(None, "audio") == DEFAULT_AUDIO_QUALITY
     assert normalize_quality("1080", "audio") == DEFAULT_AUDIO_QUALITY, "cross-format junk"
     assert normalize_quality("M4A", "audio") == "m4a", "a button's own spelling"
+    assert normalize_quality("99999", "video") == DEFAULT_VIDEO_QUALITY, "out of ladder"
+
+
+def test_a_real_height_travels_as_itself() -> None:
+    """The menu is drawn from the resolutions a link actually has, so a height
+    the static table never named is a tier like the named ones — collapsing it
+    onto "best" would merge two different requests into one cache key."""
+    assert normalize_quality("2160", "video") == "2160"
+    assert normalize_quality("360", "video") == "360"
+    assert is_video_height("1080") and is_video_height("144") and is_video_height("4320")
+    assert not is_video_height("143") and not is_video_height("best")
+    assert not is_video_height("") and not is_video_height(None) and not is_video_height("12")
+
+
+def test_a_probed_height_builds_a_ceiling_selector() -> None:
+    assert "[height<=2160]" in format_selector("video", "2160")
+
+
+def test_quality_names_never_confuse_a_width_for_a_label() -> None:
+    """1920x1080 → 1080p. A portrait phone video is 1080p too (its short edge
+    names it), a padded frame is named by the rung it stands for — and a width
+    alone is never a resolution label."""
+    assert quality_label_p(1920, 1080) == 1080
+    assert quality_label_p(1280, 720) == 720
+    assert quality_label_p(854, 480) == 480
+    assert quality_label_p(640, 360) == 360
+    assert quality_label_p(426, 240) == 240
+    assert quality_label_p(1080, 1920) == 1080, "a vertical Short is 1080p, not 1920p"
+    assert quality_label_p(1920, 1088) == 1080, "a padded frame names its rung"
+    assert quality_label_p(3840, 2160) == 2160
+    assert quality_label_p(1920, None) is None, "width alone names nothing"
+    assert quality_label_p(None, None) is None
+    assert quality_label_p("1920", "1080") == 1080, "string numbers count too"
+
+
+def test_an_option_carries_its_name_next_to_the_selectors_number() -> None:
+    """A portrait option: the menu calls it 1080p while the tap still asks the
+    selector for the stream's real height."""
+    option = VideoOption(height=1920, size_bytes=1, size_exact=True, width=1080)
+
+    assert option.label_p == 1080
+    assert option.height == 1920
 
 
 def test_the_offered_tiers_are_the_supported_tiers() -> None:
@@ -264,9 +367,9 @@ def test_every_audio_tier_maps_to_real_encoder_settings() -> None:
         if tier == "m4a":
             continue
         codec, bitrate = AUDIO_EXPORTS[tier]
-        assert codec in ("mp3", "m4a", "opus", "wav")
-        if codec == "wav":
-            assert bitrate is None, "PCM has no bitrate to set"
+        assert codec in ("mp3", "m4a", "flac", "opus", "wav")
+        if codec in ("wav", "flac"):
+            assert bitrate is None, "raw and lossless output have no bitrate to set"
         else:
             assert bitrate is not None and 64 <= int(bitrate) <= 320, tier
 

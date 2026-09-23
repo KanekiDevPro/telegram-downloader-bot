@@ -271,6 +271,11 @@ def audio_format_param(media_format: MediaFormat, quality: object) -> str:
     tier = normalize_quality(quality, "audio")
     if tier == "wav":
         return "wav"
+    if tier == "flac":
+        # Cobalt has no FLAC service to name. Refusing here lets the worker fail
+        # honestly with the primary engine's error instead of handing back a
+        # differently-coded file under this name.
+        return ""
     if tier.startswith("opus"):
         return "opus"
     if tier.startswith("m4a"):

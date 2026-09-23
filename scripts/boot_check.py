@@ -223,6 +223,7 @@ async def main() -> int:
             "block_events",
             "bot_state",
             "fix_events",
+            "group_downloads",
         }
         check("schema bootstrap created every table", required <= tables, str(sorted(required & tables)))
 
@@ -327,9 +328,9 @@ async def main() -> int:
         }
         check(
             "the user frontend is wired (profile, premium, help, status, language)",
-            {"cmd_start", "cmd_profile", "cmd_premium", "cmd_help", "cmd_status", "cmd_language"}
+            {"cmd_start", "cmd_profile", "cmd_premium", "cmd_status", "cmd_language"}
             <= user_commands,
-            "/profile، /premium، /help — the menu's screens plus /status and /language",
+            "/profile، /premium — the menu's screens plus /status and /language",
         )
         user_callbacks = {
             getattr(handler.callback, "__name__", "")
@@ -341,13 +342,12 @@ async def main() -> int:
                 "on_menu_download",
                 "on_menu_profile",
                 "on_menu_premium",
-                "on_menu_help",
-                "on_help_page",
+                "on_menu_support",
                 "on_menu_language",
                 "on_menu_home",
             }
             <= user_callbacks,
-            "⬇️ دانلود، 👤 پروفایل من، ❓ راهنما (صفحه‌ها)، 🌐 زبان، ⬅️ بازگشت",
+            "⬇️ دانلود، 👤 پروفایل من، 💬 پشتیبانی، 🌐 زبان، ⬅️ بازگشت",
         )
         check(
             "the cookie alert's export button reaches the same path as /refresh",
@@ -871,7 +871,8 @@ async def main() -> int:
             if not helper_url:
                 continue
             timings, notes = await _helper_load(helper_url, path=helper_path, count=6)
-            answered = f"{len(timings)}/6 answered in {min(timings):.2f}–{max(timings):.2f}s"
+            span = f"{min(timings):.2f}–{max(timings):.2f}s" if timings else "no answers"
+            answered = f"{len(timings)}/6 answered in {span}"
             check(
                 f"{label} survives concurrent requests",
                 len(timings) == 6 and max(timings) < HELPER_LOAD_BUDGET_S,

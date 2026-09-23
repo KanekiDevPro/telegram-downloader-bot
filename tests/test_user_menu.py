@@ -37,6 +37,7 @@ from handlers import user as user_module
 from handlers.user import DownloadStates
 from services import content as content_module
 from services import subscription as subscription_module
+from services.extractor import MediaInfo, VideoOption
 
 USER_ID = 4242
 FA = "fa"
@@ -85,11 +86,19 @@ class RecordingBot:
         ]
 
 
-def _message(text: str, bot: RecordingBot, user_id: int = USER_ID) -> Message:
+def _message(
+    text: str,
+    bot: RecordingBot,
+    user_id: int = USER_ID,
+    chat_type: str = "private",
+) -> Message:
     return Message(
         message_id=1,
         date=datetime.now(timezone.utc),
-        chat=Chat(id=user_id, type="private"),
+        chat=Chat(
+            id=user_id if chat_type == "private" else -100123,
+            type=cast(Any, chat_type),
+        ),
         from_user=User(id=user_id, is_bot=False, first_name="user"),
         text=text,
     ).as_(cast(Bot, bot))
@@ -161,6 +170,14 @@ def _fake_queue(depth: int = 0) -> Any:
 
 
 @pytest.fixture(autouse=True)
+def _clean_tap_guard() -> Any:
+    """Each test starts without the duplicate-tap memory (it is module state)."""
+    user_module._recent_requests.clear()
+    yield
+    user_module._recent_requests.clear()
+
+
+@pytest.fixture(autouse=True)
 def _quiet_cost(monkeypatch: pytest.MonkeyPatch) -> None:
     """Quota reads: three downloads used today, clean settings, no plans.
 
@@ -198,25 +215,23 @@ def _no_database(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, str]]:
 # ---------------------------------------------------------------------------
 
 
-def test_the_home_screen_offers_the_three_hubs() -> None:
+def test_the_home_screen_offers_the_two_hubs() -> None:
     markup = user_module._main_menu(FA)
 
     assert dict(_buttons(markup)) == {
         "⬇️ دانلود": "menu:download",
         "👤 پروفایل من": "menu:profile",
-        "❓ راهنما": "menu:help",
     }
     # Download first and alone: it is why most people came. The account actions
-    # (VIP, Language) moved under Profile — a home carrying every action is a
-    # wall of buttons.
-    assert [len(row) for row in markup.inline_keyboard] == [1, 2]
+    # (VIP, Language, Support) live under Profile — home is two destinations and
+    # nothing more.
+    assert [len(row) for row in markup.inline_keyboard] == [1, 1]
 
 
 def test_the_menu_speaks_the_language_it_is_drawn_in() -> None:
     assert dict(_buttons(user_module._main_menu(EN))) == {
         "⬇️ Download": "menu:download",
         "👤 My profile": "menu:profile",
-        "❓ Help": "menu:help",
     }
 
 
@@ -235,9 +250,9 @@ def test_the_menu_hides_the_vip_button_from_an_admin() -> None:
     assert dict(_buttons(markup)) == {
         "⬇️ دانلود": "menu:download",
         "👤 پروفایل من": "menu:profile",
-        "❓ راهنما": "menu:help",
         "🛠 پنل مدیریت": "menu:admin",
     }
+    assert [len(row) for row in markup.inline_keyboard] == [1, 2]
 
 
 def test_an_admins_profile_does_not_offer_the_store_either() -> None:
@@ -248,6 +263,7 @@ def test_an_admins_profile_does_not_offer_the_store_either() -> None:
     assert dict(_buttons(user_module._profile_keyboard(FA))) == {
         "🌐 زبان": "profile:language",
         "💎 ارتقا به ویژه (VIP)": "menu:premium",
+        "💬 پشتیبانی": "menu:support",
         "⬅️ بازگشت": "menu:home",
     }
 
@@ -257,13 +273,13 @@ def test_only_an_admin_is_offered_the_panel() -> None:
     assert "menu:admin" in dict(_buttons(user_module._main_menu(EN, admin=True))).values()
 
 
-def test_the_support_button_lives_under_help_and_home_stays_clean() -> None:
-    """Home is three destinations and nothing more; the support contact is Help's
-    business — its entry point is always there, and its *screen* is the one that
-    honestly says whether anybody has configured a contact yet."""
+def test_the_support_button_lives_under_profile_and_home_stays_clean() -> None:
+    """Home is two destinations and nothing more; the support contact is
+    Profile's business — who to ask is an account concern, and its *screen* is
+    the one that honestly says whether anybody configured a contact yet."""
     assert "menu:support" not in dict(_buttons(user_module._main_menu(FA))).values()
 
-    markup = user_module._help_keyboard(FA)
+    markup = user_module._profile_keyboard(FA)
 
     assert dict(_buttons(markup))["💬 پشتیبانی"] == "menu:support"
 
@@ -353,8 +369,10 @@ def test_a_record_that_carries_no_language_is_a_first_contact_too() -> None:
 def test_every_screen_has_a_way_back() -> None:
     assert ("⬅️ بازگشت", "menu:home") in _buttons(user_module._back_to_menu(FA))
     assert ("⬅️ Back", "menu:home") in _buttons(user_module._back_to_menu(EN))
-    # A help page goes back to the hub it came from, not two levels up.
-    assert ("⬅️ Back", "menu:help") in _buttons(user_module._back_to_menu(EN, to="menu:help"))
+    # A screen goes back to the parent it came from, not two levels up.
+    assert ("⬅️ Back", "menu:profile") in _buttons(
+        user_module._back_to_menu(EN, to="menu:profile")
+    )
 
 
 async def test_back_returns_to_the_menu_in_the_same_message() -> None:
@@ -512,6 +530,7 @@ async def test_the_profile_shows_id_username_status_and_quota() -> None:
     assert dict(_buttons(bot.keyboards[-1])) == {
         "🌐 زبان": "profile:language",
         "💎 ارتقا به ویژه (VIP)": "menu:premium",
+        "💬 پشتیبانی": "menu:support",
         "⬅️ بازگشت": "menu:home",
     }
 
@@ -652,63 +671,8 @@ def test_the_plan_button_names_the_currency_in_the_readers_language() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Help
+# Menu wiring
 # ---------------------------------------------------------------------------
-
-
-async def test_help_is_a_hub_of_short_pages() -> None:
-    bot = RecordingBot()
-    message = _message("/help", bot)
-
-    await user_module.cmd_help(message, lang=FA)
-
-    text = bot.texts[0]
-    assert "راهنما" in text
-    assert "لینک رو بفرست" not in text, "the wall of text is one tap away, not in the hub"
-    assert dict(_buttons(bot.keyboards[-1])) == {
-        "📥 چطور دانلود کنم": "help:how",
-        "🎵 صدا": "help:audio",
-        "🎬 ویدیو": "help:video",
-        "📱 سرویس‌های پشتیبانی‌شده": "help:platforms",
-        "🛠 مشکلات رایج": "help:problems",
-        "💬 پشتیبانی": "menu:support",
-        "⬅️ بازگشت": "menu:home",
-    }
-
-
-async def test_the_how_it_works_page_explains_the_flow_and_lists_the_commands() -> None:
-    bot = RecordingBot()
-    cb = _callback(bot, "help:how")
-
-    await user_module.on_help_page(cb, lang=FA)
-
-    text = bot.edits[0]
-    assert "لینک رو بفرست" in text
-    assert "MP3" in text
-    for command in ("/profile", "/premium", "/status", "/language", "/cancel", "/start"):
-        assert command in text, command
-    assert len(bot.answers) == 1
-
-
-async def test_a_help_page_goes_back_to_the_hub() -> None:
-    bot = RecordingBot()
-    cb = _callback(bot, "help:platforms")
-
-    await user_module.on_help_page(cb, lang=EN)
-
-    assert "Supported platforms" in bot.edits[0]
-    assert ("⬅️ Back", "menu:help") in _buttons(bot.keyboards[-1])
-    assert bot.texts == [], "a page is the same message edited"
-
-
-async def test_the_help_button_edits_the_menu_into_the_help() -> None:
-    bot = RecordingBot()
-    cb = _callback(bot, "menu:help")
-
-    await user_module.on_menu_help(cb, lang=FA)
-
-    assert "راهنما" in bot.edits[0]
-    assert len(bot.answers) == 1
 
 
 def test_no_menu_button_is_left_without_a_handler() -> None:
@@ -716,28 +680,32 @@ def test_no_menu_button_is_left_without_a_handler() -> None:
     is worse than no button at all).
 
     ``menu:admin`` is answered by the *admin* router — keeping it out of the user
-    module is deliberate separation, not a gap. The three help pages share one
-    handler and every ``lang:`` tap another, so those are matched by pattern.
+    module is deliberate separation, not a gap. Every ``lang:`` tap shares one
+    handler, so those are matched by pattern. A URL button («add to a group») has
+    no callback to route and goes with the empty ones.
     """
     from handlers import admin as admin_module
+    from services import delivery
 
     source = inspect.getsource(user_module) + inspect.getsource(admin_module)
     offered = {data for _, data in _buttons(user_module._main_menu(FA, admin=True))}
     offered |= {data for _, data in _buttons(user_module._back_to_menu(FA))}
     offered |= {data for _, data in _buttons(user_module._profile_keyboard(FA))}
-    offered |= {data for _, data in _buttons(user_module._help_keyboard(FA))}
     offered |= {data for _, data in _buttons(user_module._language_keyboard(FA))}
+    delivery.set_bot_username("AnimStoreV2ray_bot")
+    try:
+        offered |= {data for _, data in _buttons(user_module._download_keyboard(FA))}
+    finally:
+        delivery.set_bot_username("")
 
     def has_handler(data: str) -> bool:
         if f'F.data == "{data}"' in source:
             return True
-        if data.startswith("help:"):
-            return "F.data.in_(set(_HELP_PAGES))" in source and data in user_module._HELP_PAGES
         if data.startswith("lang:"):
             return "F.data.startswith(LANG_PREFIX)" in source
         return False
 
-    missing = [data for data in sorted(offered) if not has_handler(data)]
+    missing = [data for data in sorted(offered) if data and not has_handler(data)]
     assert missing == [], missing
 
 
@@ -788,7 +756,7 @@ def test_a_music_link_is_offered_audio_formats_and_no_video_tier() -> None:
     ``m4a`` = untouched stream) — a rename here would orphan every cached file."""
     routing = content_module.routing_for("https://soundcloud.com/a/b")
 
-    assert routing.audio_formats == ("mp3", "m4a", "opus", "wav")
+    assert routing.audio_formats == ("mp3", "m4a", "flac", "opus", "wav")
     assert [choice.quality for choice in routing.choices] == [
         "mp3.best",
         "mp3.high",
@@ -802,6 +770,7 @@ def test_a_music_link_is_offered_audio_formats_and_no_video_tier() -> None:
         "opus.high",
         "opus.balanced",
         "opus.small",
+        "flac",
         "wav",
     ]
     assert all(choice.media_format == "audio" for choice in routing.choices)
@@ -824,8 +793,8 @@ def test_an_ambiguous_post_is_offered_media_and_audio() -> None:
 
     assert routing.media_choice is not None
     assert routing.media_choice.label_key == "fmt.media"
-    assert routing.audio_formats == ("mp3", "m4a", "opus", "wav")
-    assert len(routing.choices) == 14, "the post's own media plus every audio tier"
+    assert routing.audio_formats == ("mp3", "m4a", "flac", "opus", "wav")
+    assert len(routing.choices) == 15, "the post's own media plus every audio tier"
 
 
 async def test_the_question_matches_the_link(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -847,14 +816,21 @@ async def test_the_question_matches_the_link(monkeypatch: pytest.MonkeyPatch) ->
         queue=_fake_queue(),
     )
 
-    assert t("intake.choose_audio", FA) in bot.edits[-1]
+    assert t("intake.choose_audio", FA) in bot.screens[-1]
     # The question is the *format* grid — the quality presets are one tap deeper.
     assert ("🎧 MP3", "audf:mp3") in _buttons(bot.keyboards[-1])
+    assert ("🎧 FLAC", "fmt:audio:flac") in _buttons(bot.keyboards[-1]), (
+        "lossless has no quality knob and submits from here"
+    )
     assert ("🎧 WAV", "fmt:audio:wav") in _buttons(bot.keyboards[-1]), (
         "wav has no quality knob and submits from here"
     )
-    # Two per row, with the way back on its own: the formats pair up naturally.
-    assert [len(row) for row in bot.keyboards[-1].inline_keyboard] == [2, 2, 1]
+    # Two per row, the way back filling the last one: the formats pair up.
+    assert [len(row) for row in bot.keyboards[-1].inline_keyboard] == [2, 2, 2]
+    # One message: the media card on top, the question under it.
+    assert len(bot.screens) == 1
+    assert bot.screens[0].splitlines()[0].startswith("🔗 https://open.spotify.com")
+    assert "🎞" not in bot.screens[0], "nothing is chosen yet — the 🎞 line waits for a choice"
 
 
 def test_a_photo_post_is_offered_nothing_else() -> None:
@@ -879,6 +855,101 @@ def test_a_video_or_music_link_is_never_answered_without_asking() -> None:
         "https://x.com/user/status/12345",  # ambiguous: could be anything
     ):
         assert content_module.routing_for(url).solo is None, url
+
+
+# ---------------------------------------------------------------------------
+# Audio presets: bitrates, not moods
+# ---------------------------------------------------------------------------
+
+
+def test_the_audio_presets_are_bitrates_not_moods() -> None:
+    labels = [label for label, _ in user_module._level_rows("mp3", EN)]
+
+    assert labels == ["💎 320 kbps", "🔥 256 kbps", "⚖️ 192 kbps", "📦 128 kbps"]
+
+
+def test_a_preset_row_estimates_the_size_from_the_links_own_length() -> None:
+    rows = [label for label, _ in user_module._level_rows("mp3", EN, duration=150)]
+
+    for label in rows:
+        assert " · ~" in label and "MB" in label, label
+    # The estimate follows the rate: the biggest preset weighs the most.
+    sizes = [float(label.rsplit("~", 1)[1].split()[0]) for label in rows]
+    assert sizes == sorted(sizes, reverse=True)
+    # No length, no arithmetic — the row shows the rate alone.
+    assert all("·" not in label for label, _ in user_module._level_rows("mp3", EN))
+
+
+def test_an_untouched_stream_says_so_instead_of_borrowing_a_bitrate() -> None:
+    labels = [label for label, _ in user_module._level_rows("m4a", FA)]
+
+    assert labels[0] == "💎 کیفیت اصلی · بدون تبدیل"
+    assert labels[1].startswith("🔥 256 kbps")
+    assert all("kbps" in label for label in labels[1:])
+
+
+def test_a_raw_or_lossless_format_gets_no_fake_quality_screen() -> None:
+    assert user_module._level_rows("wav", EN) == []
+    assert user_module._level_rows("flac", EN) == []
+
+
+# ---------------------------------------------------------------------------
+# The download screen and groups
+# ---------------------------------------------------------------------------
+
+
+def test_the_download_screen_offers_the_group_flow_once_the_bot_is_named() -> None:
+    from services import delivery
+
+    delivery.set_bot_username("AnimStoreV2ray_bot")
+    try:
+        markup = user_module._download_keyboard(EN)
+    finally:
+        delivery.set_bot_username("")
+
+    buttons = [button for row in markup.inline_keyboard for button in row]
+    assert any(
+        button.url == "https://t.me/AnimStoreV2ray_bot?startgroup=true"
+        for button in buttons
+    ), "Telegram's own group picker, via the bot's real address"
+    assert ("⬅️ Back", "menu:home") in _buttons(markup)
+
+
+def test_no_group_button_before_the_bot_knows_its_own_name() -> None:
+    buttons = [
+        button
+        for row in user_module._download_keyboard(FA).inline_keyboard
+        for button in row
+    ]
+    assert all(button.url is None for button in buttons)
+
+
+async def test_a_group_message_without_a_link_is_not_answered() -> None:
+    """Groups are link-driven: no link in the message, no message from the bot."""
+    bot = RecordingBot()
+    message = _message("سلام بچه‌ها خوبید؟", bot, chat_type="supergroup")
+
+    await user_module.on_text_with_url(
+        message, await _state(), _user(), object(), _fake_queue(), bot, lang=FA
+    )
+
+    assert bot.texts == [] and bot.edits == []
+
+
+async def test_a_group_message_with_a_link_gets_the_same_question() -> None:
+    bot = RecordingBot()
+    message = _message(
+        "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+        bot,
+        chat_type="supergroup",
+    )
+
+    await user_module.on_text_with_url(
+        message, await _state(), _user(), object(), _fake_queue(), bot, lang=FA
+    )
+
+    assert t("intake.choose_audio", FA) in bot.screens[-1]
+    assert ("🎧 MP3", "audf:mp3") in _buttons(bot.keyboards[-1])
 
 
 async def test_a_photo_post_is_downloaded_without_a_format_question(
@@ -910,12 +981,17 @@ async def test_a_photo_post_is_downloaded_without_a_format_question(
         queue=queue,
     )
 
-    assert bot.texts[0] == t("intake.analyse", FA)
-    assert t("intake.photo_auto", FA) in bot.edits
-    assert "موقعیت تقریبی: 2" in bot.edits[-1], "and it is already in the queue"
-    assert t("intake.choose_media", FA) not in " ".join(bot.edits), "nothing was asked"
-    assert bot.keyboards == [], "and there is nothing to tap"
+    # TAP → WAIT → VIDEO, even here: one card message and the file — no
+    # "analysing", no "downloading now", no queue receipt.
+    assert len(bot.texts) == 1 and bot.texts[0].startswith("🔗 https://www.instagram.com")
+    assert "🖼" not in " ".join(bot.screens)
+    assert "موقعیت" not in " ".join(bot.screens), "the queue position is machinery"
+    assert t("intake.choose_media", FA) not in " ".join(bot.screens), "nothing was asked"
+    assert [row for kb in bot.keyboards for row in kb.inline_keyboard] == [], (
+        "and there is nothing to tap"
+    )
     assert [task.media_format for task in queue.tasks] == ["video"]
+    assert queue.tasks[0].status_message_id == 1, "the card is the message the job narrates in"
     assert await state.get_state() is None, "a answered link leaves no pending step"
 
 
@@ -939,7 +1015,11 @@ def _fresh_state() -> FSMContext:
     )
 
 
-async def test_a_link_is_acknowledged_before_anything_else(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_the_question_is_the_first_and_only_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No "Analysing the link…" before it: the question *is* the acknowledgement —
+    one message carrying the card and the choice."""
     async def supported(url: str) -> bool:
         return True
 
@@ -958,9 +1038,15 @@ async def test_a_link_is_acknowledged_before_anything_else(monkeypatch: pytest.M
         queue=_fake_queue(),
     )
 
-    assert bot.texts[0] == t("intake.analyse", FA), "said first, before the probe"
-    assert t("intake.choose_quality", FA) in bot.edits[-1], "and the same message becomes the question"
+    assert len(bot.screens) == 1, "one message, not two"
+    assert bot.texts[0].startswith("🔗 https://youtu.be/abc")
+    assert t("intake.choose_quality", FA) in bot.texts[0]
+    # A probe that answers nothing (this bot double has no extractor at all)
+    # falls back to the tier menu — the flow never blocks on metadata.
     assert ("🎬 بهترین کیفیت موجود", "fmt:video:best") in _buttons(bot.keyboards[-1])
+    back_label, back_data = _buttons(bot.keyboards[-1])[-1]
+    assert back_data == "menu:download", "the question's parent is the Download screen"
+    assert back_label.startswith("⬅️"), "and says so the way every back button does"
 
 
 async def test_a_file_link_is_never_handed_to_the_extractor_probe(
@@ -999,9 +1085,11 @@ async def test_a_file_link_is_never_handed_to_the_extractor_probe(
     )
 
     assert asked == [], "the router already knew, so nothing was asked"
-    assert t("intake.photo_auto", FA) in bot.edits
     assert [task.media_format for task in queue.tasks] == ["video"]
-    assert bot.keyboards == [], "and no format menu was drawn for it"
+    assert [row for kb in bot.keyboards for row in kb.inline_keyboard] == [], (
+        "and no format menu was drawn for it"
+    )
+    assert "🖼" not in " ".join(bot.screens), "and nothing narrated over the file"
 
 
 async def test_a_page_link_is_still_put_to_the_extractor_probe(
@@ -1029,7 +1117,7 @@ async def test_a_page_link_is_still_put_to_the_extractor_probe(
     )
 
     assert asked == ["https://example.com/x"]
-    assert "پشتیبانی نمی‌شود" in bot.edits[-1]
+    assert "پشتیبانی نمی‌شود" in bot.texts[-1]
 
 
 async def test_an_unsupported_link_answers_in_the_same_message(
@@ -1053,13 +1141,16 @@ async def test_an_unsupported_link_answers_in_the_same_message(
         queue=_fake_queue(),
     )
 
-    assert bot.texts == [t("intake.analyse", FA)]
-    assert "پشتیبانی نمی‌شود" in bot.edits[-1]
+    assert len(bot.texts) == 1, "the answer is the one message"
+    assert "پشتیبانی نمی‌شود" in bot.texts[0]
 
 
-async def test_choosing_a_format_shows_the_queueing_step_immediately(
+async def test_a_tap_is_acknowledged_silently_and_the_card_takes_over(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """TAP → WAIT → VIDEO. The callback is answered with silence, the keyboard
+    dies on the spot, and not one status message is sent — the card that carried
+    the question becomes the job's card."""
     async def no_cache(pool: Any, url: str, *args: Any) -> None:
         return None
 
@@ -1068,19 +1159,26 @@ async def test_choosing_a_format_shows_the_queueing_step_immediately(
     bot = RecordingBot()
     cb = _callback(bot, "fmt:video:720")
     queue = FakeQueue(depth=1)
+    state = await _state()
+    await state.update_data(title="A Clip")
 
     await user_module.on_format_chosen(
-        cb, await _state(), _user(), object(), queue, bot, lang=FA
+        cb, state, _user(), object(), queue, bot, lang=FA
     )
 
-    assert bot.texts[0] == t("intake.queueing", FA), "the tap is acknowledged instantly"
-    assert "موقعیت تقریبی: 1" in bot.edits[-1]
-    assert len(bot.answers) == 1 and bot.answers[0].text is None
+    assert len(bot.answers) == 1 and bot.answers[0].text is None, "acknowledged silently"
+    assert bot.texts == [], "no 'please wait', no queue receipt"
+    # The keyboard is gone — the choice is made, the screen is now the card.
+    assert [row for kb in bot.keyboards for row in kb.inline_keyboard] == []
+    assert bot.edits[-1].splitlines()[0] == "🎬 A Clip"
+    assert "🎞 720p" in bot.edits[-1], "the card names the choice"
     assert len(queue.tasks) == 1
     task = queue.tasks[0]
     assert task.media_format == "video"
     assert task.quality == "720", "the tier the user picked reaches the worker"
     assert task.lang == FA, "and so does the language the worker will answer in"
+    assert task.title == "A Clip", "the probed title rides along for the worker's card"
+    assert task.status_message_id == 1, "the worker narrates in this very message"
 
 
 async def test_a_tier_that_was_never_offered_is_not_queued(
@@ -1123,7 +1221,9 @@ async def test_an_exhausted_quota_is_answered_with_an_alert_and_a_message(
     )
 
     assert "سهمیهٔ دانلود امروزت (10 از 10) تمام شده" in bot.edits[-1]
-    assert len(bot.answers) == 1 and bot.answers[0].show_alert is True
+    assert len(bot.answers) == 1 and bot.answers[0].text is None, (
+        "acknowledged silently — the card carries the news, no alert over it"
+    )
 
 
 async def test_a_cache_hit_replays_the_file_and_says_so(
@@ -1133,7 +1233,13 @@ async def test_a_cache_hit_replays_the_file_and_says_so(
 
     async def cached(pool: Any, url: str, media_format: str = "", quality: str = "") -> Any:
         sent.append((media_format, quality))
-        return {"url_hash": "x", "telegram_file_id": "AgAC", "kind": "video"}
+        return {
+            "url_hash": "x",
+            "telegram_file_id": "AgAC",
+            "kind": "video",
+            "quality": "audio:m4a",
+            "original_url": "https://soundcloud.com/a/b",
+        }
 
     async def send_cached_file(bot: Any, chat_id: int, row: Any, caption: str = "", **kw: Any) -> bool:
         sent.append(caption)
@@ -1149,8 +1255,14 @@ async def test_a_cache_hit_replays_the_file_and_says_so(
     )
 
     assert sent[0] == ("audio", "m4a"), "the lookup is for this exact tier"
-    assert sent[1] == t("work.cache_caption", FA), "and the replay is captioned in the user's language"
-    assert "حافظهٔ کش" in bot.edits[-1]
+    assert "M4A" in sent[1], "and the replay wears the same media card as a fresh send"
+    assert "https://soundcloud.com/a/b" in sent[1], "including the link the user sent"
+    assert "حافظه" not in " ".join(bot.screens), (
+        "whether the bot has seen the link before is not the chat's business"
+    )
+    assert [row for kb in bot.keyboards for row in kb.inline_keyboard] == [], (
+        "the keyboard is gone all the same"
+    )
 
 
 class _NoRefusal:
@@ -1200,11 +1312,303 @@ def test_every_registered_callback_answers() -> None:
     assert missing == [], missing
 
 
+# ---------------------------------------------------------------------------
+# The quality menu the probe draws — and the taps it may answer
+# ---------------------------------------------------------------------------
+
+
+class _FakeExtractor:
+    """Answers the metadata probe with one canned :class:`MediaInfo`."""
+
+    def __init__(self, info: MediaInfo) -> None:
+        self.info = info
+        self.urls: list[str] = []
+
+    async def extract(self, url: str) -> MediaInfo:
+        self.urls.append(url)
+        return self.info
+
+
+def _probed_bot(
+    options: tuple[VideoOption, ...], *, title: str = "A Clip"
+) -> RecordingBot:
+    """A recording bot whose extractor knows one link's real resolutions."""
+    from types import SimpleNamespace
+
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(  # type: ignore[attr-defined]
+        extractor=_FakeExtractor(
+            MediaInfo(
+                source_url="https://youtu.be/abc",
+                title=title,
+                platform="youtube",
+                webpage_url="https://youtu.be/abc",
+                extension="mp4",
+                thumbnail=None,
+                duration=95,
+                filesize_approx=1,
+                is_live=False,
+                video_options=options,
+            )
+        )
+    )
+    return bot
+
+
+async def test_the_quality_menu_shows_what_the_link_actually_has(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sizes second, quality first — and never a size the site did not report.
+
+    The extractor's list arrives unsorted and is sorted here: 1080p, 720p, 360p.
+    An estimated size wears its ``~``; an exact one does not; a missing one is
+    *omitted* rather than invented.
+    """
+
+    async def supported(url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(user_module, "_probe_supported", supported)
+    bot = _probed_bot(
+        (
+            VideoOption(360, 900 * 1024, True),
+            VideoOption(1080, 14 * 1024 * 1024, False),
+            VideoOption(720, 8 * 1024 * 1024, True),
+            VideoOption(240),  # the site said nothing about its size
+        )
+    )
+
+    await user_module._queue_url_flow(
+        _message("https://youtu.be/abc", bot),
+        _fresh_state(),
+        _user(),
+        "https://youtu.be/abc",
+        FA,
+        bot=cast(Bot, bot),
+        pool=object(),
+        queue=_fake_queue(),
+    )
+
+    rows = _buttons(bot.keyboards[-1])
+    assert [data for _, data in rows] == [
+        "fmt:video:1080",
+        "fmt:video:720",
+        "fmt:video:360",
+        "fmt:video:240",
+        "menu:download",
+    ], "the ladder, best first — whatever order the extractor said"
+    assert rows[0] == ("⭐ 1080p · ~14 MB", "fmt:video:1080"), (
+        "the recommended one is starred, and an estimate says ~"
+    )
+    assert rows[1] == ("🔥 720p · 8 MB", "fmt:video:720"), (
+        "the runner-up burns; an exact size wears no ~"
+    )
+    assert rows[3] == ("🎬 240p", "fmt:video:240"), (
+        "a size the site never reported is omitted, not invented"
+    )
+    assert [len(row) for row in bot.keyboards[-1].inline_keyboard] == [1] * 5, (
+        "one per row: quality is the headline, the size is secondary"
+    )
+    card_lines = bot.texts[0].splitlines()[:2]
+    assert card_lines == ["🎬 A Clip", "🔗 https://youtu.be/abc"], (
+        "the card names the media and its origin — and claims no quality yet: "
+        "those two lines are all of it before the question line"
+    )
+
+
+async def test_the_chosen_card_shows_the_size_the_menu_promised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the tap, the card says quality • size — the same estimate the menu
+    showed (its ``~`` included), before the file exists to say the real one."""
+
+    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
+    monkeypatch.setattr(user_module, "preflight", _NoRefusal())
+    bot = RecordingBot()
+    state = await _state()
+    await state.update_data(
+        title="A Clip",
+        offered=["720"],
+        options=[(720, 720, 8 * 1024 * 1024, False)],
+    )
+
+    await user_module.on_format_chosen(
+        _callback(bot, "fmt:video:720"), state, _user(), object(), FakeQueue(), bot, lang=FA
+    )
+
+    assert "🎞 720p • ~8.0 MB" in bot.edits[-1], (
+        "quality and the promised size together, still an estimate"
+    )
+
+
+async def test_a_size_the_site_never_reported_stays_off_the_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+
+    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
+    monkeypatch.setattr(user_module, "preflight", _NoRefusal())
+    bot = RecordingBot()
+    state = await _state()
+    await state.update_data(offered=["720"], options=[(720, 720, 0, False)])
+
+    await user_module.on_format_chosen(
+        _callback(bot, "fmt:video:720"), state, _user(), object(), FakeQueue(), bot, lang=FA
+    )
+
+    assert "🎞 720p" in bot.edits[-1] and "MB" not in bot.edits[-1]
+
+
+async def test_a_tap_may_choose_only_what_the_menu_offered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crafted height is data: the offered list on the FSM decides."""
+
+    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
+    monkeypatch.setattr(user_module, "preflight", _NoRefusal())
+    bot = RecordingBot()
+    queue = FakeQueue()
+    state = await _state()
+    await state.update_data(offered=["1080", "720"], title="A Clip")
+
+    await user_module.on_format_chosen(
+        _callback(bot, "fmt:video:2160"), state, _user(), object(), queue, bot, lang=FA
+    )
+
+    assert queue.tasks == [], "nothing is queued"
+    assert bot.answers[0].show_alert is True, "and the tap is answered honestly"
+
+    await user_module.on_format_chosen(
+        _callback(bot, "fmt:video:720"), state, _user(), object(), queue, bot, lang=FA
+    )
+
+    assert [task.quality for task in queue.tasks] == ["720"], (
+        "the resolution the menu really showed runs exactly"
+    )
+
+
+async def test_the_same_tap_twice_is_one_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Duplicate-click protection, server-side: the keyboard dies on the first
+    tap, and a second callback for the same request is acknowledged quietly and
+    never reaches the queue."""
+
+    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
+    monkeypatch.setattr(user_module, "preflight", _NoRefusal())
+    bot = RecordingBot()
+    queue = FakeQueue()
+    state = await _state()
+    await state.update_data(offered=["720"])
+
+    await user_module.on_format_chosen(
+        _callback(bot, "fmt:video:720"), state, _user(), object(), queue, bot, lang=FA
+    )
+    # The second tap lands where the router sends a tap on a consumed menu.
+    await user_module.on_stale_media_tap(
+        _callback(bot, "fmt:video:720"), _user(), lang=FA
+    )
+
+    assert len(queue.tasks) == 1, "one tap, one download"
+    assert bot.answers[-1].text is None, "the repeat is swallowed, not nagged"
+
+
+async def test_a_tap_on_a_dead_menu_is_answered_not_run() -> None:
+    """An old menu (or a forwarded one) still must not leave a spinner."""
+    bot = RecordingBot()
+
+    await user_module.on_stale_media_tap(_callback(bot, "fmt:video:720"), _user(), lang=FA)
+
+    assert bot.answers[0].show_alert is True
+
+
+async def test_a_failed_download_offers_a_retry_only_its_owner_can_press(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure lands on the card with [🔄][⬅️]. What a retry re-runs lives
+    behind a server-side key — a stranger's tap cannot even spend it."""
+    from services.queue import DownloadTask
+    from services.worker import _notify_failure
+
+    class _Status:
+        def __init__(self) -> None:
+            self.text = ""
+            self.markup: Any = None
+
+        async def edit_text(self, text: str, **kwargs: Any) -> None:
+            self.text = text
+            self.markup = kwargs.get("reply_markup")
+
+    status = _Status()
+    task = DownloadTask(
+        url="https://youtu.be/abc",
+        telegram_id=USER_ID,
+        chat_id=USER_ID,
+        media_format="video",
+        quality="720",
+        lang=FA,
+        title="A Clip",
+        status_message_id=1,
+    )
+    await _notify_failure(
+        cast(Bot, RecordingBot()), task, "boom", status=status, card="🎬 A Clip"
+    )
+
+    assert status.text.startswith("🎬 A Clip\n\n"), "the card stays — it names the link"
+    assert t("work.failed", FA, error="boom") in status.text
+    buttons = [b for row in status.markup.inline_keyboard for b in row]
+    assert [b.callback_data for b in buttons] == [buttons[0].callback_data, "menu:download"], (
+        "[🔄 retry] [⬅️ to the Download screen]"
+    )
+    retry_data = buttons[0].callback_data
+
+    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
+    monkeypatch.setattr(user_module, "preflight", _NoRefusal())
+
+    # A stranger's tap: refused, and the key is left where it was.
+    stranger = dict(_user())
+    stranger["telegram_id"] = USER_ID + 1
+    bot = RecordingBot()
+    queue = FakeQueue()
+    await user_module.on_retry(
+        _callback(bot, retry_data), stranger, object(), queue, bot, lang=FA
+    )
+    assert queue.tasks == []
+    assert bot.answers[0].show_alert is True
+
+    # The owner's tap: the same job runs again, into the same card message.
+    await user_module.on_retry(
+        _callback(bot, retry_data), _user(), object(), queue, bot, lang=FA
+    )
+    assert [(item.quality, item.status_message_id) for item in queue.tasks] == [("720", 1)]
+
+    # The key is spent — a second press finds nothing to run.
+    bot2 = RecordingBot()
+    await user_module.on_retry(
+        _callback(bot2, retry_data), _user(), object(), FakeQueue(), bot2, lang=FA
+    )
+    assert bot2.answers[0].show_alert is True
+
+
 def test_the_home_screen_is_navigation_only() -> None:
     """Home is a hub: account actions live under the screen that owns them (and
-    the support contact under Help), and the endpoints that were removed for good
-    (`menu:status`, `menu:subscribe`) must not come back — a button is a promise,
-    and every promise needs a handler that keeps it."""
+    the support contact under Profile), and the endpoints that were removed for
+    good (`menu:status`, `menu:subscribe`, `menu:help`) must not come back — a
+    button is a promise, and every promise needs a handler that keeps it."""
     offered = {
         data for _, data in _buttons(user_module._main_menu(FA, admin=True))
     }
@@ -1212,32 +1616,33 @@ def test_the_home_screen_is_navigation_only() -> None:
     assert offered == {
         "menu:download",
         "menu:profile",
-        "menu:help",
         "menu:admin",
     }
-    assert not offered & {"menu:status", "menu:subscribe"}
+    assert not offered & {"menu:status", "menu:subscribe", "menu:help"}
 
 
 def test_the_audio_menu_is_two_taps_deep_and_wav_skips_the_second() -> None:
     """Format first (a .mp3 and a .opus are different promises), then the quality
-    presets. WAV is PCM — its whole menu is the format button itself."""
-    for codec, expected in (("mp3", 4), ("m4a", 4), ("opus", 4), ("wav", 0)):
+    presets. WAV is PCM and FLAC is lossless — their whole menu is the format
+    button itself."""
+    for codec, expected in (("mp3", 4), ("m4a", 4), ("opus", 4), ("flac", 0), ("wav", 0)):
         assert len(content_module.audio_level_choices(codec)) == expected, codec
 
     question = dict(_buttons(user_module._question_keyboard("https://soundcloud.com/a/b", EN)))
     assert question["🎧 MP3"] == "audf:mp3"
     assert question["🎧 M4A"] == "audf:m4a"
     assert question["🎧 OPUS"] == "audf:opus"
+    assert question["🎧 FLAC"] == "fmt:audio:flac"
     assert question["🎧 WAV"] == "fmt:audio:wav"
 
     levels = dict(_buttons(user_module._level_keyboard("mp3", EN)))
     assert levels == {
-        "💎 Best quality": "fmt:audio:mp3.best",
-        "🔥 High quality": "fmt:audio:mp3.high",
-        "⚖️ Balanced": "fmt:audio:mp3",
-        "📦 Small size": "fmt:audio:mp3.small",
+        "💎 320 kbps": "fmt:audio:mp3.best",
+        "🔥 256 kbps": "fmt:audio:mp3.high",
+        "⚖️ 192 kbps": "fmt:audio:mp3",
+        "📦 128 kbps": "fmt:audio:mp3.small",
         "⬅️ Back": "audf:back",
-    }, "plain words on the buttons — bitrates are engine detail"
+    }, "real bitrates on the buttons — the number is the promise"
 
 
 async def test_the_quality_screen_replaces_the_format_screen_and_can_go_back() -> None:
@@ -1282,6 +1687,7 @@ async def test_entering_a_screen_replaces_the_whole_keyboard() -> None:
     assert dict(_buttons(bot.keyboards[-1])) == {
         "🌐 زبان": "profile:language",
         "💎 ارتقا به ویژه (VIP)": "menu:premium",
+        "💬 پشتیبانی": "menu:support",
         "⬅️ بازگشت": "menu:home",
     }
     assert bot.texts == [], "the same message, edited"

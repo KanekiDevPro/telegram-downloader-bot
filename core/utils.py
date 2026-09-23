@@ -6,7 +6,7 @@ import hashlib
 import html
 import re
 from datetime import date, datetime, timezone, tzinfo
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -20,6 +20,8 @@ MediaFormat = Literal["video", "audio"]
 #: "up to 1080p" means on the button. An audio tier names the *container* to
 #: produce and, where the codec has a quality knob, the level on it — the
 #: mapping from tier to real encoder settings lives in ``services/extractor.py``.
+#: ``cast`` in :func:`normalize_quality` accepts any height the ladder allows —
+#: the literal lists the *named* tiers; a probed 2160p option is spelled by number.
 Quality = Literal[
     "best",
     "1080",
@@ -38,24 +40,26 @@ Quality = Literal[
     "opus.balanced",
     "opus.small",
     "wav",
+    "flac",
 ]
 VIDEO_QUALITIES: tuple[Quality, ...] = ("best", "1080", "720", "480")
 
 #: The audio containers this bot can genuinely deliver: the post-processor
 #: really builds each one (``services/extractor.py``), Telegram plays each as
 #: audio, and the fallback engine can be asked for each by name.
-AudioFormat = Literal["mp3", "m4a", "opus", "wav"]
-AUDIO_FORMATS: tuple[AudioFormat, ...] = ("mp3", "m4a", "opus", "wav")
+AudioFormat = Literal["mp3", "m4a", "flac", "opus", "wav"]
+AUDIO_FORMATS: tuple[AudioFormat, ...] = ("mp3", "m4a", "flac", "opus", "wav")
 
-#: The quality presets a format may have, best first. ``wav`` has none on
-#: purpose: it is PCM — there is no bitrate to move, so offering "smaller WAV"
-#: would be a button that cannot do what it says.
+#: The quality presets a format may have, best first. ``wav`` and ``flac`` have
+#: none on purpose: raw and lossless output have no bitrate to move, so offering
+#: "smaller WAV" would be a button that cannot do what it says.
 AudioLevel = Literal["best", "high", "balanced", "small"]
 AUDIO_LEVELS: tuple[AudioLevel, ...] = ("best", "high", "balanced", "small")
 AUDIO_FORMAT_LEVELS: dict[str, tuple[AudioLevel, ...]] = {
     "mp3": AUDIO_LEVELS,
     "m4a": AUDIO_LEVELS,
     "opus": AUDIO_LEVELS,
+    "flac": (),
     "wav": (),
 }
 
@@ -86,11 +90,17 @@ AUDIO_QUALITIES: tuple[Quality, ...] = (
         if (fmt, level) in AUDIO_TIERS
     ),
     "wav",
+    "flac",
 )
 
 #: The same level under the alias a button (or a pre-preset queue payload) may
 #: carry. Canonical names only ever come out of :func:`normalize_quality`.
-_TIER_ALIASES: dict[str, str] = {"mp3.balanced": "mp3", "m4a.best": "m4a", "wav.best": "wav"}
+_TIER_ALIASES: dict[str, str] = {
+    "mp3.balanced": "mp3",
+    "m4a.best": "m4a",
+    "wav.best": "wav",
+    "flac.best": "flac",
+}
 
 #: What a request means when the user did not pick a tier: today's behaviour, and
 #: therefore also the cache key an existing row already owns.
@@ -101,6 +111,21 @@ DEFAULT_AUDIO_QUALITY: Quality = "mp3"
 def default_quality(media_format: str) -> Quality:
     """The tier a request falls back to for that media type."""
     return DEFAULT_AUDIO_QUALITY if media_format == "audio" else DEFAULT_VIDEO_QUALITY
+
+
+def is_video_height(value: object) -> bool:
+    """Whether a tier spells a real video height (``"1080"``, ``"2160"``, …).
+
+    The menu is drawn from what a link *actually* has (see
+    ``services/extractor.video_options``), so a tier can be a height the static
+    table never named. Anything outside the sane ladder is refused — the number
+    on a crafted callback is data, and ``[height<=999999]`` is not a request.
+    """
+    try:
+        height = int(str(value).strip())
+    except (TypeError, ValueError):
+        return False
+    return 144 <= height <= 4320
 
 
 def normalize_quality(value: object, media_format: str = "video") -> Quality:
@@ -117,6 +142,12 @@ def normalize_quality(value: object, media_format: str = "video") -> Quality:
     for candidate in allowed:
         if text == candidate:
             return candidate
+    if media_format == "video" and is_video_height(text):
+        # A height the probe offered and the static table never named. It is a
+        # ceiling like the named ones (``format_selector`` builds ``[height<=N]``
+        # from it), so it keeps its own spelling — collapsing it onto "best" would
+        # merge two different requests into one cache key.
+        return cast(Quality, text)
     return default_quality(media_format)
 
 

@@ -62,6 +62,18 @@ class DownloadTask:
     url_hash: str = ""
     platform: str = ""
     attempts: int = 0
+    #: Two UI facts ride along for the worker's narration: the display title the
+    #: gateway already probed, and the message whose text *is* this job's media
+    #: card. The worker edits that message instead of opening a "processing…"
+    #: one of its own — the tap, the wait and the result stay one screen. ``0``
+    #: means "no card message" (an older payload, a direct call), and the worker
+    #: opens one then.
+    title: str = ""
+    status_message_id: int = 0
+    #: The group's display name when the request came from one (often unknown on
+    #: older payloads — analytics readers must survive the empty string and fall
+    #: back to the chat id).
+    chat_title: str = ""
 
     def to_payload(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)

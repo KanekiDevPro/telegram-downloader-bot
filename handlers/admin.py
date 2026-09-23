@@ -498,6 +498,7 @@ _PANEL_SCREENS: frozenset[str] = frozenset(
         "blocks",
         "trend",
         "failures",
+        "groups",
         "system",
         "settings",
     }
@@ -535,6 +536,7 @@ def _panel_keyboard(lang: str) -> InlineKeyboardMarkup:
     builder.button(text=t("admin.btn_blocks", lang), callback_data="admin:blocks")
     builder.button(text=t("admin.btn_trend", lang), callback_data="admin:trend")
     builder.button(text=t("admin.btn_failures", lang), callback_data="admin:failures")
+    builder.button(text=t("admin.btn_groups", lang), callback_data="admin:groups")
     builder.button(text=t("admin.btn_system", lang), callback_data="admin:system")
     builder.button(text=t("admin.btn_settings", lang), callback_data="admin:settings")
     builder.adjust(2)
@@ -670,6 +672,8 @@ async def panel_screen(
         return Screen(render_trend(trend, headline=headline), _section_keyboard(lang, "trend"))
     if screen == "blocks":
         return Screen(await _failure_report(pool, cobalt, lang), _section_keyboard(lang, "blocks"))
+    if screen == "groups":
+        return Screen(await panel.groups_text(pool, lang), _section_keyboard(lang, "groups"))
     if screen == "failures":
         # The short window on purpose: Trends owns the long view, this screen
         # answers "is it failing *right now*" — and what to do about it.

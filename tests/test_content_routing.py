@@ -92,11 +92,12 @@ def test_music_links_are_offered_audio_formats() -> None:
         "opus.high",
         "opus.balanced",
         "opus.small",
+        "flac",
         "wav",
     ]
     assert all(choice.media_format == "audio" for choice in routing.choices)
     assert routing.header_key == "intake.choose_audio"
-    assert routing.audio_formats == ("mp3", "m4a", "opus", "wav"), "the format grid is step one"
+    assert routing.audio_formats == ("mp3", "m4a", "flac", "opus", "wav"), "the format grid is step one"
     assert routing.media_choice is None
 
 
@@ -113,22 +114,25 @@ def test_an_ambiguous_post_is_offered_media_and_audio() -> None:
 
     assert routing.media_choice is not None
     assert routing.media_choice.label_key == "fmt.media"
-    assert routing.audio_formats == ("mp3", "m4a", "opus", "wav")
-    assert [choice.label_key for choice in routing.choices] == [
-        "fmt.media",
-        "audio.level_best",
-        "audio.level_high",
-        "audio.level_balanced",
-        "audio.level_small",
-        "audio.level_best",
-        "audio.level_high",
-        "audio.level_balanced",
-        "audio.level_small",
-        "audio.level_best",
-        "audio.level_high",
-        "audio.level_balanced",
-        "audio.level_small",
-        "fmt.fmt_wav",
+    assert routing.audio_formats == ("mp3", "m4a", "flac", "opus", "wav")
+    # What may be asked for — the tiers themselves, in menu order (levels render
+    # their real bitrates at drawing time, so the label keys carry no meaning).
+    assert [choice.quality for choice in routing.choices] == [
+        "best",
+        "mp3.best",
+        "mp3.high",
+        "mp3",
+        "mp3.small",
+        "m4a",
+        "m4a.high",
+        "m4a.balanced",
+        "m4a.small",
+        "opus.best",
+        "opus.high",
+        "opus.balanced",
+        "opus.small",
+        "flac",
+        "wav",
     ]
 
 

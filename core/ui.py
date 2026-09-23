@@ -23,10 +23,15 @@ spam the one-message UI exists to avoid, so nothing is sent.
 
 from __future__ import annotations
 
+import secrets
+import time
 from typing import Any, NamedTuple
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from core.i18n import t
 
 
 class Screen(NamedTuple):
@@ -86,3 +91,80 @@ async def edit_quietly(message: Message, text: str, **kwargs: Any) -> None:
         await message.edit_text(text, **kwargs)
     except TelegramBadRequest:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Retry: the one action a failed download offers
+# ---------------------------------------------------------------------------
+
+#: The callback prefix a retry button carries: ``retry:<key>``.
+RETRY_PREFIX = "retry:"
+
+#: How long a retry button keeps working. A failure is worth another try for
+#: about as long as the chat it landed in is on screen — a day is generous
+#: without letting dead payloads pile up.
+RETRY_TTL_S = 24 * 60 * 60
+
+#: Cap on remembered payloads (oldest dropped first): this is a convenience
+#: store behind button taps, not a job history — the queue owns those.
+_RETRY_CAP = 500
+
+#: Callback key → ``(expires at, owner, the payload a retry rebuilds a job from)``.
+_retries: dict[str, tuple[float, int, dict[str, Any]]] = {}
+
+
+def remember_retry(
+    payload: dict[str, Any], *, owner: int, now: float | None = None
+) -> str:
+    """Remember one failed job behind a fresh key; the key travels in the button.
+
+    The payload is server-side state, not callback data: what a retry re-runs is
+    decided here, and a crafted callback can at most name a key that exists. The
+    ``owner`` is whose job it is — nobody else's tap can even spend it.
+    """
+    moment = time.monotonic() if now is None else now
+    for key, (expires, _, _) in list(_retries.items()):
+        if expires <= moment:
+            _retries.pop(key, None)
+    while len(_retries) >= _RETRY_CAP:
+        _retries.pop(next(iter(_retries)))
+    key = secrets.token_urlsafe(9)
+    _retries[key] = (moment + RETRY_TTL_S, owner, dict(payload))
+    return key
+
+
+def take_retry(
+    key: str, *, owner: int | None = None, now: float | None = None
+) -> dict[str, Any] | None:
+    """The payload behind ``key`` — exactly once, and only for its owner.
+
+    A second tap finds nothing (the job already restarted). Somebody else's tap
+    finds nothing *and leaves the key alone*: a crafted callback must not be able
+    to spend a stranger's retry.
+    """
+    moment = time.monotonic() if now is None else now
+    entry = _retries.get(key)
+    if entry is None:
+        return None
+    expires, holder, payload = entry
+    if expires <= moment:
+        _retries.pop(key, None)
+        return None
+    if owner is not None and holder != owner:
+        return None
+    _retries.pop(key, None)
+    return payload
+
+
+def retry_keyboard(key: str, lang: str) -> InlineKeyboardMarkup:
+    """``[🔄 Try again] [⬅️ Back]`` — a failure screen's whole vocabulary.
+
+    Back goes to the Download screen: that is where a retry's alternative lives
+    (another link, or the same one at a different quality), and it is the parent
+    every question in this flow hangs off.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("media.retry", lang), callback_data=f"{RETRY_PREFIX}{key}")
+    builder.button(text=t("menu.back", lang), callback_data="menu:download")
+    builder.adjust(1)  # side by side they wrap on a phone — one action per row
+    return builder.as_markup()

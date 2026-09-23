@@ -90,6 +90,12 @@ CREATE INDEX IF NOT EXISTS ix_smart_cache_platform ON smart_cache (platform);
 -- album, and a schema just for that would be a table for a caption.
 ALTER TABLE smart_cache ADD COLUMN IF NOT EXISTS kind TEXT;
 
+-- The canonical media title, so a cached replay looks exactly like a fresh send
+-- (same 🎬 line). Nullable for the same reason ``kind`` is: rows from before this
+-- column existed simply omit the line — an old cache entry must never lose its
+-- file over a missing caption fact.
+ALTER TABLE smart_cache ADD COLUMN IF NOT EXISTS title TEXT;
+
 -- Every failed download, with the cause we diagnosed. A block has a small set of
 -- meanings (our login, the IP, the site itself, a stale session) and only the
 -- first is fixable from here — so the counts, not the individual rows, are the
@@ -151,6 +157,25 @@ CREATE TABLE IF NOT EXISTS helper_events (
 
 CREATE INDEX IF NOT EXISTS ix_helper_events_created_at ON helper_events (created_at);
 CREATE INDEX IF NOT EXISTS ix_helper_events_helper     ON helper_events (helper);
+
+-- One row per download job that finished in a *group* chat — the admin panel's
+-- group analytics read these. Groups only: a private chat is nobody's analytics,
+-- and nothing about the content (text, media, links beyond their outcome) is
+-- kept — just where, when, whether it worked, and the diagnosed failure code.
+-- No FK on purpose, like block_events: telemetry must survive a chat being left.
+CREATE TABLE IF NOT EXISTS group_downloads (
+    id         BIGSERIAL PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    chat_id    BIGINT NOT NULL,
+    chat_title TEXT NOT NULL DEFAULT '',
+    ok         BOOLEAN NOT NULL,
+    -- The failure's diagnosed code (empty on success): the same vocabulary the
+    -- block digest speaks. Never a trace, never a message.
+    code       TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS ix_group_downloads_created_at ON group_downloads (created_at);
+CREATE INDEX IF NOT EXISTS ix_group_downloads_chat_id    ON group_downloads (chat_id);
 """
 
 # Inserted on first bootstrap; edit freely afterwards in DB (seeding is one-shot).
@@ -442,13 +467,15 @@ async def store_cached_file(
     telegram_file_id: str,
     quality: str,
     kind: str = "",
+    title: str = "",
 ) -> None:
     """Remember an upload. ``quality`` is the requested format (part of the key);
-    ``kind`` is how to send it again (``photo_group``, ``audio``, …)."""
+    ``kind`` is how to send it again (``photo_group``, ``audio``, …); ``title``
+    is the media's own name, so the replay's card reads like the fresh send."""
     await pool.execute(
         """
-        INSERT INTO smart_cache (url_hash, original_url, platform, telegram_file_id, quality, kind)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO smart_cache (url_hash, original_url, platform, telegram_file_id, quality, kind, title)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (url_hash) DO NOTHING
         """,
         url_hash,
@@ -457,11 +484,85 @@ async def store_cached_file(
         telegram_file_id,
         quality,
         kind or None,
+        title or None,
     )
 
 
 async def delete_cached_file(pool: asyncpg.Pool, url_hash: str) -> None:
     await pool.execute("DELETE FROM smart_cache WHERE url_hash = $1", url_hash)
+
+
+# ---------------------------------------------------------------------------
+# group analytics
+# ---------------------------------------------------------------------------
+
+async def record_group_download(
+    pool: asyncpg.Pool, *, chat_id: int, chat_title: str, ok: bool, code: str = ""
+) -> None:
+    """One finished download job in a group chat (the panel's group analytics).
+
+    The caller decides what "finished" means; this only writes the fact. The
+    title is kept as it was known then (often nothing — a group name is not
+    always on the update), which is why readers must survive an empty one.
+    """
+    await pool.execute(
+        "INSERT INTO group_downloads (chat_id, chat_title, ok, code) VALUES ($1, $2, $3, $4)",
+        chat_id,
+        chat_title or "",
+        ok,
+        code or "",
+    )
+
+
+async def group_usage_summary(pool: asyncpg.Pool) -> asyncpg.Record:
+    """Totals over every recorded group download — one aggregate row, no scan."""
+    return await pool.fetchrow(
+        """
+        SELECT count(*)                              AS total,
+               count(*) FILTER (WHERE ok)           AS successes,
+               count(*) FILTER (WHERE NOT ok)       AS failed,
+               count(DISTINCT chat_id)              AS groups,
+               max(created_at)                      AS last_at
+          FROM group_downloads
+        """
+    )
+
+
+async def top_groups(pool: asyncpg.Pool, *, limit: int = 5) -> list[asyncpg.Record]:
+    """The busiest groups: downloads, failures and when they were last seen.
+
+    The name is read as "the most recent one we saw" — a group can be renamed,
+    and inventing a stable name would be worse than showing the id.
+    """
+    return await pool.fetch(
+        """
+        SELECT chat_id,
+               (array_agg(chat_title ORDER BY created_at DESC))[1] AS chat_title,
+               count(*)                          AS total,
+               count(*) FILTER (WHERE NOT ok)    AS failed,
+               max(created_at)                   AS last_at
+          FROM group_downloads
+         GROUP BY chat_id
+         ORDER BY total DESC, max(created_at) DESC
+         LIMIT $1
+        """,
+        limit,
+    )
+
+
+async def group_failure_codes(pool: asyncpg.Pool, *, limit: int = 5) -> list[asyncpg.Record]:
+    """What group downloads die of — codes and counts, nothing else."""
+    return await pool.fetch(
+        """
+        SELECT code, count(*) AS count
+          FROM group_downloads
+         WHERE NOT ok AND code <> ''
+         GROUP BY code
+         ORDER BY count DESC, code
+         LIMIT $1
+        """,
+        limit,
+    )
 
 
 # ---------------------------------------------------------------------------

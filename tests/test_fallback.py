@@ -348,11 +348,15 @@ async def test_a_blocked_extraction_is_served_by_the_fallback(
 
     await _run(env)
 
-    # The user got a file, not an error.
+    # The user got a file, not an error — captioned with the media card.
     assert [upload["kind"] for upload in env.bot.uploads] == ["video"]
     assert "Big Buck Bunny" in env.bot.uploads[0]["caption"]  # title from cobalt's filename
-    assert "youtube" in env.bot.uploads[0]["caption"]
-    assert env.bot.status.last.startswith("✅")
+    assert env.bot.uploads[0]["caption"].startswith("🎬 "), "the card is the caption"
+    assert "🌐" not in env.bot.uploads[0]["caption"], "the card names no platform"
+    # The status ends at rest: the card, no state line, no "done" — the file that
+    # arrived is the confirmation.
+    assert env.bot.status.last.startswith("🔗")
+    assert "⏳" not in env.bot.status.last and "🛠" not in env.bot.status.last
     assert "مسیر جایگزین" in " ".join(env.bot.status.edits)
     # ...and it is cached like any other download (with the *kind*, so a replay
     # knows which Telegram method to use).
@@ -363,6 +367,7 @@ async def test_a_blocked_extraction_is_served_by_the_fallback(
             "telegram_file_id": "file-1",
             "request": "video",
             "kind": "video",
+            "title": "Big Buck Bunny",
         }
     ]
 
@@ -437,6 +442,7 @@ async def test_an_image_post_is_sent_as_a_photo(
             "telegram_file_id": "photo-1",
             "request": "video",
             "kind": "photo",
+            "title": "twitter_123",
         }
     ]
     assert env.blocks == [("IMAGE_ONLY", "site")], "the engine's gap is still on record"
@@ -466,6 +472,7 @@ async def test_a_post_with_several_pictures_arrives_as_one_album(
             "telegram_file_id": join_file_ids(["photo-1", "photo-2"]),
             "request": "video",
             "kind": "photo_group",
+            "title": "twitter_1",
         }
     ]
 
@@ -615,6 +622,7 @@ async def test_a_spotify_link_is_rewritten_before_anything_is_tried(
             "telegram_file_id": "file-1",
             "request": "video",
             "kind": "video",
+            "title": "Never Gonna Give You Up",  # the song, so a replay names it too
         }
     ]
 
@@ -649,7 +657,12 @@ async def test_a_spotify_track_is_delivered_tagged_as_the_song(
     assert upload["thumbnail"] is None
     assert [path.name for path in cover_dirs] == ["job-primary"]
     caption = upload["caption"]
-    assert "Rick Astley" in caption and "3:33" in caption
+    assert caption.startswith("🎵 Never Gonna Give You Up"), (
+        "a song introduces itself as its title"
+    )
+    assert "🎤 Rick Astley" in caption, "the credits get their own line"
+    assert "open.spotify.com" in caption, "the link the user sent, not the mapped video"
+    assert "⏱ 3:33" in caption, "the length, said the way a player says it"
     assert "🌐" not in caption, "a song is not captioned with the site it came from"
     assert env.memorized[0]["request"] == "audio"
 

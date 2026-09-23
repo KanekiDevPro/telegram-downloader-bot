@@ -13,27 +13,33 @@ import shutil
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import asyncpg
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
-from aiogram.types import FSInputFile, InputMediaPhoto
+from aiogram.types import Chat, FSInputFile, InputMediaPhoto, Message
 
 from core import database
 from core.config import get_settings
 from core.i18n import DEFAULT_LANG, error_message, t
+from core.ui import remember_retry, retry_keyboard
 from core.utils import MediaFormat, escape_html, format_size, sanitize_filename, today_local
 from services import cache as cache_service
 from services import cookie_refresh, fallback, preflight, recipients, spotify, telemetry
-from services.cobalt import CobaltError, CobaltService
+from services.cobalt import CobaltError, CobaltService, audio_format_param
 from services.delivery import (
+    ActionPulse,
+    format_duration,
     join_file_ids,
+    media_card,
+    quality_label,
     replay_caption,
     send_album,
     send_cached_file,
-    source_line,
+    upload_action,
 )
 from services.extractor import (
     IMAGE_ONLY,
@@ -151,11 +157,12 @@ async def _process_with_retry(
     cobalt: CobaltService | None = None,
 ) -> None:
     lang = task.lang or DEFAULT_LANG
-    # One status message for the whole link, retries included. The task used to open
-    # its own per attempt, which is how a single failed download left three
-    # "processing…" messages behind it; the message is also where the failure is
-    # written now, so the outcome lands where the user is already looking.
-    status = await bot.send_message(task.chat_id, t("work.processing", lang))
+    # The card the gateway showed is the message this job narrates in — progress,
+    # retries and the failure all land where the user is already looking, and no
+    # "processing…" message is ever opened (TAP → WAIT → VIDEO). A task without a
+    # card message (an older payload) gets exactly one, carrying the same card.
+    card = _task_card(task, lang)
+    status = await _open_status(task, bot, card)
     last_error: Optional[str] = None
     last_failure: ExtractionError | None = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -163,7 +170,9 @@ async def _process_with_retry(
             await _requeue_for_shutdown(queue, task)
             return
         try:
-            await process_download_task(task, bot, pool, extractor, cobalt, status=status)
+            await process_download_task(
+                task, bot, pool, extractor, cobalt, status=status, card=card
+            )
             if is_youtube_url(task.url):
                 # An anonymous YouTube download just worked, so "YouTube refuses
                 # anonymous requests here" is no longer true — stop acting on it.
@@ -188,9 +197,16 @@ async def _process_with_retry(
         if await _sleep_until(stop_event, min(2**attempt, 8)):
             await _requeue_for_shutdown(queue, task)
             return
-        # Said in the message the user is already watching: a retry has to read as
-        # "trying again", not as a download that quietly stalled.
-        await _edit(status, t("work.retry", lang, attempt=attempt + 1, attempts=MAX_ATTEMPTS))
+        # An internal retry is silent: the card's ⏳ already says "working", and
+        # "attempt 2 of 3" is machinery — the log counts attempts, the chat waits.
+    # The loop only falls through when every attempt has ended the job — that is
+    # the one failure a group's analytics row records.
+    await _note_group_download(
+        pool,
+        task,
+        ok=False,
+        code=last_failure.code if last_failure is not None else "internal",
+    )
     if last_failure is not None:
         # Recorded before the messages: the digest is the only place a *pattern*
         # of failures is visible, and it must survive a failed notification.
@@ -203,7 +219,9 @@ async def _process_with_retry(
     ):
         # "Blocked" usually reaches the user as a shrug and the admins as nothing
         # at all. Both are wrong here: the cause is known and fixable.
-        await _notify_login_block(bot, pool, task, extractor.cookie_file)
+        await _notify_login_block(
+            bot, pool, task, extractor.cookie_file, status=status, card=card
+        )
         # ...and the fix may be mechanical: read the profile, replace the jar,
         # prove it with a probe, report. Off unless COOKIE_AUTO_EXPORT is set.
         settings = get_settings()
@@ -214,26 +232,35 @@ async def _process_with_retry(
         )
         return
     await _notify_failure(
-        bot, task, last_error or t("work.unexpected", lang), status=status
+        bot, task, last_error or t("work.unexpected", lang), status=status, card=card
     )
 
 
 async def _notify_failure(
-    bot: Bot, task: DownloadTask, message: str, *, status: Any = None
+    bot: Bot,
+    task: DownloadTask,
+    message: str,
+    *,
+    status: Any = None,
+    card: str = "",
 ) -> None:
-    """Say the download failed — in its own status message when there is one.
+    """The failure, on the card the user is watching — with one way forward.
 
-    Editing beats sending here for the same reason it does everywhere else in this
-    worker: the message that said "working on it" is the one the user is watching,
-    and a chat that ends with one summary instead of two is the point of the
-    status message existing at all.
+    The card stays (it answers "which link was this?"); the error and a 🔄 button
+    are appended to it. What a retry re-runs lives *server-side* behind a random
+    key (``core.ui``), so a crafted callback can name a key but never invent a
+    download.
     """
-    text = t("work.failed", task.lang, error=message)
+    lang = task.lang or DEFAULT_LANG
+    key = remember_retry({"task": task.to_payload()}, owner=task.telegram_id)
+    keyboard = retry_keyboard(key, lang)
+    body = t("work.failed", lang, error=message)
+    text = f"{card}\n\n{body}" if card else body
     if status is not None:
-        await _edit(status, text)
+        await _edit(status, text, reply_markup=keyboard)
         return
     try:
-        await bot.send_message(task.chat_id, text)
+        await bot.send_message(task.chat_id, text, reply_markup=keyboard)
     except Exception:
         logger.exception("could not notify failure to chat %s", task.chat_id)
 
@@ -253,14 +280,30 @@ def _login_block_alert_due(now: float | None = None) -> bool:
 
 
 async def _notify_login_block(
-    bot: Bot, pool: asyncpg.Pool, task: DownloadTask, cookie_file: Path | None
+    bot: Bot,
+    pool: asyncpg.Pool,
+    task: DownloadTask,
+    cookie_file: Path | None,
+    *,
+    status: Any = None,
+    card: str = "",
 ) -> None:
     """Answer the user with the actual cause, and the admins with the fix."""
     # Evidence for the next link: YouTube refused an anonymous request here just
     # now, which is what turns the preflight's suspicion into a refusal.
     preflight.note_anonymous_refusal()
+    lang = task.lang or DEFAULT_LANG
+    # The cause is fixable (an admin can re-export the jar), so the user's card
+    # keeps a way forward even though *this* run stopped.
+    key = remember_retry({"task": task.to_payload()}, owner=task.telegram_id)
+    keyboard = retry_keyboard(key, lang)
+    body = t("work.login_block", lang)
+    text = f"{card}\n\n{body}" if card else body
     try:
-        await bot.send_message(task.chat_id, t("work.login_block", task.lang))
+        if status is not None:
+            await _edit(status, text, reply_markup=keyboard)
+        else:
+            await bot.send_message(task.chat_id, text, reply_markup=keyboard)
     except Exception:
         logger.exception("could not notify chat %s about a login-looking block", task.chat_id)
 
@@ -314,6 +357,7 @@ async def process_download_task(
     cobalt: CobaltService | None = None,
     *,
     status: Any = None,
+    card: str = "",
 ) -> None:
     """One attempt at one link. ``status`` is the message the narration goes in.
 
@@ -325,18 +369,19 @@ async def process_download_task(
     settings = get_settings()
     lang = task.lang or DEFAULT_LANG
     if status is None:
-        status = await bot.send_message(task.chat_id, t("work.processing", lang))
+        card = _task_card(task, lang)
+        status = await _open_status(task, bot, card)
 
     # 1) Cache re-check (worker-side, guards concurrent duplicate requests).
     cached = await cache_service.get_cached(pool, task.url, task.media_format, task.quality)
     if cached is not None:
-        await _edit(status, t("work.cache_resend", lang))
-        # The replay carries the source link too: it is the same file, so it deserves
-        # the same caption — and the cached row still holds the URL it came from.
+        # The replay is the answer — no "sending from the cache" line: the file
+        # arriving is the whole message, exactly as for a fresh download. Its
+        # caption is the same media card, and the row still holds the URL it
+        # came from.
         if await send_cached_file(
             bot, task.chat_id, cached, caption=replay_caption(cached, lang)
         ):
-            await _edit(status, t("work.cache_done", lang))
             return
         await cache_service.forget(pool, task.url, task.media_format, task.quality)
 
@@ -348,11 +393,10 @@ async def process_download_task(
     target_url = task.url
     track: spotify.SpotifyTrack | None = None
     if spotify.is_spotify_url(task.url):
-        # The one line the user sees about a Spotify link, and deliberately not a
-        # technical one: it says the song is being fetched, not that it is being
-        # "mapped to YouTube". What was mapped stays in the log and in the metadata
-        # the file is tagged with — a user asked for the song, not for the route.
-        await _edit(status, t("work.spotify_lookup", lang))
+        # A Spotify link is resolved before it can be fetched (the route is the
+        # plumbing's business — see services/spotify.py); while that runs the card
+        # shows the one compact state: ⏳, never a sentence.
+        await _edit(status, _on_card(card, t("media.wait", lang)))
         # No language argument on purpose: a mapping failure is translated from its
         # *code* by ``error_message`` below, so the Spotify module keeps saying what
         # it diagnosed (Persian, for the log) and the user reads their own language.
@@ -377,40 +421,42 @@ async def process_download_task(
             cobalt,
             status,
             exc,
+            card=card,
             target_url=target_url,
             track=track,
         )
         return
     if media_info.is_live:
-        await _edit(status, t("work.live", lang))
+        await _edit(status, _on_card(card, t("work.live", lang)))
         return
     if media_info.filesize_approx and media_info.filesize_approx > settings.upload_limit_bytes:
         await _edit(
             status,
-            t(
-                "work.too_big",
+            _on_card(
+                card,
+                t(
+                    "work.too_big",
                 lang,
-                size=format_size(
-                    media_info.filesize_approx, unknown=t("misc.unknown_size", lang)
+                    size=format_size(
+                        media_info.filesize_approx, unknown=t("misc.unknown_size", lang)
+                    ),
+                    limit=settings.upload_limit_mb,
                 ),
-                limit=settings.upload_limit_mb,
             ),
         )
         return
 
     # 3) Atomic quota claim (free users' quota is enforced here, not in the gateway).
-    if not await _claim_quota(pool, task, status):
+    if not await _claim_quota(pool, task, status, card=card):
         return
 
-    # 4) Download with live progress (threaded + throttled edits).
-    await _edit(
-        status, t("work.downloading", lang, title=escape_html(media_info.title[:120]))
-    )
-    progress = _ProgressEditor(status, lang)
+    # 4) Download (threaded + throttled ⏳ edits — the card's one compact state).
+    progress = _ProgressEditor(status, lang, card)
     try:
-        result = await extractor.download(
-            target_url, task.media_format, task.quality, progress_hook=progress.hook
-        )
+        async with ActionPulse(bot, task.chat_id):
+            result = await extractor.download(
+                target_url, task.media_format, task.quality, progress_hook=progress.hook
+            )
     except ExtractionError as exc:
         if not fallback.should_use_fallback(exc, cobalt):
             await _note_fallback_skip(pool, exc, cobalt)
@@ -423,29 +469,32 @@ async def process_download_task(
             cobalt,
             status,
             exc,
+            card=card,
             quota_claimed=True,
             target_url=target_url,
             track=track,
         )
         return
 
-    await _finish_upload(task, bot, pool, status, result, track=track)
+    await _finish_upload(task, bot, pool, status, result, card=card, track=track)
     if target_url != task.url:
         # A *mapped* link just went through YouTube anonymously (search and all), so
         # "YouTube refuses anonymous requests here" is no longer true.
         preflight.clear_anonymous_refusal()
 
 
-async def _claim_quota(pool: asyncpg.Pool, task: DownloadTask, status: Any) -> bool:
+async def _claim_quota(
+    pool: asyncpg.Pool, task: DownloadTask, status: Any, *, card: str = ""
+) -> bool:
     """Reserve today's slot for this user and say so; ``False`` = nothing to run."""
     lang = task.lang or DEFAULT_LANG
     user = await database.get_user(pool, task.telegram_id)
     if user is None:
-        await _edit(status, t("work.account_missing", lang))
+        await _edit(status, _on_card(card, t("work.account_missing", lang)))
         return False
     limit = effective_daily_limit(user)
     if not await database.can_claim_download(pool, task.telegram_id, limit, today_local()):
-        await _edit(status, t("work.quota_exhausted", lang, limit=limit))
+        await _edit(status, _on_card(card, t("work.quota_exhausted", lang, limit=limit)))
         return False
     return True
 
@@ -457,6 +506,7 @@ async def _finish_upload(
     status: Any,
     result: DownloadResult,
     *,
+    card: str = "",
     track: spotify.SpotifyTrack | None = None,
 ) -> None:
     """Ceiling check, upload, cache the file_id — and always drop the job dir.
@@ -473,18 +523,30 @@ async def _finish_upload(
         files = (result.file_path, *result.extra_paths)
         actual_size = sum(path.stat().st_size for path in files)
         if actual_size > settings.upload_limit_bytes:
-            await _edit(status, t("work.final_too_big", lang))
+            await _edit(status, _on_card(card, t("work.final_too_big", lang)))
             return
 
         # Upload to Telegram and remember the file_id (and how to send it again).
-        await _edit(status, t("work.uploading", lang))
+        # The card's ⏳ covers the upload too — one compact state for the whole
+        # wait, removed the moment the file lands (the file *is* the "done").
+        if card:
+            await _edit(status, _on_card(card, t("media.wait", lang)))
         # Inside the job directory on purpose: the artwork is part of this job and
         # goes away with it, in the ``finally`` below.
         cover = await spotify.download_cover(track, result.file_path.parent) if track else None
-        delivered = await _upload(
-            bot, task.chat_id, result, lang, track=track, cover=cover, source_url=task.url
-        )
+        async with ActionPulse(
+            bot, task.chat_id, upload_action(_delivery_kind(files[0], result.media_format))
+        ):
+            delivered = await _upload(
+                bot, task.chat_id, result, lang, track=track, cover=cover, source_url=task.url
+            )
         if delivered.cacheable:
+            # The canonical name this file goes by — the song for a track, the
+            # media's own title otherwise — so a replay's card is the first send's
+            # card. Never a URL dressed up as one.
+            media_title = (track.title if track else "") or result.info.title or task.title
+            if media_title == task.url:
+                media_title = ""
             await cache_service.memorize(
                 pool,
                 url=task.url,
@@ -492,10 +554,33 @@ async def _finish_upload(
                 telegram_file_id=delivered.file_id,
                 request=cache_service.request_key(task.media_format, task.quality),
                 kind=delivered.kind,
+                title=media_title,
             )
-        await _edit(status, t("work.done", lang))
+        await _note_group_download(pool, task, ok=True)
+        if card:
+            await _edit(status, card)  # the card at rest: no state line left
     finally:
         shutil.rmtree(result.file_path.parent, ignore_errors=True)  # per-job dir
+
+
+async def _note_group_download(
+    pool: asyncpg.Pool, task: DownloadTask, *, ok: bool, code: str = ""
+) -> None:
+    """Count this job in the panel's group analytics — groups only.
+
+    A private chat is nobody's analytics and is dropped right here. What is kept
+    is where, when and whether it worked — never the content (see
+    ``core.database.record_group_download``).
+    """
+    if task.chat_id >= 0:
+        return
+    await database.record_group_download(
+        pool,
+        chat_id=task.chat_id,
+        chat_title=task.chat_title,
+        ok=ok,
+        code=code,
+    )
 
 
 async def _note_fallback_skip(
@@ -522,6 +607,7 @@ async def _deliver_via_fallback(
     status: Any,
     error: ExtractionError,
     *,
+    card: str = "",
     quota_claimed: bool = False,
     target_url: Optional[str] = None,
     track: spotify.SpotifyTrack | None = None,
@@ -544,6 +630,13 @@ async def _deliver_via_fallback(
     refresh). The retry wrapper is told both engines were tried, so it does not
     spend three attempts re-running the same pair.
     """
+    if task.media_format == "audio" and not audio_format_param(
+        task.media_format, task.quality
+    ):
+        # The fallback engine has no FLAC service (services/cobalt.py refuses to
+        # name one): raise the error that got us here — an honest failure beats a
+        # differently-coded file under this name.
+        raise error
     # What the fallback is *asked for*: the mapped stand-in when there is one (a
     # rewritten Spotify link is a YouTube video by now, and Cobalt serves those).
     source_url = target_url or task.url
@@ -554,22 +647,23 @@ async def _deliver_via_fallback(
     )
     if cobalt is None or not cobalt.enabled:  # guarded by should_use_fallback
         raise error
-    if not quota_claimed and not await _claim_quota(pool, task, status):
+    if not quota_claimed and not await _claim_quota(pool, task, status, card=card):
         return
 
-    await _edit(status, t("work.fallback", task.lang))
+    await _edit(status, _on_card(card, t("work.fallback", task.lang or DEFAULT_LANG)))
     settings = get_settings()
     progress = _ProgressEditor(status, task.lang)
     try:
-        result = await fallback.fetch(
-            cobalt,
-            source_url,
-            task.media_format,
-            quality=task.quality,
-            download_dir=extractor.download_dir,
-            max_bytes=settings.upload_limit_bytes,
-            progress_hook=progress.hook,
-        )
+        async with ActionPulse(bot, task.chat_id):
+            result = await fallback.fetch(
+                cobalt,
+                source_url,
+                task.media_format,
+                quality=task.quality,
+                download_dir=extractor.download_dir,
+                max_bytes=settings.upload_limit_bytes,
+                progress_hook=progress.hook,
+            )
     except CobaltError as exc:
         logger.warning(
             "Cobalt fallback failed for %s too — %s", source_url, fallback.describe(exc)
@@ -583,7 +677,7 @@ async def _deliver_via_fallback(
     # the user's either way, and this row is what keeps the degradation visible.
     await telemetry.record_block(pool, task, error, extractor.cookie_file)
     await fallback.remember_use(pool, fallback.USE_USED)
-    await _finish_upload(task, bot, pool, status, result, track=track)
+    await _finish_upload(task, bot, pool, status, result, card=card, track=track)
 
 
 def _file_id(media: Any) -> str:
@@ -604,72 +698,54 @@ def _upload_caption(
     track: spotify.SpotifyTrack | None = None,
     source_url: str = "",
 ) -> str:
-    """Caption for the uploaded media: title, platform, size, quality, length, link.
+    """The media card this file arrives with — 🎬/🎵 … 🤖, and nothing else.
 
-    The resolution is the *actual* one, not the tier that was asked for: "up to
-    1080p" is a ceiling, and a 720p upload answering it should say 720p.
+    The screen that asked and the caption that arrives are the same block, so the
+    answer always names the question. The quality named is the one the menu
+    *called* this file (1920x1080 is 1080p) of the resolution actually produced —
+    a 720p upload answering a "1080p" tap says 720p — and its size is the file's
+    real one: a fact, so no ``~``.
 
-    A Spotify link is captioned as the *song*: artist, album, length, no platform
-    line. "🌐 youtube" under a track the user picked on Spotify is the plumbing
-    showing through, and the file is tagged with the same metadata anyway.
+    A song is captioned as the song: 🎵 its title, 🎤 who made it, 💿 which
+    release, ⏱ how long — under the link the *user* sent (a Spotify track names
+    the Spotify URL, never the mapped video it was fetched through).
     """
-    files = (result.file_path, *result.extra_paths)
-    if track is not None:
-        return _track_caption(track, files, lang, source_url=source_url)
-    parts = [
-        f"<b>{escape_html(result.info.title[:200])}</b>",
-        t("work.caption_platform", lang, platform=escape_html(result.info.platform)),
-        t(
-            "work.caption_size",
-            lang,
-            size=format_size(
-                sum(path.stat().st_size for path in files),
-                unknown=t("misc.unknown_size", lang),
-            ),
-        ),
-    ]
-    if result.info.height:
-        parts.append(t("work.caption_quality", lang, resolution=f"{result.info.height}p"))
-    duration = _fmt_duration(result.info.duration)
-    if duration:
-        parts.append(t("work.caption_duration", lang, duration=duration))
-    if line := source_line(source_url, lang):
-        parts.append(line)
-    return "\n".join(parts)
-
-
-def _track_caption(
-    track: spotify.SpotifyTrack,
-    files: tuple[Path, ...],
-    lang: str,
-    *,
-    source_url: str = "",
-) -> str:
-    """The caption a song deserves: title, artist, album, length, size, link."""
-    parts = [f"<b>{escape_html(track.title[:200])}</b>"]
-    if track.artist:
-        parts.append(t("work.caption_artist", lang, artist=escape_html(track.artist)))
-    if track.album:
-        album = f"{track.album} ({track.year})" if track.year else track.album
-        parts.append(t("work.caption_album", lang, album=escape_html(album)))
-    # Spotify's own length over the video's: it is the song's real one, and it is
-    # what the audio is tagged with — a caption that disagrees would be a bug.
-    duration = _fmt_duration(track.duration_s)
-    if duration:
-        parts.append(t("work.caption_duration", lang, duration=duration))
-    parts.append(
-        t(
-            "work.caption_size",
-            lang,
-            size=format_size(
-                sum(path.stat().st_size for path in files),
-                unknown=t("misc.unknown_size", lang),
-            ),
-        )
+    named = result.info.label_p or result.info.height
+    quality = (
+        t("media.quality_p", lang, height=named)
+        if result.media_format == "video" and named
+        else quality_label(result.media_format, result.quality, lang)
     )
-    if line := source_line(source_url, lang):
-        parts.append(line)
-    return "\n".join(parts)
+    real_size = format_size(
+        sum(path.stat().st_size for path in (result.file_path, *result.extra_paths)),
+        unknown="",
+    )
+    if result.media_format == "audio":
+        album = (
+            " · ".join(str(part) for part in (track.album, track.year) if part)
+            if track is not None
+            else ""
+        )
+        # Spotify's own length over the mapped video's — it is the song being named.
+        duration_s = (track.duration_s if track is not None else None) or result.info.duration
+        return media_card(
+            title=(track.title if track is not None else result.info.title),
+            url=source_url,
+            quality=quality,
+            size=real_size,
+            audio=True,
+            artist=(track.artist if track is not None else "") or "",
+            album=album,
+            duration=format_duration(duration_s),
+            lang=lang,
+        )
+    return media_card(
+        title=result.info.title,
+        url=source_url,
+        quality=quality,
+        size=real_size,
+        lang=lang,
+    )
 
 
 def _input_file(path: Path) -> FSInputFile:
@@ -828,21 +904,51 @@ async def _upload(
     )
 
 
-async def _edit(status: Any, text: str) -> None:
-    """Edit the status message, tolerating deleted/blocked chats."""
+def _task_card(task: DownloadTask, lang: str) -> str:
+    """This job's media card: the message every update lands on."""
+    return media_card(
+        title=task.title,
+        url=task.url,
+        quality=quality_label(task.media_format, task.quality, lang),
+        lang=lang,
+    )
+
+
+def _on_card(card: str, state: str) -> str:
+    """A state appended under the card — or just the state, for a caller's own
+    status message that carries no card of ours."""
+    return f"{card}\n\n{state}" if card else state
+
+
+async def _open_status(task: DownloadTask, bot: Bot, card: str) -> Any:
+    """The message this job narrates in: the gateway's card, or one of our own.
+
+    A task that carried its card message id edits *that* message — the screen the
+    user tapped is the screen that answers, through retries and to the end.
+    Anything older (no id) opens one message carrying the same card, so both
+    eras end with the same picture and no "processing…" placeholder anywhere.
+    """
+    if task.status_message_id:
+        return Message(
+            message_id=task.status_message_id,
+            date=datetime.now(timezone.utc),
+            chat=Chat(id=task.chat_id, type="private"),
+        ).as_(bot)
+    return await bot.send_message(task.chat_id, card, disable_web_page_preview=True)
+
+
+async def _edit(status: Any, text: str, *, reply_markup: Any = None) -> None:
+    """Edit the status message, tolerating deleted/blocked chats.
+
+    ``reply_markup=None`` is deliberate: a plain edit drops whatever keyboard was
+    attached, so no state line can ever wear another screen's buttons.
+    """
     try:
-        await status.edit_text(text, disable_web_page_preview=True)
+        await status.edit_text(
+            text, disable_web_page_preview=True, reply_markup=reply_markup
+        )
     except (TelegramBadRequest, TelegramRetryAfter):
         pass
-
-
-def _fmt_duration(seconds: int | None) -> str:
-    if not seconds:
-        return ""
-    seconds = int(seconds)
-    if seconds >= 3600:
-        return f"{seconds // 3600}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
-    return f"{seconds // 60}:{seconds % 60:02d}"
 
 
 class _ProgressEditor:
@@ -852,9 +958,12 @@ class _ProgressEditor:
     the event loop via ``call_soon_threadsafe``.
     """
 
-    def __init__(self, status: Any, lang: str = DEFAULT_LANG) -> None:
+    def __init__(
+        self, status: Any, lang: str = DEFAULT_LANG, card: str = ""
+    ) -> None:
         self._status = status
         self._lang = lang
+        self._card = card
         self._loop = asyncio.get_running_loop()
         self._last_edit = 0.0
 
@@ -868,13 +977,9 @@ class _ProgressEditor:
         if pct < 100 and now - self._last_edit < PROGRESS_EDIT_INTERVAL_S:
             return  # throttle Telegram API calls
         self._last_edit = now
-        text = t(
-            "work.progress",
-            self._lang,
-            percent=pct,
-            done=format_size(done, unknown=t("misc.unknown_size", self._lang)),
-            total=format_size(total, unknown=t("misc.unknown_size", self._lang)),
-        )
+        # One compact state under the card — "⏳ 42%", never a sentence. The card
+        # itself never moves while the state does.
+        text = _on_card(self._card, t("media.progress", self._lang, percent=pct))
         self._loop.call_soon_threadsafe(asyncio.create_task, self._edit(text))
 
     async def _edit(self, text: str) -> None:
