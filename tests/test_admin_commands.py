@@ -111,7 +111,7 @@ async def test_refresh_is_admin_only() -> None:
     bot = RecordingBot()
     message = _message("/refresh edge:Default", bot, user_id=9)
 
-    await admin_module.cmd_refresh(message, bot, object(), object())
+    await admin_module.cmd_refresh(message, bot, object(), object(), lang="fa")
 
     assert bot.texts == ["⛔️ فقط ادمین می‌تونه."]
     assert bot.edits == [], "and nothing was exported"
@@ -125,7 +125,7 @@ async def test_refresh_without_a_profile_explains_itself(
     bot = RecordingBot()
     message = _message("/refresh", bot)
 
-    await admin_module.cmd_refresh(message, bot, object(), object())
+    await admin_module.cmd_refresh(message, bot, object(), object(), lang="fa")
 
     assert "/refresh edge:Default" in bot.texts[0]
     assert "COOKIE_AUTO_EXPORT" in bot.texts[0]
@@ -139,7 +139,7 @@ async def test_refresh_runs_the_guarded_path_and_edits_the_status(
     bot = RecordingBot()
     message = _message("/refresh edge:Default", bot)
 
-    await admin_module.cmd_refresh(message, bot, object(), object())
+    await admin_module.cmd_refresh(message, bot, object(), object(), lang="fa")
 
     assert bot.texts == ["♻️ در حال خواندن کوکی از پروفایل…"], "the admin sees it started"
     assert bot.edits and "جار کوکی" in bot.edits[-1]
@@ -156,7 +156,7 @@ async def test_refresh_while_another_export_runs_says_so(
     bot = RecordingBot()
     message = _message("/refresh edge:Default", bot)
 
-    await admin_module.cmd_refresh(message, bot, object(), object())
+    await admin_module.cmd_refresh(message, bot, object(), object(), lang="fa")
 
     assert "در جریان است" in bot.edits[-1]
 
@@ -169,7 +169,7 @@ async def test_refresh_uses_the_configured_profile_when_no_argument(
     bot = RecordingBot()
     message = _message("/refresh", bot)
 
-    await admin_module.cmd_refresh(message, bot, object(), object())
+    await admin_module.cmd_refresh(message, bot, object(), object(), lang="fa")
 
     assert calls[0]["spec"] == "edge:Default"
 
@@ -183,7 +183,7 @@ async def test_the_refresh_button_is_admin_only() -> None:
     bot = RecordingBot()
     cb = _callback(bot, REFRESH_CALLBACK, user_id=9)
 
-    await admin_module.on_alert_refresh(cb, bot, object(), object())
+    await admin_module.on_alert_refresh(cb, bot, object(), object(), lang="fa")
 
     assert [answer.show_alert for answer in bot.answers] == [True], (
         "a forwarded alert must not export anything"
@@ -199,7 +199,7 @@ async def test_the_refresh_button_runs_the_export_and_edits_the_alert(
     bot = RecordingBot()
     cb = _callback(bot, REFRESH_CALLBACK)
 
-    await admin_module.on_alert_refresh(cb, bot, object(), object())
+    await admin_module.on_alert_refresh(cb, bot, object(), object(), lang="fa")
 
     assert [call.text for call in bot.answers] == ["♻️ در حال اکسپورت…"]
     assert bot.edits[0] == "♻️ در حال خواندن کوکی از پروفایل…", "the alert becomes the placeholder"
@@ -214,7 +214,7 @@ async def test_the_refresh_button_without_a_profile_tells_the_admin(
     bot = RecordingBot()
     cb = _callback(bot, REFRESH_CALLBACK)
 
-    await admin_module.on_alert_refresh(cb, bot, object(), object())
+    await admin_module.on_alert_refresh(cb, bot, object(), object(), lang="fa")
 
     assert "پروفایلی تنظیم نشده" in (bot.answers[0].text or "")
     assert "/refresh edge:Default" in bot.texts[0]
@@ -266,7 +266,7 @@ async def test_trend_is_admin_only() -> None:
     bot = RecordingBot()
     message = _message("/trend", bot, user_id=9)
 
-    await admin_module.cmd_trend(message, object())
+    await admin_module.cmd_trend(message, object(), lang="fa")
 
     assert bot.texts == ["⛔️ فقط ادمین می‌تونه."]
 
@@ -279,7 +279,7 @@ async def test_trend_prints_the_days_and_the_fix(monkeypatch: pytest.MonkeyPatch
     bot = RecordingBot()
     message = _message("/trend", bot)
 
-    await admin_module.cmd_trend(message, object())
+    await admin_module.cmd_trend(message, object(), lang="fa")
 
     text = bot.texts[0]
     assert "روند 14 روزهٔ شکست‌ها" in text
@@ -314,7 +314,7 @@ async def test_blocks_is_admin_only() -> None:
     bot = RecordingBot()
     message = _message("/blocks", bot, user_id=9)
 
-    await admin_module.cmd_blocks(message, object())
+    await admin_module.cmd_blocks(message, object(), lang="fa")
 
     assert bot.texts == ["⛔️ فقط ادمین می‌تونه."]
 
@@ -334,7 +334,7 @@ async def test_blocks_reads_the_failures_with_the_net_s_health_under_them(
     bot = RecordingBot()
     message = _message("/blocks", bot)
 
-    await admin_module.cmd_blocks(message, object(), object())
+    await admin_module.cmd_blocks(message, object(), object(), lang="fa")
 
     text = bot.texts[0]
     assert "گزارش 7 روزهٔ شکست‌ها" in text
@@ -358,7 +358,7 @@ async def test_blocks_works_with_no_fallback_client_at_all(
     bot = RecordingBot()
     message = _message("/blocks", bot)
 
-    await admin_module.cmd_blocks(message, object())
+    await admin_module.cmd_blocks(message, object(), lang="fa")
 
     assert "⚫️ خاموش" in bot.texts[0]
 
@@ -372,7 +372,7 @@ async def test_fixlogin_is_admin_only() -> None:
     bot = RecordingBot()
     message = _message("/fixlogin", bot, user_id=9)
 
-    await admin_module.cmd_fixlogin(message, object())
+    await admin_module.cmd_fixlogin(message, object(), lang="fa")
 
     assert bot.texts == ["⛔️ فقط ادمین می‌تونه."]
 
@@ -386,7 +386,7 @@ async def test_fixlogin_explains_the_jar_and_the_steps(
     bot = RecordingBot()
     message = _message("/fixlogin", bot)
 
-    await admin_module.cmd_fixlogin(message, object())
+    await admin_module.cmd_fixlogin(message, object(), lang="fa")
 
     text = bot.texts[0]
     assert "راهنمای ورود واقعی یوتیوب" in text

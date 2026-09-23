@@ -126,7 +126,8 @@ def _user(
     premium: bool = False,
     until: datetime | None = None,
     username: str | None = "ali",
-    language: str = FA,
+    language: str | None = FA,
+    is_new: bool = False,
 ) -> Any:
     return {
         "telegram_id": USER_ID,
@@ -134,6 +135,7 @@ def _user(
         "is_premium": premium,
         "premium_until": until,
         "language": language,
+        "is_new": is_new,
     }
 
 
@@ -196,25 +198,25 @@ def _no_database(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, str]]:
 # ---------------------------------------------------------------------------
 
 
-def test_the_menu_offers_profile_premium_help_and_language() -> None:
+def test_the_home_screen_offers_the_three_hubs() -> None:
     markup = user_module._main_menu(FA)
 
     assert dict(_buttons(markup)) == {
+        "⬇️ دانلود": "menu:download",
         "👤 پروفایل من": "menu:profile",
-        "💎 ارتقا به ویژه (VIP)": "menu:premium",
         "❓ راهنما": "menu:help",
-        "🌐 زبان": "menu:language",
     }
-    # Two per row: five full-width buttons do not fit on a phone screen.
-    assert [len(row) for row in markup.inline_keyboard] == [2, 2]
+    # Download first and alone: it is why most people came. The account actions
+    # (VIP, Language) moved under Profile — a home carrying every action is a
+    # wall of buttons.
+    assert [len(row) for row in markup.inline_keyboard] == [1, 2]
 
 
 def test_the_menu_speaks_the_language_it_is_drawn_in() -> None:
     assert dict(_buttons(user_module._main_menu(EN))) == {
+        "⬇️ Download": "menu:download",
         "👤 My profile": "menu:profile",
-        "💎 Go VIP": "menu:premium",
         "❓ Help": "menu:help",
-        "🌐 Language": "menu:language",
     }
 
 
@@ -229,11 +231,24 @@ def test_the_menu_hides_the_vip_button_from_an_admin() -> None:
     markup = user_module._main_menu(FA, admin=True)
 
     assert "menu:premium" not in dict(_buttons(markup)).values()
+    assert "menu:language" not in dict(_buttons(markup)).values(), "language lives under Profile"
     assert dict(_buttons(markup)) == {
+        "⬇️ دانلود": "menu:download",
         "👤 پروفایل من": "menu:profile",
         "❓ راهنما": "menu:help",
-        "🌐 زبان": "menu:language",
         "🛠 پنل مدیریت": "menu:admin",
+    }
+
+
+def test_an_admins_profile_does_not_offer_the_store_either() -> None:
+    """The store moved, it did not disappear — except where buying is impossible."""
+    offered = dict(_buttons(user_module._profile_keyboard(FA, admin=True)))
+
+    assert "menu:premium" not in offered.values()
+    assert dict(_buttons(user_module._profile_keyboard(FA))) == {
+        "🌐 زبان": "profile:language",
+        "💎 ارتقا به ویژه (VIP)": "menu:premium",
+        "⬅️ بازگشت": "menu:home",
     }
 
 
@@ -296,9 +311,49 @@ async def test_start_greets_an_english_user_in_english() -> None:
     assert "سلام" not in bot.texts[0]
 
 
+async def test_a_brand_new_user_is_asked_for_a_language_first() -> None:
+    """Registration already guessed the language from the Telegram locale — a
+    guess must not count as a choice. The first contact gets the picker anyway,
+    said in both languages, because the reader's language is exactly what is
+    unknown on this one screen."""
+    bot = RecordingBot()
+    message = _message("/start", bot)
+
+    await user_module.cmd_start(message, _user(is_new=True), lang=FA)
+
+    text = bot.texts[0]
+    assert "برای شروع" in text and "To start" in text
+    assert dict(_buttons(bot.keyboards[0])) == {
+        "🇬🇧 English": "lang:en",
+        "🇮🇷 فارسی": "lang:fa",
+    }, "no current choice to mark — and no menu to fall back to"
+    assert bot.edits == [] and len(bot.texts) == 1, "one message, nothing else"
+
+
+async def test_a_returning_user_is_never_asked_again() -> None:
+    bot = RecordingBot()
+    message = _message("/start", bot)
+
+    await user_module.cmd_start(message, _user(), lang=FA)
+
+    assert t("language.first_time", FA) not in bot.texts
+    assert all(
+        not data.startswith("lang:") for _, data in _buttons(bot.keyboards[0])
+    ), "the picker is reachable only through 'Change language'"
+
+
+def test_a_record_that_carries_no_language_is_a_first_contact_too() -> None:
+    """A row from before the language column — or a loose test double."""
+    assert user_module._needs_language_screen({"telegram_id": 1}) is True
+    assert user_module._needs_language_screen(_user(language=None)) is True
+    assert user_module._needs_language_screen(_user()) is False
+
+
 def test_every_screen_has_a_way_back() -> None:
-    assert ("🔙 بازگشت", "menu:home") in _buttons(user_module._back_to_menu(FA))
-    assert ("🔙 Back", "menu:home") in _buttons(user_module._back_to_menu(EN))
+    assert ("⬅️ بازگشت", "menu:home") in _buttons(user_module._back_to_menu(FA))
+    assert ("⬅️ Back", "menu:home") in _buttons(user_module._back_to_menu(EN))
+    # A help page goes back to the hub it came from, not two levels up.
+    assert ("⬅️ Back", "menu:help") in _buttons(user_module._back_to_menu(EN, to="menu:help"))
 
 
 async def test_back_returns_to_the_menu_in_the_same_message() -> None:
@@ -339,7 +394,7 @@ async def test_the_language_button_opens_a_picker_that_marks_the_current_one() -
     labels = dict(_buttons(bot.keyboards[-1]))
     assert labels["✅ 🇬🇧 English"] == "lang:en"
     assert labels["🇮🇷 فارسی"] == "lang:fa"
-    assert labels["🔙 Back"] == "menu:home"
+    assert labels["⬅️ Back"] == "menu:home"
 
 
 async def test_picking_a_language_stores_it_and_answers_in_it(
@@ -395,6 +450,44 @@ async def test_a_crafted_language_callback_is_refused_too(
     assert bot.answers[0].show_alert is True
 
 
+async def test_the_profile_opens_the_same_picker_with_its_own_way_back() -> None:
+    bot = RecordingBot()
+    cb = _callback(bot, "profile:language")
+
+    await user_module.on_profile_language(cb, _fresh_state(), lang=FA)
+
+    assert "زبان" in bot.edits[0]
+    labels = dict(_buttons(bot.keyboards[-1]))
+    assert labels["✅ 🇮🇷 فارسی"] == "lang:fa", "the current one is marked"
+    assert labels["🇬🇧 English"] == "lang:en"
+    assert labels["⬅️ بازگشت"] == "menu:profile", "the picker hands back where it was opened"
+
+
+async def test_a_language_chosen_from_the_profile_returns_to_the_profile(
+    _no_database: list[tuple[int, str]],
+) -> None:
+    """The same message becomes the profile again — in the new language. No chain
+    of new screens, and no dump at the Home with the user wondering where they
+    were (the back-and-back journey stays exactly as short as it looks)."""
+    bot = RecordingBot()
+    state = _fresh_state()
+    await state.update_data(lang_return="profile")
+
+    await user_module.on_language_chosen(
+        _callback(bot, "lang:en"),
+        _user(),
+        object(),
+        lang=FA,
+        state=state,
+        queue=FakeQueue(),
+    )
+
+    assert _no_database == [(USER_ID, "en")]
+    assert t("profile.title", EN) in bot.edits[0], "the profile, re-rendered in English"
+    assert _buttons(bot.keyboards[-1]) == _buttons(user_module._profile_keyboard(EN))
+    assert await state.get_data() == {}, "the way back is one-shot"
+
+
 # ---------------------------------------------------------------------------
 # The profile
 # ---------------------------------------------------------------------------
@@ -413,7 +506,13 @@ async def test_the_profile_shows_id_username_status_and_quota() -> None:
     assert "رایگان 🪙" in text
     assert "سهمیهٔ امروز: 3 از 10" in text and "7 باقی مانده" in text
     assert "کارهای در صف: 2" in text
-    assert ("🔙 بازگشت", "menu:home") in _buttons(bot.keyboards[-1])
+    assert "🇮🇷 فارسی" in text, "the language row: 'change it' needs an obvious home"
+    # The screen owns its account actions: language and VIP moved here from Home.
+    assert dict(_buttons(bot.keyboards[-1])) == {
+        "🌐 زبان": "profile:language",
+        "💎 ارتقا به ویژه (VIP)": "menu:premium",
+        "⬅️ بازگشت": "menu:home",
+    }
 
 
 async def test_a_premium_profile_says_so_with_the_days_left() -> None:
@@ -528,7 +627,7 @@ async def test_the_premium_screen_offers_the_plans_and_a_way_back(
     assert "10 → <b>60</b>" in bot.edits[0], "the actual quota change, from settings"
     assert _buttons(bot.keyboards[-1]) == [
         ("VIP — 50,000 تومان", "plan:7"),
-        ("🔙 بازگشت", "menu:home"),
+        ("⬅️ بازگشت", "menu:home"),
     ]
     assert len(bot.answers) == 1
 
@@ -556,18 +655,47 @@ def test_the_plan_button_names_the_currency_in_the_readers_language() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_help_explains_the_flow_and_lists_the_commands() -> None:
+async def test_help_is_a_hub_of_short_pages() -> None:
     bot = RecordingBot()
     message = _message("/help", bot)
 
     await user_module.cmd_help(message, lang=FA)
 
     text = bot.texts[0]
+    assert "راهنما" in text
+    assert "لینک رو بفرست" not in text, "the wall of text is one tap away, not in the hub"
+    assert dict(_buttons(bot.keyboards[-1])) == {
+        "🔧 چطور کار می‌کند": "help:how",
+        "🌐 سرویس‌های پشتیبانی‌شده": "help:platforms",
+        "🧩 مشکلات رایج": "help:problems",
+        "💬 پشتیبانی": "menu:support",
+        "⬅️ بازگشت": "menu:home",
+    }
+
+
+async def test_the_how_it_works_page_explains_the_flow_and_lists_the_commands() -> None:
+    bot = RecordingBot()
+    cb = _callback(bot, "help:how")
+
+    await user_module.on_help_page(cb, lang=FA)
+
+    text = bot.edits[0]
     assert "لینک رو بفرست" in text
     assert "MP3" in text
     for command in ("/profile", "/premium", "/status", "/language", "/cancel", "/start"):
         assert command in text, command
-    assert ("🔙 بازگشت", "menu:home") in _buttons(bot.keyboards[-1])
+    assert len(bot.answers) == 1
+
+
+async def test_a_help_page_goes_back_to_the_hub() -> None:
+    bot = RecordingBot()
+    cb = _callback(bot, "help:platforms")
+
+    await user_module.on_help_page(cb, lang=EN)
+
+    assert "Supported platforms" in bot.edits[0]
+    assert ("⬅️ Back", "menu:help") in _buttons(bot.keyboards[-1])
+    assert bot.texts == [], "a page is the same message edited"
 
 
 async def test_the_help_button_edits_the_menu_into_the_help() -> None:
@@ -581,13 +709,32 @@ async def test_the_help_button_edits_the_menu_into_the_help() -> None:
 
 
 def test_no_menu_button_is_left_without_a_handler() -> None:
-    """Every ``menu:`` button must have somewhere to go (a dead button is worse
-    than no button at all)."""
-    source = inspect.getsource(user_module)
-    offered = {data for _, data in _buttons(user_module._main_menu(FA))}
-    offered |= {data for _, data in _buttons(user_module._back_to_menu(FA))}
+    """Every button a user can be shown must have somewhere to go (a dead button
+    is worse than no button at all).
 
-    missing = [data for data in sorted(offered) if f'F.data == "{data}"' not in source]
+    ``menu:admin`` is answered by the *admin* router — keeping it out of the user
+    module is deliberate separation, not a gap. The three help pages share one
+    handler and every ``lang:`` tap another, so those are matched by pattern.
+    """
+    from handlers import admin as admin_module
+
+    source = inspect.getsource(user_module) + inspect.getsource(admin_module)
+    offered = {data for _, data in _buttons(user_module._main_menu(FA, admin=True, support=True))}
+    offered |= {data for _, data in _buttons(user_module._back_to_menu(FA))}
+    offered |= {data for _, data in _buttons(user_module._profile_keyboard(FA))}
+    offered |= {data for _, data in _buttons(user_module._help_keyboard(FA))}
+    offered |= {data for _, data in _buttons(user_module._language_keyboard(FA))}
+
+    def has_handler(data: str) -> bool:
+        if f'F.data == "{data}"' in source:
+            return True
+        if data.startswith("help:"):
+            return "F.data.in_(set(_HELP_PAGES))" in source and data in user_module._HELP_PAGES
+        if data.startswith("lang:"):
+            return "F.data.startswith(LANG_PREFIX)" in source
+        return False
+
+    missing = [data for data in sorted(offered) if not has_handler(data)]
     assert missing == [], missing
 
 
@@ -1029,8 +1176,20 @@ def test_every_registered_callback_answers() -> None:
     assert missing == [], missing
 
 
-def test_the_old_menu_callbacks_are_gone() -> None:
-    """The menu was rearranged; the buttons it used to offer must not linger as
-    dead endpoints."""
-    offered = {data for _, data in _buttons(user_module._main_menu(FA))}
-    assert not offered & {"menu:download", "menu:status", "menu:subscribe"}
+def test_the_home_screen_is_navigation_only() -> None:
+    """Home is a hub: account actions live under the screen that owns them, and
+    the endpoints that were removed for good (`menu:status`, `menu:subscribe`)
+    must not come back — a button is a promise, and every promise needs a
+    handler that keeps it."""
+    offered = {
+        data for _, data in _buttons(user_module._main_menu(FA, admin=True, support=True))
+    }
+
+    assert offered == {
+        "menu:download",
+        "menu:profile",
+        "menu:help",
+        "menu:support",
+        "menu:admin",
+    }
+    assert not offered & {"menu:status", "menu:subscribe"}

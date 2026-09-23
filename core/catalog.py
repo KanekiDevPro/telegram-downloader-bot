@@ -79,12 +79,13 @@ MESSAGES: Final[Catalog] = {
     "menu.premium": {"en": "💎 Go VIP", "fa": "💎 ارتقا به ویژه (VIP)"},
     "menu.help": {"en": "❓ Help", "fa": "❓ راهنما"},
     "menu.language": {"en": "🌐 Language", "fa": "🌐 زبان"},
+    "menu.download": {"en": "⬇️ Download", "fa": "⬇️ دانلود"},
     # The one menu button an operator fills in: its target lives in the database.
     "menu.support": {"en": "💬 Support", "fa": "💬 پشتیبانی"},
     # Drawn only for ids in ADMIN_IDS: the panel is not a hidden feature, it is just
     # not a user's business.
     "menu.admin": {"en": "🛠 Admin panel", "fa": "🛠 پنل مدیریت"},
-    "menu.back": {"en": "🔙 Back", "fa": "🔙 بازگشت"},
+    "menu.back": {"en": "⬅️ Back", "fa": "⬅️ بازگشت"},
     "support.text": {
         "en": "💬 <b>Support</b>\n\nQuestions, a payment that needs a look, or a "
         "download that keeps failing? Write to {contact} — the operator reads it.",
@@ -108,6 +109,20 @@ MESSAGES: Final[Catalog] = {
     "language.usage": {
         "en": "🌐 Usage: <code>/language en</code> or <code>/language fa</code>.",
         "fa": "🌐 استفاده: <code>/language en</code> یا <code>/language fa</code>.",
+    },
+    # Bilingual on purpose: the reader's language is exactly what is not known
+    # yet, so the first-run screen says it in both.
+    "language.first_time": {
+        "en": (
+            "🙋 <b>Welcome!</b>\n\n"
+            "برای شروع لطفا زبان خود را انتخاب کنید.\n\n"
+            "To start, please select your language."
+        ),
+        "fa": (
+            "🙋 <b>Welcome!</b>\n\n"
+            "برای شروع لطفا زبان خود را انتخاب کنید.\n\n"
+            "To start, please select your language."
+        ),
     },
 
     # ---------------------------------------------------------------------
@@ -143,6 +158,7 @@ MESSAGES: Final[Catalog] = {
         "fa": "📥 سهمیهٔ امروز: {used} — بی‌نهایت ♾",
     },
     "profile.queue": {"en": "🕒 Jobs in queue: {depth}", "fa": "🕒 کارهای در صف: {depth}"},
+    "profile.language": {"en": "🌐 Language: {language}", "fa": "🌐 زبان: {language}"},
 
     # ---------------------------------------------------------------------
     # Premium pitch
@@ -174,6 +190,35 @@ MESSAGES: Final[Catalog] = {
     # Help
     # ---------------------------------------------------------------------
     "help.title": {"en": "❓ <b>Help</b>", "fa": "❓ <b>راهنما</b>"},
+    "help.intro": {
+        "en": "How the bot works, in a few short pages. Pick one:",
+        "fa": "کارکرد ربات در چند صفحهٔ کوتاه. یکی را انتخاب کن:",
+    },
+    "help.btn_how": {"en": "🔧 How it works", "fa": "🔧 چطور کار می‌کند"},
+    "help.btn_platforms": {
+        "en": "🌐 Supported platforms",
+        "fa": "🌐 سرویس‌های پشتیبانی‌شده",
+    },
+    "help.btn_problems": {"en": "🧩 Common problems", "fa": "🧩 مشکلات رایج"},
+    "download.title": {"en": "⬇️ <b>Download</b>", "fa": "⬇️ <b>دانلود</b>"},
+    "download.how": {
+        "en": (
+            "Send me a link — or use <code>/download &lt;link&gt;</code> — and I fetch it in "
+            "the background and deliver the file right here.\n\n"
+            "▫️ Video in 1080p/720p/480p, MP3 or M4A audio, or a post's photos — "
+            "whatever that link actually has.\n"
+            "▫️ Every step is edited into one message, and a download that fails "
+            "says why."
+        ),
+        "fa": (
+            "یک لینک برایم بفرست — یا از <code>/download &lt;link&gt;</code> استفاده کن — تا در "
+            "پس‌زمینه دانلود کنم و فایل همین‌جا تحویل بدهم.\n\n"
+            "▫️ ویدیو 1080p/720p/480p، صدای MP3 یا M4A، یا عکس‌های یک پست — هرچه آن "
+            "لینک واقعاً داشته باشد.\n"
+            "▫️ همهٔ مراحل در همان یک پیام ویرایش می‌شوند، و اگر دانلودی نشود علتش گفته "
+            "می‌شود."
+        ),
+    },
     "help.body": {
         "en": (
             "1️⃣ Send a link (YouTube, Instagram, TikTok, Twitter/X, Spotify, SoundCloud, "
@@ -216,6 +261,43 @@ MESSAGES: Final[Catalog] = {
             "• /start — همین منو\n"
             "\n"
             "هر دانلود یک واحد از سهمیهٔ روزانه کم می‌کند؛ با /premium سهمیه چند برابر می‌شود."
+        ),
+    },
+    "help.platforms": {
+        "en": (
+            "🌐 <b>Supported platforms</b>\n\n"
+            "YouTube • Twitter/X • Instagram • TikTok • Spotify • SoundCloud • "
+            "Facebook • Reddit • Pinterest • Vimeo • Twitch • Dailymotion — and "
+            "dozens of other sites.\n\n"
+            "A direct file link (an image, a CDN attachment) is fetched as it is."
+        ),
+        "fa": (
+            "🌐 <b>سرویس‌های پشتیبانی‌شده</b>\n\n"
+            "یوتیوب • توییتر/X • اینستاگرام • تیک‌تاک • اسپاتیفای • ساندکلاود • "
+            "فیسبوک • ریدیت • پینترست • ویمیو • توییچ • دیلی‌موشن — و ده‌ها سایت دیگر.\n\n"
+            "لینک مستقیم یک فایل (عکس، فایل CDN) همان‌طور که هست دریافت می‌شود."
+        ),
+    },
+    "help.problems": {
+        "en": (
+            "🧩 <b>Common problems</b>\n\n"
+            "▫️ <b>The link does not download?</b> The message says why — private "
+            "links, live streams and playlists are not supported.\n"
+            "▫️ <b>Changed your mind?</b> Send a new link at any moment, or "
+            "<code>/cancel</code> to leave a step.\n"
+            "▫️ <b>Wrong format?</b> Ask again from the same link — a file already "
+            "fetched comes back instantly.\n"
+            "▫️ Anything else: 💬 Support."
+        ),
+        "fa": (
+            "🧩 <b>مشکلات رایج</b>\n\n"
+            "▫️ <b>لینک دانلود نمی‌شود؟</b> پیام، علتش را می‌گوید — لینک خصوصی، پخش زنده "
+            "و playlist پشتیبانی نمی‌شوند.\n"
+            "▫️ <b>نظرت عوض شده؟</b> هر لحظه لینک تازه بفرست، یا برای ترک مرحلهٔ فعلی "
+            "<code>/cancel</code>.\n"
+            "▫️ <b>فرمت اشتباه؟</b> از همان لینک دوباره بخواه — فایلی که قبلاً گرفته شده "
+            "سریع برمی‌گردد.\n"
+            "▫️ هر چیز دیگر: 💬 پشتیبانی."
         ),
     },
 
@@ -628,6 +710,16 @@ MESSAGES: Final[Catalog] = {
     # Admin panel
     # ---------------------------------------------------------------------
     "admin.only": {"en": "⛔️ Admins only.", "fa": "⛔️ فقط ادمین می‌تونه."},
+    "admin.btn_trend": {"en": "📈 Trend", "fa": "📈 روند شکست‌ها"},
+    "admin.btn_blocks": {"en": "🧾 Failures", "fa": "🧾 شکست‌های اخیر"},
+    "admin.trend_headline": {
+        "en": "Failure trend over the last {days} days",
+        "fa": "روند {days} روزهٔ شکست‌ها",
+    },
+    "admin.blocks_headline": {
+        "en": "Failure digest — last {days} days",
+        "fa": "گزارش {days} روزهٔ شکست‌ها",
+    },
     "admin.title": {"en": "🛠 <b>Admin panel</b>", "fa": "🛠 <b>پنل مدیریت</b>"},
     "admin.subtitle": {
         "en": "Everything below is read from the running stack; the buttons are the tools.",
@@ -637,7 +729,7 @@ MESSAGES: Final[Catalog] = {
     "admin.btn_health": {"en": "🩺 Health", "fa": "🩺 سلامت"},
     "admin.btn_queue": {"en": "🕒 Queue", "fa": "🕒 صف"},
     "admin.btn_tools": {"en": "🔧 Tools", "fa": "🔧 ابزارها"},
-    "admin.btn_back": {"en": "🔙 Back to panel", "fa": "🔙 بازگشت به پنل"},
+    "admin.btn_back": {"en": "⬅️ Back to panel", "fa": "⬅️ بازگشت به پنل"},
     "admin.btn_doctor": {"en": "🩺 Run the YouTube doctor", "fa": "🩺 اجرای دکتر یوتیوب"},
     "admin.btn_refresh": {"en": "♻️ Re-export the cookie jar now", "fa": "♻️ اکسپورت دوبارهٔ کوکی"},
     "admin.btn_broadcast": {"en": "📣 Broadcast", "fa": "📣 پیام همگانی"},

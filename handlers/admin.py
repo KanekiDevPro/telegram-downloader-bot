@@ -234,12 +234,13 @@ async def cmd_doctor(
     extractor: ExtractorService,
     cobalt: CobaltService | None = None,
     pool: asyncpg.Pool | None = None,
+    lang: str = DEFAULT_LANG,
 ) -> None:
     settings = get_settings()
     user = message.from_user
     if not settings.is_admin(user.id if user else None):
         # Same wording as the payment callbacks: never pretend the command worked.
-        await message.answer("⛔️ فقط ادمین می‌تونه.")
+        await message.answer(t("admin.only", lang))
         return
 
     status = await message.answer("🔎 در حال بررسی مسیر دانلود یوتیوب…")
@@ -254,30 +255,39 @@ async def cmd_doctor(
         )
 
 
-@router.message(Command("blocks"))
-async def cmd_blocks(
-    message: Message, pool: asyncpg.Pool, cobalt: CobaltService | None = None
-) -> None:
-    """The weekly digest on demand, with the fallback's health under it.
+async def _failure_report(
+    pool: asyncpg.Pool, cobalt: CobaltService | None, lang: str = DEFAULT_LANG
+) -> str:
+    """The weekly digest with the fallback's health under it.
 
     The two belong together: a digest full of login/IP failures means one thing
     when the safety net is serving those links anyway, and something else entirely
     when it is not. So the same section ``/doctor`` shows is appended — from the
     facts that cost nothing (a quarantine in this process, the last real use), not
     from a probe: ``/doctor`` is where an admin spends a request on a live test.
+    One implementation, shared by ``/blocks`` and the panel's screen.
     """
+    settings = get_settings()
+    digest = await build_digest(pool, days=DIGEST_DAYS)
+    health = await fallback_health(settings, cobalt, probe=False, pool=pool)
+    headline = t("admin.blocks_headline", lang, days=DIGEST_DAYS)
+    return f"{render_digest(digest, headline=headline)}\n\n{health.line()}"
+
+
+@router.message(Command("blocks"))
+async def cmd_blocks(
+    message: Message,
+    pool: asyncpg.Pool,
+    cobalt: CobaltService | None = None,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """``/blocks`` — the weekly digest on demand (same text as the panel's)."""
     settings = get_settings()
     user = message.from_user
     if not settings.is_admin(user.id if user else None):
-        await message.answer("⛔️ فقط ادمین می‌تونه.")
+        await message.answer(t("admin.only", lang))
         return
-    digest = await build_digest(pool, days=DIGEST_DAYS)
-    health = await fallback_health(settings, cobalt, probe=False, pool=pool)
-    report = (
-        f"{render_digest(digest, headline=f'گزارش {DIGEST_DAYS} روزهٔ شکست‌ها')}"
-        f"\n\n{health.line()}"
-    )
-    await message.answer(report)
+    await message.answer(await _failure_report(pool, cobalt, lang))
 
 
 def refresh_usage() -> str:
@@ -324,13 +334,17 @@ async def run_refresh_into(
 
 @router.message(Command("refresh"))
 async def cmd_refresh(
-    message: Message, bot: Bot, extractor: ExtractorService, pool: asyncpg.Pool
+    message: Message,
+    bot: Bot,
+    extractor: ExtractorService,
+    pool: asyncpg.Pool,
+    lang: str = DEFAULT_LANG,
 ) -> None:
     """``/refresh [profile]`` — read the browser profile into the jar, right now."""
     settings = get_settings()
     user = message.from_user
     if not settings.is_admin(user.id if user else None):
-        await message.answer("⛔️ فقط ادمین می‌تونه.")
+        await message.answer(t("admin.only", lang))
         return
 
     argument = (message.text or "").partition(" ")[2].strip()
@@ -351,24 +365,30 @@ async def cmd_refresh(
 
 
 @router.message(Command("trend"))
-async def cmd_trend(message: Message, pool: asyncpg.Pool) -> None:
+async def cmd_trend(
+    message: Message, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
+) -> None:
     """``/trend`` — failures per day, and whether the last fix changed them."""
     settings = get_settings()
     user = message.from_user
     if not settings.is_admin(user.id if user else None):
-        await message.answer("⛔️ فقط ادمین می‌تونه.")
+        await message.answer(t("admin.only", lang))
         return
     trend = await build_trend(pool, days=TREND_DAYS)
-    await message.answer(render_trend(trend, headline=f"روند {TREND_DAYS} روزهٔ شکست‌ها"))
+    await message.answer(
+        render_trend(trend, headline=t("admin.trend_headline", lang, days=TREND_DAYS))
+    )
 
 
 @router.message(Command("fixlogin"))
-async def cmd_fixlogin(message: Message, extractor: ExtractorService) -> None:
+async def cmd_fixlogin(
+    message: Message, extractor: ExtractorService, lang: str = DEFAULT_LANG
+) -> None:
     """``/fixlogin`` — the guided way to a jar that actually signs YouTube in."""
     settings = get_settings()
     user = message.from_user
     if not settings.is_admin(user.id if user else None):
-        await message.answer("⛔️ فقط ادمین می‌تونه.")
+        await message.answer(t("admin.only", lang))
         return
     diagnosis = login_wizard.diagnose(extractor)
     await message.answer(
@@ -378,13 +398,17 @@ async def cmd_fixlogin(message: Message, extractor: ExtractorService) -> None:
 
 @router.callback_query(F.data == REFRESH_CALLBACK)
 async def on_alert_refresh(
-    cb: CallbackQuery, bot: Bot, extractor: ExtractorService, pool: asyncpg.Pool
+    cb: CallbackQuery,
+    bot: Bot,
+    extractor: ExtractorService,
+    pool: asyncpg.Pool,
+    lang: str = DEFAULT_LANG,
 ) -> None:
     """The cookie-jar alert's "♻️ اکسپورت دوباره" button."""
     settings = get_settings()
     if not settings.is_admin(cb.from_user.id):
         # Same rule as the doctor button: a forwarded alert is not a free export.
-        await cb.answer("⛔️ فقط ادمین می‌تونه.", show_alert=True)
+        await cb.answer(t("admin.only", lang), show_alert=True)
         return
 
     message = cb.message if isinstance(cb.message, Message) else None
@@ -420,13 +444,14 @@ async def on_alert_check(
     extractor: ExtractorService,
     cobalt: CobaltService | None = None,
     pool: asyncpg.Pool | None = None,
+    lang: str = DEFAULT_LANG,
 ) -> None:
     """The cookie-jar alert's "بررسی همین حالا" button."""
     settings = get_settings()
     if not settings.is_admin(cb.from_user.id):
         # Alerts only go to admins, but a forwarded message must not turn the
         # button into a free doctor for everyone.
-        await cb.answer("⛔️ فقط ادمین می‌تونه.", show_alert=True)
+        await cb.answer(t("admin.only", lang), show_alert=True)
         return
 
     message = cb.message if isinstance(cb.message, Message) else None
@@ -460,7 +485,17 @@ async def on_alert_check(
 #: The panel's own callback namespace (``admin:<screen>``).
 PANEL_HOME = "admin:home"
 _PANEL_SCREENS: frozenset[str] = frozenset(
-    {"home", "stats", "health", "queue", "tools", "broadcast", "support"}
+    {
+        "home",
+        "stats",
+        "health",
+        "queue",
+        "tools",
+        "broadcast",
+        "support",
+        "trend",
+        "blocks",
+    }
 )
 #: The two confirmations (they are not screens: they act).
 BC_SEND = "bc:send"
@@ -496,6 +531,8 @@ def _tools_keyboard(lang: str) -> InlineKeyboardMarkup:
     builder.button(text=t("admin.btn_refresh", lang), callback_data=REFRESH_CALLBACK)
     builder.button(text=t("admin.btn_broadcast", lang), callback_data="admin:broadcast")
     builder.button(text=t("admin.btn_support", lang), callback_data="admin:support")
+    builder.button(text=t("admin.btn_trend", lang), callback_data="admin:trend")
+    builder.button(text=t("admin.btn_blocks", lang), callback_data="admin:blocks")
     builder.adjust(2)
     builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
     builder.adjust(2)
@@ -520,6 +557,14 @@ def _support_keyboard(lang: str, *, configured: bool) -> InlineKeyboardMarkup:
     builder.adjust(2)
     builder.button(text=t("admin.btn_back", lang), callback_data="admin:tools")
     builder.adjust(2)
+    return builder.as_markup()
+
+
+def _report_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """A report screen: nothing to operate here, only the way back to the tools."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("admin.btn_back", lang), callback_data="admin:tools")
+    builder.adjust(1)
     return builder.as_markup()
 
 
@@ -549,6 +594,12 @@ async def panel_screen(
         return await _broadcast_screen(pool, lang)
     if screen == "support":
         return await _support_screen(pool, lang)
+    if screen == "trend":
+        trend = await build_trend(pool, days=TREND_DAYS)
+        headline = t("admin.trend_headline", lang, days=TREND_DAYS)
+        return render_trend(trend, headline=headline), _report_keyboard(lang)
+    if screen == "blocks":
+        return await _failure_report(pool, cobalt, lang), _report_keyboard(lang)
     return await panel.header(pool, lang), _panel_keyboard(lang)
 
 
@@ -664,7 +715,7 @@ async def on_panel_button(
 
 @router.message(Command("oauth"))
 async def cmd_oauth(
-    message: Message, bot: Bot, oauth: OAuthService | None = None
+    message: Message, bot: Bot, oauth: OAuthService | None = None, lang: str = DEFAULT_LANG
 ) -> None:
     """``/oauth`` — log YouTube in through the Smart-TV device flow.
 
@@ -679,7 +730,7 @@ async def cmd_oauth(
     settings = get_settings()
     user = message.from_user
     if not settings.is_admin(user.id if user else None):
-        await message.answer("⛔️ فقط ادمین می‌تونه.")
+        await message.answer(t("admin.only", lang))
         return
     if oauth is None:
         await message.answer("❌ سرویس OAuth در دسترس نیست.")

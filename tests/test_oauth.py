@@ -407,7 +407,7 @@ async def test_oauth_is_admin_only() -> None:
     bot = RecordingBot()
     message = _message("/oauth", bot, user_id=9)
 
-    await admin_module.cmd_oauth(message, bot)
+    await admin_module.cmd_oauth(message, bot, lang="fa")
 
     assert bot.texts == ["⛔️ فقط ادمین می‌تونه."]
 

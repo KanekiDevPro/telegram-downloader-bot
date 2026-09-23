@@ -533,7 +533,7 @@ async def test_the_button_is_admin_only(monkeypatch: pytest.MonkeyPatch) -> None
     stranger = _SpyCallback(user_id=99)
 
     # The extractor is None on purpose: reaching the doctor would blow up here.
-    await admin_module.on_alert_check(stranger, None, None)
+    await admin_module.on_alert_check(stranger, None, None, lang="fa")
 
     assert stranger.answers == [("⛔️ فقط ادمین می‌تونه.", True)]
 

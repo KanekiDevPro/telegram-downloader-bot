@@ -203,6 +203,11 @@ async def get_or_create_user(
     first contact (so a Persian speaker starts in Persian), never a reason to
     overwrite an existing choice — a user who picked English must keep it even if
     their client is in Persian.
+
+    The returned record also carries ``is_new`` — ``True`` only when *this* call
+    inserted the row (Postgres' ``xmax = 0`` idiom). Every row has a language from
+    birth (the locale guess above), so that flag is the only honest way for
+    ``/start`` to tell a genuine first contact from a returning user.
     """
     return await pool.fetchrow(
         """
@@ -210,7 +215,7 @@ async def get_or_create_user(
         VALUES ($1, $2, COALESCE($3, 'en'))
         ON CONFLICT (telegram_id) DO UPDATE
             SET username = COALESCE(EXCLUDED.username, users.username)
-        RETURNING *
+        RETURNING *, (xmax = 0) AS is_new
         """,
         telegram_id,
         username,

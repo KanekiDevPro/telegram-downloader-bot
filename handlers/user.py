@@ -25,7 +25,6 @@ from typing import Any
 
 import asyncpg
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -36,13 +35,16 @@ from core import database
 from core.config import get_settings
 from core.i18n import (
     DEFAULT_LANG,
+    lang_button,
     language_options,
     normalize_lang,
     normalize_supported,
     t,
 )
+from core.ui import callback_message
+from core.ui import edit_or_reply as _edit_or_reply
 from core.utils import escape_html, extract_url, today_local, validate_url
-from handlers.payment import callback_message, plans_keyboard
+from handlers.payment import plans_keyboard
 from services import cache as cache_service
 from services import content, preflight, spotify
 from services.delivery import replay_caption, send_cached_file
@@ -67,23 +69,23 @@ class DownloadStates(StatesGroup):
 def _main_menu(
     lang: str, *, admin: bool = False, support: bool = False
 ) -> InlineKeyboardMarkup:
-    """The things a user can do here — drawn for *this* user.
+    """HOME — the navigation hub everything hangs off: Download, Profile, Help.
 
-    Two differences that are not cosmetic. An admin is never offered «💎 Go VIP»:
-    they hold it permanently, so the button can only lead to a screen explaining
-    that they cannot buy what they already have. And the support button exists only
-    when an operator has actually configured a contact — a button nobody filled in
-    is worse than no button, because it is a promise the bot cannot keep.
-
-    Two buttons per row: these labels are long, and five full-width rows do not fit
-    on a phone screen without scrolling.
+    Deliberate shape, not a flat list. Download gets the top row to itself: it is
+    why most people came. Premium and Language live under Profile now — they are
+    account concerns, and a home carrying every action is a wall of buttons. The
+    support button exists only when an operator has actually configured a
+    contact — a button nobody filled in is worse than no button, because it is
+    a promise the bot cannot keep. And the admin panel button is drawn for
+    admins only (an admin is never offered «💎 Go VIP» either: they hold it
+    permanently, so the
+    button could only lead to a screen explaining that they cannot buy what they
+    already have).
     """
     builder = InlineKeyboardBuilder()
+    builder.button(text=t("menu.download", lang), callback_data="menu:download")
     builder.button(text=t("menu.profile", lang), callback_data="menu:profile")
-    if not admin:
-        builder.button(text=t("menu.premium", lang), callback_data="menu:premium")
     builder.button(text=t("menu.help", lang), callback_data="menu:help")
-    builder.button(text=t("menu.language", lang), callback_data="menu:language")
     if support:
         builder.button(text=t("menu.support", lang), callback_data="menu:support")
     if admin:
@@ -91,7 +93,7 @@ def _main_menu(
         # an operator had no way to tell a missing permission from a missing
         # feature. It is a button now, on the one screen they always open.
         builder.button(text=t("menu.admin", lang), callback_data="menu:admin")
-    builder.adjust(2)
+    builder.adjust(1, 2, 2)
     return builder.as_markup()
 
 
@@ -103,10 +105,15 @@ async def _menu_for(
     return _main_menu(lang, admin=is_admin(user), support=bool(contact))
 
 
-def _back_to_menu(lang: str) -> InlineKeyboardMarkup:
-    """Every screen but the menu itself carries its way back."""
+def _back_to_menu(lang: str, *, to: str = "menu:home") -> InlineKeyboardMarkup:
+    """Every screen but the menu itself carries its way back.
+
+    ``to`` names the *previous* screen — a help page goes back to the help hub,
+    everything else goes home. No dead ends, and no deep navigation stack to keep
+    track of either.
+    """
     builder = InlineKeyboardBuilder()
-    builder.button(text=t("menu.back", lang), callback_data="menu:home")
+    builder.button(text=t("menu.back", lang), callback_data=to)
     builder.adjust(1)
     return builder.as_markup()
 
@@ -134,16 +141,64 @@ def _format_keyboard(url: str, lang: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def _language_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """The two (or more) languages this bot speaks, each naming itself."""
+def _language_keyboard(
+    lang: str, *, back: str | None = "menu:home", mark: bool = True
+) -> InlineKeyboardMarkup:
+    """The two (or more) languages this bot speaks, each naming itself.
+
+    One picker, three contexts: the first-run choice (``back=None, mark=False`` —
+    a new user has no current language to mark and no menu to return to), the
+    ``/language`` screen (back to the menu), and the profile's «change language»
+    (back to the profile). The buttons are identical everywhere on purpose: one
+    handler serves all three, so a language cannot mean two things.
+    """
     builder = InlineKeyboardBuilder()
     for code, label in language_options():
-        marker = "✅ " if code == normalize_lang(lang) else ""
+        marker = "✅ " if mark and code == normalize_lang(lang) else ""
         builder.button(text=f"{marker}{label}", callback_data=f"{LANG_PREFIX}{code}")
     builder.adjust(len(language_options()))
-    builder.button(text=t("menu.back", lang), callback_data="menu:home")
-    builder.adjust(len(language_options()))
+    if back is not None:
+        builder.button(text=t("menu.back", lang), callback_data=back)
+        builder.adjust(len(language_options()))
     return builder.as_markup()
+
+
+def _profile_keyboard(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup:
+    """Profile's own actions: language, VIP (not for an admin), then the way back.
+
+    One per row: this is a screen people reach for a specific thing, and
+    predictable positions beat density. Premium is the same button the menu used
+    to carry — moved, not removed.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("menu.language", lang), callback_data="profile:language")
+    if not admin:
+        builder.button(text=t("menu.premium", lang), callback_data="menu:premium")
+    builder.button(text=t("menu.back", lang), callback_data="menu:home")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def _help_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """The help hub: its pages, the support contact, and the way home."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("help.btn_how", lang), callback_data="help:how")
+    builder.button(text=t("help.btn_platforms", lang), callback_data="help:platforms")
+    builder.button(text=t("help.btn_problems", lang), callback_data="help:problems")
+    builder.button(text=t("menu.support", lang), callback_data="menu:support")
+    builder.adjust(2)
+    builder.button(text=t("menu.back", lang), callback_data="menu:home")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+#: Help hub → the catalogue key its page shows. One dict, so a page's button and
+#: its text cannot drift apart.
+_HELP_PAGES: dict[str, str] = {
+    "help:how": "help.body",
+    "help:platforms": "help.platforms",
+    "help:problems": "help.problems",
+}
 
 
 #: A Telegram handle: what a support contact may be written as (``@name`` or bare).
@@ -192,16 +247,7 @@ def _welcome_text(name: str, lang: str) -> str:
     )
 
 
-async def _edit_or_reply(message: Message, text: str, **kwargs: Any) -> None:
-    """Update a message in place; one that cannot be edited gets a fresh reply.
 
-    Telegram refuses edits to old messages and to identical content, and a menu
-    that fails silently is worse than a new message — so the fallback is a send.
-    """
-    try:
-        await message.edit_text(text, **kwargs)
-    except TelegramBadRequest:
-        await message.answer(text, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -215,10 +261,56 @@ async def cmd_start(
     pool: asyncpg.Pool | None = None,
     lang: str = DEFAULT_LANG,
 ) -> None:
+    """``/start`` — Home, or the one screen that must come before it.
+
+    A user who has never chosen a language gets the bilingual picker first: their
+    language is the one thing not known yet, so asking it *is* the onboarding.
+    Everybody else lands on Home directly — the choice is stored on the account
+    and never asked again («Change language» is in the Profile).
+    """
+    if _needs_language_screen(user):
+        await message.answer(
+            t("language.first_time", lang),
+            reply_markup=_language_keyboard(lang, back=None, mark=False),
+        )
+        return
     await message.answer(
         _welcome_text(user["username"] or t("misc.friend", lang), lang),
         reply_markup=await _menu_for(pool, user, lang),
     )
+
+
+def _needs_language_screen(user: Any) -> bool:
+    """Whether ``/start`` opens with the language picker (a genuine first contact).
+
+    Two signals, because ``language`` alone cannot answer this: every row carries
+    one from birth — the registration INSERT stores the Telegram locale as a
+    *guess* — so a brand-new user is told apart by ``is_new``, the registration
+    query's "this call inserted the row". The empty-language arm covers rows that
+    predate the column and loose test doubles. Either way the screen shows once:
+    a tap stores the choice and the account is never asked again.
+    """
+    return _is_new(user) or not _speaks(user)
+
+
+def _is_new(user: Any) -> bool:
+    """``True`` only for a record the current update's registration just created."""
+    try:
+        return bool(user["is_new"])
+    except (KeyError, IndexError, TypeError):
+        return False
+
+
+def _speaks(user: Any) -> bool:
+    """Whether this account carries a stored language at all.
+
+    ``Record`` raises rather than returning ``None`` for a name it does not carry,
+    and test doubles are plain dicts — one guarded read answers both.
+    """
+    try:
+        return bool(user["language"])
+    except (KeyError, IndexError, TypeError):
+        return False
 
 
 @router.callback_query(F.data == "menu:home")
@@ -246,6 +338,18 @@ async def on_menu_home(
     )
 
 
+@router.callback_query(F.data == "menu:download")
+async def on_menu_download(cb: CallbackQuery, lang: str = DEFAULT_LANG) -> None:
+    """Download — the one thing most people came for, said once and clearly."""
+    message = callback_message(cb)
+    if message is None:
+        await cb.answer(t("intake.stale", lang), show_alert=True)
+        return
+    await cb.answer()
+    text = "\n".join((t("download.title", lang), "", t("download.how", lang)))
+    await _edit_or_reply(message, text, reply_markup=_back_to_menu(lang))
+
+
 @router.callback_query(F.data == "menu:profile")
 async def on_menu_profile(
     cb: CallbackQuery,
@@ -262,7 +366,7 @@ async def on_menu_profile(
     await _edit_or_reply(
         message,
         await _profile_text(user, lang, pool, queue),
-        reply_markup=_back_to_menu(lang),
+        reply_markup=_profile_keyboard(lang, admin=is_admin(user)),
     )
 
 
@@ -285,7 +389,7 @@ async def on_menu_help(cb: CallbackQuery, lang: str = DEFAULT_LANG) -> None:
         await cb.answer(t("intake.stale", lang), show_alert=True)
         return
     await cb.answer()
-    await _edit_or_reply(message, _help_text(lang), reply_markup=_back_to_menu(lang))
+    await _edit_or_reply(message, _help_text(lang), reply_markup=_help_keyboard(lang))
 
 
 @router.callback_query(F.data == "menu:language")
@@ -357,17 +461,32 @@ async def cmd_language(
         return
     await database.set_user_language(pool, user["telegram_id"], chosen)
     await message.answer(
-        t("language.set", chosen, name=_label(chosen)),
+        t("language.set", chosen, name=lang_button(chosen)),
         reply_markup=_main_menu(chosen),
     )
 
 
-def _label(code: str) -> str:
-    """The picker label for a language code (``🇬🇧 English``)."""
-    for candidate, label in language_options():
-        if candidate == code:
-            return label
-    return code
+@router.callback_query(F.data == "profile:language")
+async def on_profile_language(
+    cb: CallbackQuery, state: FSMContext, lang: str = DEFAULT_LANG
+) -> None:
+    """The profile's «change language»: the same picker, back to the profile.
+
+    The FSM remembers where the picker was opened from, so tapping a language
+    hands the *same message* back to the profile in the new language instead of
+    dumping the user at Home with no explanation of where they were.
+    """
+    message = callback_message(cb)
+    if message is None:
+        await cb.answer(t("intake.stale", lang), show_alert=True)
+        return
+    await cb.answer()
+    await state.update_data(lang_return="profile")
+    await _edit_or_reply(
+        message,
+        t("language.title", lang),
+        reply_markup=_language_keyboard(lang, back="menu:profile"),
+    )
 
 
 def _supported_language(value: str) -> str | None:
@@ -385,6 +504,8 @@ async def on_language_chosen(
     user: asyncpg.Record,
     pool: asyncpg.Pool,
     lang: str = DEFAULT_LANG,
+    state: FSMContext | None = None,
+    queue: TaskQueue | None = None,
 ) -> None:
     """A language tap: store it, then answer *in the new language*.
 
@@ -397,9 +518,24 @@ async def on_language_chosen(
         await cb.answer(t("misc.unknown_language", lang, options=options), show_alert=True)
         return
     await database.set_user_language(pool, user["telegram_id"], chosen)
-    await cb.answer(t("language.set", chosen, name=_label(chosen)))
+    await cb.answer(t("language.set", chosen, name=lang_button(chosen)))
     message = callback_message(cb)
     if message is None:
+        return
+    # Where the picker was opened from decides where it hands back to: the profile
+    # re-renders *itself* in the new language, anything else lands on Home. Either
+    # way it is the same message edited — never a chain of new screens.
+    origin = ""
+    if state is not None:
+        data = await state.get_data()
+        origin = str(data.pop("lang_return", "") or "")
+        await state.set_data(data)
+    if origin == "profile":
+        await _edit_or_reply(
+            message,
+            await _profile_text(user, chosen, pool, queue),
+            reply_markup=_profile_keyboard(chosen, admin=is_admin(user)),
+        )
         return
     await _edit_or_reply(
         message,
@@ -421,7 +557,8 @@ async def cmd_profile(
     lang: str = DEFAULT_LANG,
 ) -> None:
     await message.answer(
-        await _profile_text(user, lang, pool, queue), reply_markup=_back_to_menu(lang)
+        await _profile_text(user, lang, pool, queue),
+        reply_markup=_profile_keyboard(lang, admin=is_admin(user)),
     )
 
 
@@ -437,12 +574,33 @@ async def cmd_premium(
 
 @router.message(Command("help"))
 async def cmd_help(message: Message, lang: str = DEFAULT_LANG) -> None:
-    await message.answer(_help_text(lang), reply_markup=_back_to_menu(lang))
+    await message.answer(_help_text(lang), reply_markup=_help_keyboard(lang))
+
+
+@router.callback_query(F.data.in_(set(_HELP_PAGES)))
+async def on_help_page(cb: CallbackQuery, lang: str = DEFAULT_LANG) -> None:
+    """A help page: the hub's button becomes that page — back leads to the hub."""
+    message = callback_message(cb)
+    if message is None:
+        await cb.answer(t("intake.stale", lang), show_alert=True)
+        return
+    await cb.answer()
+    page = (cb.data or "").strip()
+    await _edit_or_reply(
+        message,
+        _help_page_text(page, lang),
+        reply_markup=_back_to_menu(lang, to="menu:help"),
+    )
 
 
 def _help_text(lang: str) -> str:
-    """What the help screen says: how to use the bot, then the commands."""
-    return "\n".join((t("help.title", lang), "", t("help.body", lang)))
+    """The help hub: one line of invitation, then the pages under it."""
+    return "\n".join((t("help.title", lang), "", t("help.intro", lang)))
+
+
+def _help_page_text(page: str, lang: str) -> str:
+    """A page's own text — the catalogue key ``_HELP_PAGES`` maps it to."""
+    return "\n".join((t("help.title", lang), "", t(_HELP_PAGES[page], lang)))
 
 
 async def _send_premium(
@@ -519,7 +677,7 @@ def _quota_line(user: asyncpg.Record, lang: str, used: int) -> str:
 
 
 async def _profile_text(
-    user: asyncpg.Record, lang: str, pool: asyncpg.Pool, queue: TaskQueue
+    user: asyncpg.Record, lang: str, pool: asyncpg.Pool, queue: TaskQueue | None
 ) -> str:
     """The account, in the order a user asks about it: who, which plan, how much.
 
@@ -532,7 +690,7 @@ async def _profile_text(
         if usage and usage["last_download_date"] == today_local()
         else 0
     )
-    depth = await queue.depth()
+    depth = await queue.depth() if queue is not None else 0
     username = f"@{user['username']}" if user["username"] else "—"
     return "\n".join(
         (
@@ -543,6 +701,7 @@ async def _profile_text(
             t("profile.status", lang, status=_status_line(user, lang)),
             _quota_line(user, lang, used),
             t("profile.queue", lang, depth=depth),
+            t("profile.language", lang, language=lang_button(lang)),
         )
     )
 

@@ -338,14 +338,16 @@ async def main() -> int:
         check(
             "every menu button has a handler registered",
             {
+                "on_menu_download",
                 "on_menu_profile",
                 "on_menu_premium",
                 "on_menu_help",
+                "on_help_page",
                 "on_menu_language",
                 "on_menu_home",
             }
             <= user_callbacks,
-            "👤 پروفایل من، 💎 ارتقا به ویژه (VIP)، ❓ راهنما، 🌐 زبان، 🔙 بازگشت",
+            "⬇️ دانلود، 👤 پروفایل من، ❓ راهنما (صفحه‌ها)، 🌐 زبان، ⬅️ بازگشت",
         )
         check(
             "the cookie alert's export button reaches the same path as /refresh",

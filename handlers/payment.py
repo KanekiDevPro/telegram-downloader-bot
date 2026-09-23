@@ -26,6 +26,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from core import database
 from core.config import get_settings
 from core.i18n import DEFAULT_LANG, plan_name, t
+from core.ui import callback_message as callback_message
 from core.utils import escape_html
 from services import recipients
 from services.payments.base import PaymentService
@@ -39,14 +40,7 @@ class PaymentStates(StatesGroup):
     waiting_receipt = State()
 
 
-def callback_message(cb: CallbackQuery) -> Message | None:
-    """The message a callback is bound to, or None when it is inaccessible.
 
-    Telegram may replace the message a callback was sent from with an
-    ``InaccessibleMessage``; answering such a callback with a new message is
-    impossible, so callers must handle ``None``.
-    """
-    return cb.message if isinstance(cb.message, Message) else None
 
 
 async def plans_keyboard(
