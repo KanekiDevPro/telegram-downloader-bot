@@ -147,10 +147,13 @@ class _Pool:
 class FakeExtractor:
     cookie_file: Any = None
 
-    def __init__(self, download_dir: Path) -> None:
+    def __init__(self, download_dir: Path, extract_log: list[str] | None = None) -> None:
         self.download_dir = download_dir
+        self.extract_log = extract_log
 
     async def extract(self, url: str) -> MediaInfo:
+        if self.extract_log is not None:
+            self.extract_log.append(url)
         return MediaInfo(
             source_url=URL,
             title="A Reel",
@@ -225,7 +228,12 @@ def _task(chat_id: int = 5, **over: Any) -> DownloadTask:
     return DownloadTask(**fields)
 
 
-async def _run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, task: DownloadTask) -> FakeBot:
+async def _run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    task: DownloadTask,
+    extract_log: list[str] | None = None,
+) -> FakeBot:
     monkeypatch.setattr(worker, "get_settings", lambda: _Settings())
     bot = FakeBot()
     pool = _Pool()
@@ -234,7 +242,7 @@ async def _run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, task: DownloadTa
         bot,  # type: ignore[arg-type]
         pool,
         _Queue(),  # type: ignore[arg-type]
-        FakeExtractor(download_dir=tmp_path),  # type: ignore[arg-type]
+        FakeExtractor(download_dir=tmp_path, extract_log=extract_log),  # type: ignore[arg-type]
         _NeverStopping(),  # type: ignore[arg-type]
     )
     _assert_clean(bot)
@@ -266,6 +274,36 @@ async def test_the_gateway_card_is_edited_not_replaced(
     assert bot.messages == [], "the card already exists; the worker sends nothing new"
     assert bot.uploads == ["video"], "the media is the one message this job adds"
     assert bot.edits, "the state (⏳) lives on the existing card"
+
+
+async def test_a_task_that_carries_its_extraction_is_not_re_extracted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Section D, pinned: the question's seconds-old extraction answers the
+    worker's guards — one extraction per job, not two."""
+    log: list[str] = []
+    await _run(
+        monkeypatch,
+        tmp_path,
+        _task(is_live=False, size_estimate=2048),
+        extract_log=log,
+    )
+    assert log == [], "nothing re-extracted what the question already knew"
+
+    legacy_log: list[str] = []
+    await _run(monkeypatch, tmp_path, _task(), extract_log=legacy_log)
+    assert len(legacy_log) == 1, "…but a bare payload still gets its guards answered"
+
+
+async def test_the_stage_timings_are_logged_for_the_bottleneck_hunt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("INFO", logger="services.worker"):
+        await _run(monkeypatch, tmp_path, _task())
+
+    assert any("stages probe=" in record.getMessage() for record in caplog.records)
 
 
 async def test_a_group_download_adds_no_group_chatter(

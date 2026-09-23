@@ -208,6 +208,37 @@ async def test_mp3_needs_ffmpeg_and_m4a_does_not(tmp_path: Path) -> None:
     assert format_selector("audio", "m4a") == format_selector("audio", "mp3")
 
 
+def test_a_conversion_that_returns_the_wrong_container_fails_explicitly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A " + '"flac"' + " tap that produced .mp3 is a failed conversion — never a
+    file delivered under a borrowed name (the caption names real files)."""
+    import services.extractor as extractor_module
+
+    class FakeYDL:
+        def __init__(self, opts: dict[str, Any]) -> None:
+            self.opts = opts
+
+        def __enter__(self) -> "FakeYDL":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def extract_info(self, url: str, download: bool = False) -> dict[str, Any]:
+            job = Path(self.opts["outtmpl"]).parent
+            job.mkdir(parents=True, exist_ok=True)
+            (job / "song.mp3").write_bytes(b"x" * 16)  # the wrong container
+            return {"title": "Song", "id": "abc", "ext": "mp3"}
+
+    monkeypatch.setattr(extractor_module, "yt_dlp", type("M", (), {"YoutubeDL": FakeYDL}))
+
+    service = _service(tmp_path)
+    with pytest.raises(ExtractionError) as boom:
+        _download_sync(service, "audio", "flac")
+    assert boom.value.code == "CONVERSION_MISMATCH"
+
+
 def test_the_mp3_tier_post_processes_and_the_m4a_tier_does_not(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -230,9 +261,13 @@ def test_the_mp3_tier_post_processes_and_the_m4a_tier_does_not(
         def extract_info(self, url: str, download: bool = False) -> dict[str, Any]:
             job = Path(captured[-1]["outtmpl"]).parent
             job.mkdir(parents=True, exist_ok=True)
-            produced = job / "song.m4a"
+            # The post-processor's codec decides the container — model reality.
+            codec = (
+                captured[-1].get("postprocessors", [{}])[0].get("preferredcodec", "m4a")
+            )
+            produced = job / f"song.{codec}"
             produced.write_bytes(b"x" * 16)
-            return {"title": "Song", "id": "abc", "ext": "m4a"}
+            return {"title": "Song", "id": "abc", "ext": codec}
 
     monkeypatch.setattr(extractor_module, "yt_dlp", type("M", (), {"YoutubeDL": FakeYDL}))
 

@@ -68,7 +68,7 @@ def test_credentials_and_ports_do_not_change_the_host() -> None:
 def test_video_links_are_offered_quality_tiers() -> None:
     choices = content.routing_for("https://youtu.be/abc").choices
 
-    assert [choice.quality for choice in choices] == ["best", "1080", "720", "480"]
+    assert [choice.quality for choice in choices] == ["best"], "one honest default"
     assert all(choice.media_format == "video" for choice in choices)
     assert content.routing_for("https://youtu.be/abc").header_key == "intake.choose_quality"
 
@@ -146,12 +146,14 @@ def test_every_offered_choice_is_parseable_as_a_callback() -> None:
 
 
 def test_a_tap_on_something_that_was_offered_is_accepted() -> None:
+    """Resolution rows are validated against what the probe offered (the FSM's
+    job); the catalogue resolves its own vocabulary."""
     url = "https://youtu.be/abc"
 
-    found = content.find_choice(url, "video", "720")
+    found = content.find_choice(url, "video", "best")
 
     assert found is not None
-    assert (found.media_format, found.quality) == ("video", "720")
+    assert (found.media_format, found.quality) == ("video", "best")
 
 
 @pytest.mark.parametrize(
@@ -169,6 +171,17 @@ def test_a_request_that_was_never_offered_is_rejected(
     url: str, media_format: str, quality: str
 ) -> None:
     assert content.find_choice(url, media_format, quality) is None
+
+
+def test_the_platform_families_include_the_shapes_catalogues_miss() -> None:
+    for url in (
+        "https://www.reddit.com/r/Android/s/ShareToken",
+        "https://v.redd.it/x",
+        "https://redd.it/x",
+        "https://old.reddit.com/r/x/comments/1/y/",
+    ):
+        assert content.claims_platform(url), url
+    assert not content.claims_platform("https://some-unknown-site.example/v/1")
 
 
 def test_the_cache_key_and_the_menu_agree_on_what_a_tier_is() -> None:

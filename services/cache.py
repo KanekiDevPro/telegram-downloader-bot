@@ -50,6 +50,7 @@ async def memorize(
     request: str,
     kind: str = "",
     title: str = "",
+    label: str = "",
 ) -> None:
     """Store a fresh file_id for a URL after a successful upload.
 
@@ -58,8 +59,9 @@ async def memorize(
     ``photo_group``, ``audio``, … — because what comes back is not always what was
     asked for: an image post answered a «video» request, and the cached replay has
     to send it as a photo again. For a gallery, ``telegram_file_id`` holds a JSON
-    list of ids. ``title`` is the media's own name, kept so a replay's card is
-    byte-for-byte the card the first send had.
+    list of ids. ``title`` is the media's own name and ``label`` the quality line
+    the fresh caption used, kept so a replay's card is byte-for-byte the card the
+    first send had.
     """
     await database.store_cached_file(
         pool,
@@ -70,6 +72,7 @@ async def memorize(
         quality=request,
         kind=kind,
         title=title,
+        label=label,
     )
 
 

@@ -49,6 +49,15 @@ def test_the_same_card_shows_up_whether_fresh_or_cached() -> None:
     assert cached == fresh
 
 
+def test_a_replay_shows_the_label_the_fresh_caption_used() -> None:
+    caption = replay_caption(
+        _row(quality="audio:flac", label="🎧 FLAC · 41.2 MB"), EN
+    )
+    assert "🎧 FLAC · 41.2 MB" in caption
+    # The request's own wording never shows through once a label exists.
+    assert "MP3" not in caption
+
+
 def test_an_old_row_without_a_title_still_replays_safely() -> None:
     row = _row()
     row.pop("title")

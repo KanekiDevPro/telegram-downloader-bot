@@ -75,6 +75,12 @@ class DownloadTask:
     #: back to the chat id).
     chat_title: str = ""
 
+    #: The question-time probe's verdicts — ``None`` when nothing probed (older
+    #: payloads), in which case the worker checks for itself. They travel with
+    #: the task so one job costs one extraction, not two.
+    is_live: Optional[bool] = None
+    size_estimate: Optional[int] = None
+
     def to_payload(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
 

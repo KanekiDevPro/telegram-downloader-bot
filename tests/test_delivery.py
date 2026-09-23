@@ -58,7 +58,14 @@ class FakeBot:
 
 def _row(**fields: Any) -> dict[str, Any]:
     """A cache row. ``kind`` is absent for rows written before the column existed."""
-    return {"url_hash": "h", "telegram_file_id": "AgAC-photo", "quality": "video", **fields}
+    return {
+        "url_hash": "h",
+        "telegram_file_id": "AgAC-photo",
+        "quality": "video",
+        "original_url": "https://youtu.be/abc",
+        "title": "A Clip",
+        **fields,
+    }
 
 
 # ---------------------------------------------------------------------------

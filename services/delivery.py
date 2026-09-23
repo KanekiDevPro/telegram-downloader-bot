@@ -180,28 +180,35 @@ def media_card(
 ) -> str:
     """The standard block for anything downloadable — screen or caption alike.
 
-    A video answers "what is this" in four lines: 🎬 what it is, 🔗 where it came
-    from (the link *the user sent*, so a Spotify track names the Spotify URL), 🎞
-    which version this is (quality and, when it is known, its size), 🤖 who made
-    it. A song speaks its own language instead — 🎵 the title, 🎤 who made it, 💿
-    which release, ⏱ how long, 🎧 what this file is — because music is
-    identified by its credits, not by a filename, and the link becomes its
-    footnote. A missing fact omits its line — never «None», never an empty field —
-    so a card read at any moment is complete.
+    A video answers "what is this" in four lines: 🎬 what it is, 🎞 which version
+    this is (quality and, when it is known, its size), 🔗 where it came from (the
+    link *the user sent*, so a Spotify track names the Spotify URL), 🤖 who made
+    it. A song speaks its own language instead — 🎵 the title, 🎤 who made it and
+    💿 which release, ⏱ how long and 🎧 what this file is — because music is
+    identified by its credits, not by a filename. Related facts touch; groups
+    breathe one blank line apart, so the block scans on a phone. A missing fact
+    omits its line — never «None», never an empty field — so a card read at any
+    moment is complete.
     """
-    lines: list[str] = []
     clean_title = title.strip()
+    identity: list[str] = []
     if clean_title and clean_title != url.strip():
         # A title that *is* the URL (the extractor's own fallback) would say it
         # twice; the 🔗 line already carries it.
         key = "media.line_music" if audio else "media.line_title"
-        lines.append(t(key, lang, title=escape_html(clean_title[:120])))
-    if artist.strip():
-        lines.append(t("media.line_artist", lang, artist=escape_html(artist.strip())))
-    if album.strip():
-        lines.append(t("media.line_album", lang, album=escape_html(album.strip())))
-    if duration.strip():
-        lines.append(t("media.line_duration", lang, duration=escape_html(duration.strip())))
+        identity.append(t(key, lang, title=escape_html(clean_title[:120])))
+    credits = [
+        line
+        for line in (
+            t("media.line_artist", lang, artist=escape_html(artist.strip()))
+            if artist.strip()
+            else "",
+            t("media.line_album", lang, album=escape_html(album.strip()))
+            if album.strip()
+            else "",
+        )
+        if line
+    ]
     quality_line = ""
     if quality or size:
         # Quality and size are one fact — which version this is — on one line.
@@ -211,15 +218,94 @@ def media_card(
             shown = quality or size
         key = "media.line_audio_quality" if audio else "media.line_quality"
         quality_line = t(key, lang, quality=escape_html(shown))
-    url_line = t("media.line_url", lang, url=escape_html(url)) if url else ""
-    if audio:
-        # A song's identity is its credits and its sound; the link is the footnote.
-        lines.extend(line for line in (quality_line, url_line) if line)
-    else:
-        lines.extend(line for line in (url_line, quality_line) if line)
-    if _BOT_USERNAME:
-        lines.append(t("media.line_bot", lang, bot=escape_html(f"@{_BOT_USERNAME}")))
-    return "\n".join(lines)
+    sound = [
+        line
+        for line in (
+            t("media.line_duration", lang, duration=escape_html(duration.strip()))
+            if duration.strip()
+            else "",
+            quality_line,
+        )
+        if line
+    ]
+    source = [t("media.line_url", lang, url=escape_html(url))] if url else []
+    made = (
+        [t("media.line_bot", lang, bot=escape_html(f"@{_BOT_USERNAME}"))]
+        if _BOT_USERNAME
+        else []
+    )
+    groups = (
+        [identity, credits, sound, source, made]
+        if audio
+        else [identity, sound, source, made]
+    )
+    return "\n\n".join("\n".join(group) for group in groups if group)
+
+
+def resolution_name(height: object, lang: str = DEFAULT_LANG) -> str:
+    """``1080p`` — and the two names cinema gave the big ones: ``1440p (2K)``,
+    ``2160p (4K)``. The number is the fact; the tag only helps place it.
+    """
+    try:
+        value = int(str(height).strip())
+    except (TypeError, ValueError):
+        return ""
+    name = t("media.quality_p", lang, height=value)
+    if value >= 2160:
+        return f"{name} (4K)"
+    if value >= 1440:
+        return f"{name} (2K)"
+    return name
+
+
+#: The container each audio codec's file is named by — and what a produced file's
+#: extension says it *is*.
+_AUDIO_EXT_NAMES: dict[str, str] = {
+    ".mp3": "MP3",
+    ".m4a": "M4A",
+    ".aac": "M4A",
+    ".opus": "OPUS",
+    ".ogg": "OPUS",
+    ".wav": "WAV",
+    ".flac": "FLAC",
+}
+_TIER_EXT: dict[str, str] = {
+    "mp3": ".mp3",
+    "m4a": ".m4a",
+    "aac": ".m4a",
+    "opus": ".opus",
+    "wav": ".wav",
+    "flac": ".flac",
+}
+
+
+def produced_quality_label(
+    media_format: str,
+    quality: object,
+    suffix: str,
+    lang: str = DEFAULT_LANG,
+    *,
+    produced_p: object = None,
+) -> str:
+    """The quality line for a file that exists — named by what it actually is.
+
+    Video: the resolution the produced file reports, and *nothing* when nobody
+    reported one ("best available" is a ranking, not a description). Audio: the
+    container the file system says — ``.flac`` is FLAC whatever button folklore
+    remembers — with the bitrate named only when the codec asked for is the codec
+    that happened. Never «320 kbps» under a file that is something else.
+    """
+    if media_format != "audio":
+        return resolution_name(produced_p, lang) if produced_p else ""
+    tier = normalize_quality(quality, "audio")
+    suffix = (suffix or "").lower()
+    name = _AUDIO_EXT_NAMES.get(suffix) or tier.split(".")[0].upper()
+    if audio_is_original(tier):
+        return f"{name} · {t('media.original', lang)}"
+    kbps = audio_bitrate(tier)
+    if kbps and suffix == _TIER_EXT.get(tier.split(".")[0]):
+        return f"{name} · {kbps} kbps"
+    return name
 
 
 def quality_label(media_format: str, quality: object, lang: str = DEFAULT_LANG) -> str:
@@ -227,15 +313,13 @@ def quality_label(media_format: str, quality: object, lang: str = DEFAULT_LANG) 
 
     Audio names its *rate*, not a mood: the file is exactly the kbps the button
     promised — or the site's own untouched stream, said so in plain words. Raw and
-    lossless output simply name their container: no knob, no claim.
+    lossless output simply name their container: no knob, no claim. A default
+    video request names nothing: what arrived is described by
+    :func:`produced_quality_label` once it exists.
     """
     if media_format != "audio":
         tier = normalize_quality(quality, "video")
-        return (
-            t("media.quality_max", lang)
-            if tier == "best"
-            else t("media.quality_p", lang, height=tier)
-        )
+        return "" if tier == "best" else resolution_name(tier, lang)
     tier = normalize_quality(quality, "audio")
     name = tier.split(".")[0].upper()
     kbps = audio_bitrate(tier)
@@ -273,7 +357,10 @@ def replay_caption(record: asyncpg.Record, lang: str = DEFAULT_LANG) -> str:
     return media_card(
         title=_field(record, "title"),
         url=_field(record, "original_url"),
-        quality=label_for_request(request, lang),
+        # The label the fresh caption used, stored verbatim — the replay's card is
+        # the first send's card. A row from before that column describes its
+        # request instead.
+        quality=_field(record, "label") or label_for_request(request, lang),
         audio=request.startswith("audio"),
         lang=lang,
     )

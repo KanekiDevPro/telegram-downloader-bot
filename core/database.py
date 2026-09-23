@@ -96,6 +96,12 @@ ALTER TABLE smart_cache ADD COLUMN IF NOT EXISTS kind TEXT;
 -- file over a missing caption fact.
 ALTER TABLE smart_cache ADD COLUMN IF NOT EXISTS title TEXT;
 
+-- The quality line exactly as the fresh caption spelled it, so the replay's card
+-- is the same card (a file described by what it is, not by what was asked).
+-- Nullable like the two above: a row from before this column existed falls back
+-- to describing its request.
+ALTER TABLE smart_cache ADD COLUMN IF NOT EXISTS label TEXT;
+
 -- Every failed download, with the cause we diagnosed. A block has a small set of
 -- meanings (our login, the IP, the site itself, a stale session) and only the
 -- first is fixable from here — so the counts, not the individual rows, are the
@@ -468,14 +474,17 @@ async def store_cached_file(
     quality: str,
     kind: str = "",
     title: str = "",
+    label: str = "",
 ) -> None:
     """Remember an upload. ``quality`` is the requested format (part of the key);
     ``kind`` is how to send it again (``photo_group``, ``audio``, …); ``title``
-    is the media's own name, so the replay's card reads like the fresh send."""
+    is the media's own name and ``label`` the quality line the fresh caption
+    used, so the replay's card reads like the fresh send."""
     await pool.execute(
         """
-        INSERT INTO smart_cache (url_hash, original_url, platform, telegram_file_id, quality, kind, title)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO smart_cache
+            (url_hash, original_url, platform, telegram_file_id, quality, kind, title, label)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (url_hash) DO NOTHING
         """,
         url_hash,
@@ -485,6 +494,7 @@ async def store_cached_file(
         quality,
         kind or None,
         title or None,
+        label or None,
     )
 
 

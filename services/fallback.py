@@ -200,6 +200,7 @@ async def fetch(
         info=_media_info(url, file_path, media.size_bytes),
         media_format=media_format,
         extra_paths=extra,
+        quality=str(quality or ""),
     )
 
 

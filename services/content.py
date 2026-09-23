@@ -75,19 +75,23 @@ class Routing:
         A photo post has exactly one possible request — "send its media" — because
         a gallery has no quality tier and no audio to extract. A menu of one honest
         button is still a menu: it costs a round trip and reads as if the bot had
-        forgotten the other options. ``None`` means the link has real choices and
-        the question is worth asking.
+        forgotten the other options. But one video *tier* is not a solo answer:
+        «download it» on an unprobed link is a fallback row, and the question is
+        still where real resolutions may appear. ``None`` means ask.
         """
-        return self.choices[0] if len(self.choices) == 1 else None
+        if len(self.choices) != 1:
+            return None
+        only = self.choices[0]
+        if only.media_format == "video" and only != _MEDIA_CHOICE:
+            return None
+        return only
 
 
 #: Video quality tiers, best first — the order a person thinks in.
-_VIDEO_CHOICES: tuple[Choice, ...] = (
-    Choice("fmt.video_best", "video", "best"),
-    Choice("fmt.video_1080", "video", "1080"),
-    Choice("fmt.video_720", "video", "720"),
-    Choice("fmt.video_480", "video", "480"),
-)
+#: One deliberate tap when a link tells us nothing: «download it». The engine
+#: picks within its senses and the caption names what actually arrived — a ladder
+#: invented here would be "up to" theatre with no facts behind it.
+_VIDEO_CHOICES: tuple[Choice, ...] = (Choice("menu.download", "video", "best"),)
 
 #: The audio menu is two taps deep on purpose: first the *container* the user
 #: wants to receive (a file named .mp3 is a different promise than one named
@@ -386,6 +390,63 @@ def _path_kind(path: str, host: str = "") -> ContentKind | None:
         if any(fragment in lowered for fragment in fragments):
             return kind
     return None
+
+
+def knows_host(url: str) -> bool:
+    """Whether this bot claims the link's host — the router has an opinion on it.
+
+    A claimed host is supported whatever one engine's URL catalogue says: the
+    engines and the fallback still get the final word on a link, but
+    "unsupported" is for links nobody here recognizes.
+    """
+    return _host_kind(url_host(url)) is not None
+
+
+#: The platforms this bot advertises, in every shape they come in — not just the
+#: main host. `redd.it` and `v.redd.it` are Reddit as much as `reddit.com` is,
+#: and a short or CDN link is exactly the shape a strict URL catalogue misses.
+#: Being listed here promises nothing about the download: the engines and the
+#: fallback still get the final word (and their real diagnosis reaches the user
+#: if both fail) — it only keeps a recognized platform out of the dead end where
+#: the intake gate brands its own supported platforms "unsupported".
+PLATFORM_HOSTS: frozenset[str] = frozenset(
+    {
+        "youtube.com",
+        "youtu.be",
+        "youtube-nocookie.com",
+        "music.youtube.com",
+        "instagram.com",
+        "tiktok.com",
+        "vm.tiktok.com",
+        "vt.tiktok.com",
+        "x.com",
+        "twitter.com",
+        "t.co",
+        "facebook.com",
+        "fb.watch",
+        "reddit.com",
+        "redd.it",
+        "v.redd.it",
+        "i.redd.it",
+        "vimeo.com",
+        "soundcloud.com",
+        "dailymotion.com",
+        "twitch.tv",
+        "bilibili.com",
+        "b23.tv",
+        "vk.com",
+    }
+)
+
+
+def claims_platform(url: str) -> bool:
+    """Whether the link's host belongs to a platform this bot advertises.
+
+    Family-wise: ``old.reddit.com`` is reddit.com, and a bare short link is the
+    platform's own front door.
+    """
+    host = url_host(url)
+    return any(host == name or host.endswith(f".{name}") for name in PLATFORM_HOSTS)
 
 
 def classify(url: str) -> ContentKind:

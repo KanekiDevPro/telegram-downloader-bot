@@ -211,6 +211,19 @@ AUDIO_EXPORTS: dict[str, tuple[str, str | None]] = {
     "flac": ("flac", None),
 }
 
+#: The file each re-encode codec must end up as — the contract a "flac" tap makes
+#: with the file system. Checked when the conversion is done: a produced file in
+#: another container is a failed conversion (``CONVERSION_MISMATCH``), never a
+#: differently-coded surprise.
+_CODEC_EXT: dict[str, str] = {
+    "mp3": ".mp3",
+    "m4a": ".m4a",
+    "aac": ".m4a",
+    "opus": ".opus",
+    "wav": ".wav",
+    "flac": ".flac",
+}
+
 
 def audio_bitrate(quality: object) -> int | None:
     """The kbps a tier encodes at — ``None`` where nothing is re-encoded.
@@ -1502,6 +1515,10 @@ class ExtractorService:
             "socket_timeout": 15,
             "retries": 3,
             "fragment_retries": 3,
+            # Segmented sources (HLS/DASH) fetch their fragments in parallel —
+            # the one concurrency that is per-source and bounded. Plain files are
+            # unaffected.
+            "concurrent_fragment_downloads": 4,
             "format": format_selector(media_format, quality),
             "merge_output_format": MERGE_OUTPUT_FORMAT,
             # Resolution first, then HEVC on ties — consistent with the selector.
@@ -2092,4 +2109,20 @@ class ExtractorService:
         if not files:
             shutil.rmtree(target_dir, ignore_errors=True)
             raise ExtractionError("GENERAL", "فایل دانلودشده پیدا نشد.")
-        return DownloadResult(file_path=files[-1], info=_to_media_info(url, info), media_format=media_format)
+        produced = files[-1]
+        if export is not None:
+            # The user picked a codec; the file that exists must be that codec.
+            # Anything else fails *explicitly* — the caption names real files.
+            expected = _CODEC_EXT.get(export[0], produced.suffix.lower())
+            if produced.suffix.lower() != expected:
+                shutil.rmtree(target_dir, ignore_errors=True)
+                raise ExtractionError(
+                    "CONVERSION_MISMATCH",
+                    f"خروجی {produced.suffix} تولید شد در حالی که {expected} انتخاب شده بود.",
+                )
+        return DownloadResult(
+            file_path=produced,
+            info=_to_media_info(url, info),
+            media_format=media_format,
+            quality=str(tier),
+        )

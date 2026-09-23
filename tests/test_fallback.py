@@ -368,6 +368,7 @@ async def test_a_blocked_extraction_is_served_by_the_fallback(
             "request": "video",
             "kind": "video",
             "title": "Big Buck Bunny",
+            "label": "",
         }
     ]
 
@@ -443,6 +444,7 @@ async def test_an_image_post_is_sent_as_a_photo(
             "request": "video",
             "kind": "photo",
             "title": "twitter_123",
+            "label": "",
         }
     ]
     assert env.blocks == [("IMAGE_ONLY", "site")], "the engine's gap is still on record"
@@ -473,6 +475,7 @@ async def test_a_post_with_several_pictures_arrives_as_one_album(
             "request": "video",
             "kind": "photo_group",
             "title": "twitter_1",
+            "label": "",
         }
     ]
 
@@ -623,6 +626,7 @@ async def test_a_spotify_link_is_rewritten_before_anything_is_tried(
             "request": "video",
             "kind": "video",
             "title": "Never Gonna Give You Up",  # the song, so a replay names it too
+            "label": "",
         }
     ]
 

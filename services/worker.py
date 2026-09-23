@@ -35,6 +35,7 @@ from services.delivery import (
     format_duration,
     join_file_ids,
     media_card,
+    produced_quality_label,
     quality_label,
     replay_caption,
     send_album,
@@ -368,6 +369,7 @@ async def process_download_task(
     """
     settings = get_settings()
     lang = task.lang or DEFAULT_LANG
+    started = time.monotonic()
     if status is None:
         card = _task_card(task, lang)
         status = await _open_status(task, bot, card)
@@ -407,8 +409,16 @@ async def process_download_task(
     # 2) Metadata extraction (threaded, non-blocking). A site that refuses *this
     #    request* is the one failure a different address fixes, so it goes to the
     #    fallback engine instead of the user.
+    probe_started = time.monotonic()
     try:
-        media_info = await extractor.extract(target_url)
+        if task.is_live is None:
+            # An older payload carries no verdicts — the job checks for itself.
+            media_info = await extractor.extract(target_url)
+            is_live, size_guess = media_info.is_live, media_info.filesize_approx or 0
+        else:
+            # The question's probe learned these moments ago (handlers/user.py),
+            # so one job costs one extraction, not two.
+            is_live, size_guess = bool(task.is_live), task.size_estimate or 0
     except ExtractionError as exc:
         if not fallback.should_use_fallback(exc, cobalt):
             await _note_fallback_skip(pool, exc, cobalt)
@@ -426,10 +436,11 @@ async def process_download_task(
             track=track,
         )
         return
-    if media_info.is_live:
+    probe_s = time.monotonic() - probe_started
+    if is_live:
         await _edit(status, _on_card(card, t("work.live", lang)))
         return
-    if media_info.filesize_approx and media_info.filesize_approx > settings.upload_limit_bytes:
+    if size_guess and size_guess > settings.upload_limit_bytes:
         await _edit(
             status,
             _on_card(
@@ -438,7 +449,7 @@ async def process_download_task(
                     "work.too_big",
                 lang,
                     size=format_size(
-                        media_info.filesize_approx, unknown=t("misc.unknown_size", lang)
+                        size_guess, unknown=t("misc.unknown_size", lang)
                     ),
                     limit=settings.upload_limit_mb,
                 ),
@@ -452,6 +463,7 @@ async def process_download_task(
 
     # 4) Download (threaded + throttled ⏳ edits — the card's one compact state).
     progress = _ProgressEditor(status, lang, card)
+    download_started = time.monotonic()
     try:
         async with ActionPulse(bot, task.chat_id):
             result = await extractor.download(
@@ -476,7 +488,17 @@ async def process_download_task(
         )
         return
 
-    await _finish_upload(task, bot, pool, status, result, card=card, track=track)
+    download_s = time.monotonic() - download_started
+    upload_s = await _finish_upload(task, bot, pool, status, result, card=card, track=track)
+    # The job's bill of time — the evidence any "make it faster" claim owes.
+    logger.info(
+        "stages probe=%.1fs download=%.1fs upload=%.1fs total=%.1fs | %.60s",
+        probe_s,
+        download_s,
+        upload_s,
+        time.monotonic() - started,
+        task.url,
+    )
     if target_url != task.url:
         # A *mapped* link just went through YouTube anonymously (search and all), so
         # "YouTube refuses anonymous requests here" is no longer true.
@@ -508,8 +530,10 @@ async def _finish_upload(
     *,
     card: str = "",
     track: spotify.SpotifyTrack | None = None,
-) -> None:
+) -> float:
     """Ceiling check, upload, cache the file_id — and always drop the job dir.
+
+    Returns the upload stage's seconds (the job's timing line reports them).
 
     The *result* owns the metadata here, not the earlier extraction: the fallback
     engine has no metadata of its own, so one shape has to serve both engines.
@@ -519,12 +543,13 @@ async def _finish_upload(
     """
     settings = get_settings()
     lang = task.lang or DEFAULT_LANG
+    upload_started = time.monotonic()
     try:
         files = (result.file_path, *result.extra_paths)
         actual_size = sum(path.stat().st_size for path in files)
         if actual_size > settings.upload_limit_bytes:
             await _edit(status, _on_card(card, t("work.final_too_big", lang)))
-            return
+            return 0.0
 
         # Upload to Telegram and remember the file_id (and how to send it again).
         # The card's ⏳ covers the upload too — one compact state for the whole
@@ -555,10 +580,18 @@ async def _finish_upload(
                 request=cache_service.request_key(task.media_format, task.quality),
                 kind=delivered.kind,
                 title=media_title,
+                label=produced_quality_label(
+                    result.media_format,
+                    result.quality,
+                    result.file_path.suffix,
+                    lang,
+                    produced_p=result.info.label_p or result.info.height,
+                ),
             )
         await _note_group_download(pool, task, ok=True)
         if card:
             await _edit(status, card)  # the card at rest: no state line left
+        return time.monotonic() - upload_started
     finally:
         shutil.rmtree(result.file_path.parent, ignore_errors=True)  # per-job dir
 
@@ -710,11 +743,14 @@ def _upload_caption(
     release, ⏱ how long — under the link the *user* sent (a Spotify track names
     the Spotify URL, never the mapped video it was fetched through).
     """
-    named = result.info.label_p or result.info.height
-    quality = (
-        t("media.quality_p", lang, height=named)
-        if result.media_format == "video" and named
-        else quality_label(result.media_format, result.quality, lang)
+    # What the file *is* — its produced container and resolution — never what a
+    # button once promised.
+    quality = produced_quality_label(
+        result.media_format,
+        result.quality,
+        result.file_path.suffix,
+        lang,
+        produced_p=result.info.label_p or result.info.height,
     )
     real_size = format_size(
         sum(path.stat().st_size for path in (result.file_path, *result.extra_paths)),

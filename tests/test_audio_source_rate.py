@@ -142,12 +142,17 @@ def test_the_untouched_stream_survives_the_source_cap() -> None:
     assert _rates(rows[1:]) == [128]
 
 
-def test_the_note_only_speaks_when_something_was_hidden() -> None:
-    hidden = _source_rate_note("mp3", {"source_kbps": 128}, FA)
-    assert "128 kbps" in hidden
-    assert hidden == t("audio.source_rate", FA, rate="128 kbps")
-    # Nothing hidden (a 320 source) → nothing to explain.
-    assert _source_rate_note("mp3", {"source_kbps": 320}, FA) == ""
+def test_the_source_rate_is_visible_whenever_it_is_known() -> None:
+    """«What I have» is the fact that makes every row below it judgeable —
+    shown whether or not the ladder was trimmed."""
+    assert _source_rate_note("mp3", {"source_kbps": 128}, FA) == t(
+        "audio.source_rate", FA, rate="128 kbps"
+    )
+    assert _source_rate_note("mp3", {"source_kbps": 320}, FA) == t(
+        "audio.source_rate", FA, rate="320 kbps"
+    )
+    # Unknown stays silent — never a guess.
+    assert _source_rate_note("mp3", {}, FA) == ""
 
 
 def test_an_approximate_source_rate_says_so() -> None:

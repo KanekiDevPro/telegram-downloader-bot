@@ -283,10 +283,6 @@ MESSAGES: Final[Catalog] = {
     # ---------------------------------------------------------------------
     # Format / quality buttons and their headers
     # ---------------------------------------------------------------------
-    "fmt.video_best": {"en": "🎬 Best available quality", "fa": "🎬 بهترین کیفیت موجود"},
-    "fmt.video_1080": {"en": "🎬 1080p (up to)", "fa": "🎬 1080p (تا سقف)"},
-    "fmt.video_720": {"en": "🎬 720p (up to)", "fa": "🎬 720p (تا سقف)"},
-    "fmt.video_480": {"en": "🎬 480p (smallest file)", "fa": "🎬 480p (کم‌حجم‌ترین)"},
     "fmt.audio_mp3": {"en": "🎵 Audio — MP3 192k", "fa": "🎵 فقط صدا — MP3 192k"},
     "fmt.audio_m4a": {
         "en": "🎧 Audio — M4A (original, no re-encode)",
@@ -340,7 +336,6 @@ MESSAGES: Final[Catalog] = {
     "media.line_quality": {"en": "🎞 {quality}", "fa": "🎞 {quality}"},
     "media.line_audio_quality": {"en": "🎧 {quality}", "fa": "🎧 {quality}"},
     "media.line_bot": {"en": "🤖 {bot}", "fa": "🤖 {bot}"},
-    "media.quality_max": {"en": "Best available", "fa": "بیشترین کیفیت موجود"},
     "media.quality_p": {"en": "{height}p", "fa": "{height}p"},
     # The quality line of a copied stream: named honestly, never a bitrate.
     "media.original": {"en": "Original", "fa": "اصلی"},
@@ -410,6 +405,10 @@ MESSAGES: Final[Catalog] = {
     "err.OAUTH_REFUSED": {
         "en": "The bot's YouTube login method is misconfigured — an admin has been notified.",
         "fa": "تنظیمات لاگین یوتیوب ربات اشتباه است — ادمین‌ها خبردار شدند.",
+    },
+    "err.CONVERSION_MISMATCH": {
+        "en": "The file that came back is not the format you chose — try another option.",
+        "fa": "فایلی که برگشت فرمت انتخابی تو نبود — یک گزینهٔ دیگر رو امتحان کن.",
     },
     "err.UNSUPPORTED_URL": {
         "en": "The extraction engine does not support this link.",

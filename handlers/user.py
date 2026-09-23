@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
 import time
 from datetime import datetime, timezone
 from typing import Any, Sequence
@@ -61,6 +62,7 @@ from services.delivery import (
     media_card,
     quality_label,
     replay_caption,
+    resolution_name,
     send_cached_file,
 )
 from services.extractor import (
@@ -171,24 +173,34 @@ def _sized_quality_rows(
     """One button per *real* resolution: quality first, size second.
 
     The rows come from what the link actually has (``MediaInfo.video_options``),
-    best first — never a raw extractor list, never an invented tier. The quality
-    is named the conventional way (1920x1080 is 1080p — never a pixel width); a
-    size the site only estimated wears its ``~``; a size it never reported is
-    *omitted*, because a wrong number is worse than no number. The markers rank:
-    ⭐ the recommended top, 🔥 the popular runner-up, 🎬 the rest — emoji that
-    communicate hierarchy, not decoration.
+    best first — never a raw extractor list, never an invented tier, no ranking
+    labels over the top of them. The quality is named the conventional way
+    (1920x1080 is 1080p — never a pixel width; the big ones get their 2K/4K);
+    a size the site only estimated wears its ``~``; a size it never reported is
+    *omitted*, because a wrong number is worse than no number.
     """
     rows: list[tuple[str, str]] = []
     ordered = sorted(options, key=lambda option: option.label_p, reverse=True)
-    for position, option in enumerate(ordered):
-        label = t("media.quality_p", lang, height=option.label_p)
+    for option in ordered:
+        label = resolution_name(option.label_p, lang)
         if option.size_bytes:
             size = _compact_size(option.size_bytes)
             if size:
                 label = f"{label} · {'' if option.size_exact else '~'}{size}"
-        marker = ("⭐", "🔥", "🎬")[min(position, 2)]
-        rows.append((f"{marker} {label}", _fmt_callback("video", str(option.height))))
+        rows.append((label, _fmt_callback("video", str(option.height))))
     return rows
+
+
+def _producible_formats(codecs: tuple[str, ...]) -> tuple[str, ...]:
+    """Only the formats this engine can actually finish.
+
+    Every re-encode needs ffmpeg; without it the untouched source stream (m4a)
+    is the one promise the download path can keep. A FLAC button that could only
+    end in failure is worse than no FLAC button.
+    """
+    if not codecs or shutil.which("ffmpeg"):
+        return codecs
+    return ("m4a",) if "m4a" in codecs else ()
 
 
 def _compact_size(num_bytes: int) -> str:
@@ -218,7 +230,7 @@ def _question_keyboard(
                 routing.media_choice.media_format, routing.media_choice.quality
             ),
         )
-    for codec in routing.audio_formats:
+    for codec in _producible_formats(routing.audio_formats):
         builder.button(
             text=t(content.AUDIO_FORMAT_LABELS[codec], lang),
             callback_data=(
@@ -229,9 +241,9 @@ def _question_keyboard(
         )
     if not routing.audio_formats and routing.media_choice is None:
         # No audio menu and no post to describe — the choices *are* the buttons.
-        # With probed metadata they are the link's own resolutions (one row each:
-        # the label is a headline, the size is secondary); without it, the tier
-        # menu whose labels still say "up to".
+        # With probed metadata they are the link's own resolutions (one row each);
+        # without it, one plain «download it» tap: an invented ladder would be
+        # "up to" theatre with no facts behind it.
         if options:
             sized = _sized_quality_rows(options, lang)
             for label, data in sized:
@@ -314,20 +326,14 @@ def _source_kbps_of(data: dict[str, Any]) -> int | None:
 
 
 def _source_rate_note(codec: str, data: dict[str, Any], lang: str) -> str:
-    """The ℹ️ footnote — only when the ladder was actually trimmed.
+    """The source's own rate, said once — so the rows can be judged against it.
 
-    A note that restates what the rows already show is clutter; this one exists
-    only to explain what is *missing* (the bigger re-encodes of a smaller source)
-    — and to say so honestly: a measured rate gets a ``~``, a declared one does
-    not.
+    Shown whenever the source declared (or measured) one, trimmed ladder or not:
+    "what I have" is the fact that makes every option below it honest. A measured
+    rate gets its ``~``; a declared one does not.
     """
     source_kbps = _source_kbps_of(data)
     if source_kbps is None:
-        return ""
-    if not any(
-        (audio_bitrate(tier) or 0) > source_kbps
-        for _level, tier in content.audio_tier_levels(codec)
-    ):
         return ""
     rate = f"{'~' if data.get('source_kbps_approx') else ''}{source_kbps} kbps"
     return t("audio.source_rate", lang, rate=rate)
@@ -997,14 +1003,25 @@ async def _queue_url_flow(
     info = await _probe_meta(bot, url)
     title = _clean_title(info, url)
     options = tuple(info.video_options) if info is not None else ()
+    duration = float(info.duration or 0) if info is not None else 0.0
+    if not duration and spotify.is_spotify_url(url):
+        # yt-dlp refuses Spotify by policy, so the probe knows nothing — but the
+        # song's own page does (the same lookup the worker uses to map the link).
+        # Its length is what puts a size on every bitrate row and on the card.
+        try:
+            duration = float((await spotify.lookup(url)).duration_s or 0)
+        except Exception:
+            logger.info("no track length for %.80s — sizes stay off the rows", url)
     await state.set_state(DownloadStates.waiting_format)
     await state.update_data(
         url=url,
         title=title,
-        duration=(float(info.duration or 0) if info is not None else 0),
+        duration=duration,
         source_kbps=(info.audio_kbps if info is not None else None),
         source_kbps_approx=(info.audio_kbps_approx if info is not None else False),
         offered=_offered_tiers(url, options),
+        live=(info.is_live if info is not None else None),
+        size_guess=(info.filesize_approx if info is not None else None),
         options=[
             (option.height, option.label_p, option.size_bytes, option.size_exact)
             for option in options
@@ -1088,10 +1105,28 @@ async def _probe_meta(bot: Bot, url: str) -> MediaInfo | None:
 
 
 async def _probe_supported(url: str) -> bool:
-    """Cheap offline probe via yt-dlp extractors; never blocks the user."""
+    """Whether this link may be offered at all — asked generously.
+
+    The bot's own router outranks yt-dlp's URL catalogue: a host this bot
+    advertises (Reddit among them) is supported even when the site handler
+    yt-dlp ships misses this particular link shape — share links and direct
+    media files are exactly those shapes, and the engines and the fallback get
+    the final word on them. Only a link none of the layers below recognize is
+    honestly "unsupported" before it is queued.
+    """
     if spotify.is_spotify_url(url):
         # Served by rewriting the link, not by yt-dlp (see services/spotify.py), so
         # yt-dlp's opinion of it — "known to use DRM protection" — decides nothing.
+        return True
+    if (
+        content.claims_platform(url)
+        or content.knows_host(url)
+        or content.classify(url) != "media"
+    ):
+        # A platform this bot advertises (share links and direct media files
+        # included), a claimed host, or a link that is itself a file: the
+        # download path and the fallback serve these whatever any one
+        # extractor's regexes say.
         return True
     try:
         return await asyncio.wait_for(
@@ -1202,6 +1237,10 @@ async def on_format_chosen(
         tap=cb,
         title=str(data.get("title") or ""),
         size_hint=_size_hint(data, quality, media_format),
+        is_live=data.get("live") if isinstance(data.get("live"), bool) else None,
+        size_estimate=(
+            int(data["size_guess"]) if isinstance(data.get("size_guess"), int) else None
+        ),
     )
 
 
@@ -1284,6 +1323,8 @@ async def on_retry(
         lang,
         tap=cb,
         title=task.title,
+        is_live=task.is_live,
+        size_estimate=task.size_estimate,
     )
 
 
@@ -1320,6 +1361,8 @@ async def _submit(
     tap: CallbackQuery | None,
     title: str = "",
     size_hint: tuple[int, bool] | None = None,
+    is_live: bool | None = None,
+    size_estimate: int | None = None,
 ) -> None:
     """Tap → wait → the file: cache → quota → preflight → queue, on one card.
 
@@ -1370,6 +1413,8 @@ async def _submit(
         title=title,
         status_message_id=message.message_id,
         chat_title=(getattr(message.chat, "title", "") or ""),
+        is_live=is_live,
+        size_estimate=size_estimate,
     )
 
     # 2) Smart cache hit → resend the previous file_id instantly, no re-download.

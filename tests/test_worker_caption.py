@@ -49,8 +49,11 @@ def _result(
     quality: str = "",
     media_format: str = "video",
     source_url: str = "",
+    ext: str = "mp4",
 ) -> DownloadResult:
-    media = tmp_path / "clip.mp4"
+    # The file the pipeline would have produced — the caption names the file
+    # that exists, so the fixture has to *be* that file.
+    media = tmp_path / f"clip.{ext}"
     media.write_bytes(b"x" * 2048)
     info = MediaInfo(
         source_url=URL,
@@ -78,15 +81,17 @@ def _result(
 # ---------------------------------------------------------------------------
 
 
-def test_the_card_is_four_lines_and_no_filler(tmp_path: Path) -> None:
+def test_the_card_is_four_groups_and_no_filler(tmp_path: Path) -> None:
+    """Title, the file's facts, the source, who made it — each group breathing
+    one blank line apart (and nothing else in the block)."""
     caption = _upload_caption(
         _result(tmp_path, height=1080), EN, source_url=URL
     )
 
-    assert caption.splitlines() == [
+    assert caption.split("\n\n") == [
         "🎬 A Clip",
-        f"🔗 {URL}",
         "🎞 1080p • 2.0 KB",
+        f"🔗 {URL}",
         f"🤖 @{BOT}",
     ]
     # Platform and length are facts the file already speaks for itself.
@@ -116,13 +121,17 @@ def test_the_quality_line_names_the_real_resolution_not_the_tier(tmp_path: Path)
     assert "1080" not in caption
 
 
-def test_a_video_with_no_reported_height_names_the_requested_tier(tmp_path: Path) -> None:
-    assert "🎞 720p" in _upload_caption(
+def test_a_video_with_no_reported_height_claims_no_quality(tmp_path: Path) -> None:
+    """A ranking word is not a description: a file nobody measured gets no
+    quality claim at all — never "best available", never the tier a button once
+    promised."""
+    assert "720p" not in _upload_caption(
         _result(tmp_path, quality="720"), EN, source_url=URL
     )
-    assert f"🎞 {t('media.quality_max', EN)}" in _upload_caption(
-        _result(tmp_path, quality="best"), EN, source_url=URL
-    )
+    for claimed in ("Best available", "720p", "1080p", "up to"):
+        assert claimed not in _upload_caption(
+            _result(tmp_path, quality="best"), EN, source_url=URL
+        )
 
 
 def test_the_bot_line_carries_the_handle(tmp_path: Path) -> None:
@@ -147,7 +156,8 @@ def test_a_missing_title_omits_its_line(tmp_path: Path) -> None:
     caption = _upload_caption(_result(tmp_path, title=""), EN, source_url=URL)
 
     assert "🎬" not in caption
-    assert caption.splitlines()[0] == f"🔗 {URL}"
+    assert caption.splitlines()[0] == "🎞 2.0 KB"
+    assert f"🔗 {URL}" in caption
 
 
 def test_a_title_that_is_the_url_is_not_said_twice(tmp_path: Path) -> None:
@@ -161,9 +171,9 @@ def test_no_link_means_no_link_line(tmp_path: Path) -> None:
     caption = _upload_caption(_result(tmp_path), EN)
 
     assert "🔗" not in caption
-    assert caption.splitlines() == [
+    assert caption.split("\n\n") == [
         "🎬 A Clip",
-        "🎞 " + t("media.quality_max", EN) + " • 2.0 KB",
+        "🎞 2.0 KB",
         f"🤖 @{BOT}",
     ]
 
@@ -187,28 +197,55 @@ def test_the_caption_escapes_html_in_titles_and_links(tmp_path: Path) -> None:
 
 def test_audio_captions_name_the_container_and_its_real_rate(tmp_path: Path) -> None:
     assert "🎧 MP3 · 256 kbps" in _upload_caption(
-        _result(tmp_path, media_format="audio", quality="mp3.high"), EN, source_url=URL
+        _result(tmp_path, media_format="audio", quality="mp3.high", ext="mp3"),
+        EN,
+        source_url=URL,
     )
     # Two canonical spellings predate the presets and mean their own thing: `mp3`
     # is the balanced 192k re-encode, `m4a` the untouched source stream.
     assert "🎧 MP3 · 192 kbps" in _upload_caption(
-        _result(tmp_path, media_format="audio", quality="mp3"), EN
+        _result(tmp_path, media_format="audio", quality="mp3", ext="mp3"), EN
     )
     assert "🎧 M4A · Original" in _upload_caption(
-        _result(tmp_path, media_format="audio", quality="m4a"), EN
+        _result(tmp_path, media_format="audio", quality="m4a", ext="m4a"), EN
     )
     # PCM and FLAC have no knob: the container is the whole label.
     assert "🎧 WAV · 2.0 KB" in _upload_caption(
-        _result(tmp_path, media_format="audio", quality="wav"), EN
+        _result(tmp_path, media_format="audio", quality="wav", ext="wav"), EN
     )
     assert "🎧 FLAC · 2.0 KB" in _upload_caption(
-        _result(tmp_path, media_format="audio", quality="flac"), EN
+        _result(tmp_path, media_format="audio", quality="flac", ext="flac"), EN
     )
+
+
+def test_the_caption_says_what_the_file_actually_is(tmp_path: Path) -> None:
+    """The two live incidents, pinned: a FLAC file is FLAC (never «MP3»), and a
+    320 kbps encode says 320 (never 192)."""
+    flac = _upload_caption(
+        _result(tmp_path, media_format="audio", quality="flac", ext="flac"),
+        EN,
+        source_url=URL,
+    )
+    assert "🎧 FLAC" in flac
+    assert "MP3" not in flac and "kbps" not in flac
+    assert "🎧 MP3 · 320 kbps" in _upload_caption(
+        _result(tmp_path, media_format="audio", quality="mp3.best", ext="mp3"), EN
+    )
+
+
+def test_the_bitrate_is_named_only_when_the_codec_happened(tmp_path: Path) -> None:
+    """An untouched stream that came back .opus is «OPUS · Original» — no kbps
+    is ever claimed over a container the tier did not control."""
+    caption = _upload_caption(
+        _result(tmp_path, media_format="audio", quality="m4a", ext="opus"), EN
+    )
+    assert f"🎧 OPUS · {t('media.original', EN)}" in caption
+    assert "kbps" not in caption
 
 
 def test_the_copied_stream_is_named_in_the_readers_language(tmp_path: Path) -> None:
     persian = _upload_caption(
-        _result(tmp_path, media_format="audio", quality="m4a"), FA
+        _result(tmp_path, media_format="audio", quality="m4a", ext="m4a"), FA
     )
 
     assert f"🎧 M4A · {t('media.original', FA)}" in persian
@@ -226,17 +263,16 @@ def test_a_song_is_captioned_as_the_song(tmp_path: Path) -> None:
     spotify_url = "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
 
     caption = _upload_caption(
-        _result(tmp_path, media_format="audio", quality="mp3"),
+        _result(tmp_path, media_format="audio", quality="mp3", ext="mp3"),
         EN,
         track,
         source_url=spotify_url,
     )
 
-    assert caption.splitlines() == [
+    assert caption.split("\n\n") == [
         "🎵 Believer",
         "🎤 Artist",
-        "⏱ 3:20",
-        "🎧 MP3 · 192 kbps · 2.0 KB",
+        "⏱ 3:20\n🎧 MP3 · 192 kbps · 2.0 KB",
         f"🔗 {spotify_url}",
         f"🤖 @{BOT}",
     ]
@@ -254,7 +290,7 @@ def test_the_album_line_carries_the_release(tmp_path: Path) -> None:
     )
 
     caption = _upload_caption(
-        _result(tmp_path, media_format="audio", quality="mp3.best"), EN, track
+        _result(tmp_path, media_format="audio", quality="mp3.best", ext="mp3"), EN, track
     )
 
     assert "🎵 I'm The Man" in caption
@@ -281,9 +317,9 @@ def test_a_replayed_file_gets_the_same_card() -> None:
 
     caption = delivery.replay_caption(row, EN)
 
-    assert caption.splitlines() == [
-        f"🔗 {URL}",
+    assert caption.split("\n\n") == [
         "🎞 720p",
+        f"🔗 {URL}",
         f"🤖 @{BOT}",
     ]
 
@@ -293,10 +329,20 @@ def test_a_replay_names_the_request_by_its_rules() -> None:
         row = cast(asyncpg.Record, {"original_url": URL, "quality": quality})
         return delivery.replay_caption(row, EN)
 
-    assert "🎞 " + t("media.quality_max", EN) in label("video")  # the default tier
+    assert "🎞" not in label("video")  # the default tier names nothing factual
     assert "🎧 MP3 · 256 kbps" in label("audio:mp3.high")  # a deliberate tier
     assert "🎧 WAV" in label("audio:wav")
     assert "🎧 FLAC" in label("audio:flac")
+
+
+def test_a_replay_shows_the_label_the_fresh_caption_used() -> None:
+    row = cast(
+        asyncpg.Record,
+        {"original_url": URL, "quality": "video", "label": "🎞 2160p (4K)"},
+    )
+
+    assert "🎞 2160p (4K)" in delivery.replay_caption(row, EN)
+    assert "Best available" not in delivery.replay_caption(row, EN)
 
 
 def test_a_row_that_knows_nothing_shows_nothing_empty() -> None:

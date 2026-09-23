@@ -746,7 +746,7 @@ def test_a_link_is_classified_by_what_it_can_actually_hold(url: str, kind: str) 
 def test_a_video_link_is_offered_quality_tiers_and_no_audio_only_tier() -> None:
     choices = content_module.routing_for("https://youtu.be/abc").choices
 
-    assert [choice.quality for choice in choices] == ["best", "1080", "720", "480"]
+    assert [choice.quality for choice in choices] == ["best"], "one honest default"
     assert all(choice.media_format == "video" for choice in choices)
 
 
@@ -1015,6 +1015,28 @@ def _fresh_state() -> FSMContext:
     )
 
 
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://www.reddit.com/r/x/comments/1/y/",
+        "https://www.reddit.com/r/Android/s/ShareToken",
+        "https://v.redd.it/abc123",
+        "https://redd.it/abc123",
+    ),
+)
+async def test_a_supported_platform_is_never_branded_unsupported(url: str) -> None:
+    """The live Reddit bug, pinned: share and short shapes died at the intake
+    gate with «unsupported» before any engine or fallback ever ran — the
+    catalogue's gaps are not this bot's opinion of a platform."""
+    assert await user_module._probe_supported(url)
+
+
+async def test_a_link_no_layer_recognizes_stays_unsupported() -> None:
+    assert not await user_module._probe_supported(
+        "https://some-unknown-site.example/v/1"
+    )
+
+
 async def test_the_question_is_the_first_and_only_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1042,8 +1064,9 @@ async def test_the_question_is_the_first_and_only_message(
     assert bot.texts[0].startswith("🔗 https://youtu.be/abc")
     assert t("intake.choose_quality", FA) in bot.texts[0]
     # A probe that answers nothing (this bot double has no extractor at all)
-    # falls back to the tier menu — the flow never blocks on metadata.
-    assert ("🎬 بهترین کیفیت موجود", "fmt:video:best") in _buttons(bot.keyboards[-1])
+    # falls back to one honest row: the flow never blocks on metadata, and no
+    # quality is claimed that the bot cannot name.
+    assert ("⬇️ دانلود", "fmt:video:best") in _buttons(bot.keyboards[-1])
     back_label, back_data = _buttons(bot.keyboards[-1])[-1]
     assert back_data == "menu:download", "the question's parent is the Download screen"
     assert back_label.startswith("⬅️"), "and says so the way every back button does"
@@ -1160,7 +1183,7 @@ async def test_a_tap_is_acknowledged_silently_and_the_card_takes_over(
     cb = _callback(bot, "fmt:video:720")
     queue = FakeQueue(depth=1)
     state = await _state()
-    await state.update_data(title="A Clip")
+    await state.update_data(title="A Clip", offered=["720"])
 
     await user_module.on_format_chosen(
         cb, state, _user(), object(), queue, bot, lang=FA
@@ -1397,22 +1420,22 @@ async def test_the_quality_menu_shows_what_the_link_actually_has(
         "fmt:video:240",
         "menu:download",
     ], "the ladder, best first — whatever order the extractor said"
-    assert rows[0] == ("⭐ 1080p · ~14 MB", "fmt:video:1080"), (
-        "the recommended one is starred, and an estimate says ~"
+    assert rows[0] == ("1080p · ~14 MB", "fmt:video:1080"), (
+        "resolution is the headline, and an estimate says ~"
     )
-    assert rows[1] == ("🔥 720p · 8 MB", "fmt:video:720"), (
-        "the runner-up burns; an exact size wears no ~"
+    assert rows[1] == ("720p · 8 MB", "fmt:video:720"), (
+        "an exact size wears no ~"
     )
-    assert rows[3] == ("🎬 240p", "fmt:video:240"), (
+    assert rows[3] == ("240p", "fmt:video:240"), (
         "a size the site never reported is omitted, not invented"
     )
     assert [len(row) for row in bot.keyboards[-1].inline_keyboard] == [1] * 5, (
         "one per row: quality is the headline, the size is secondary"
     )
-    card_lines = bot.texts[0].splitlines()[:2]
-    assert card_lines == ["🎬 A Clip", "🔗 https://youtu.be/abc"], (
+    card_groups = bot.texts[0].split("\n\n")[:2]
+    assert card_groups == ["🎬 A Clip", "🔗 https://youtu.be/abc"], (
         "the card names the media and its origin — and claims no quality yet: "
-        "those two lines are all of it before the question line"
+        "those two groups are all of it before the question line"
     )
 
 
