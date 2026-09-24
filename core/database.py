@@ -560,6 +560,33 @@ async def top_groups(pool: asyncpg.Pool, *, limit: int = 5) -> list[asyncpg.Reco
     )
 
 
+async def group_week_stats(
+    pool: asyncpg.Pool, *, prev_start: datetime, cur_start: datetime, cur_end: datetime
+) -> asyncpg.Record:
+    """This week's group downloads against last week's — one aggregate row.
+
+    The windows are passed in as whole *local* days (see
+    services/panel.py:groups_text), so the timezone boundary never cuts a day in
+    half and "this week" is always the same seven days regardless of when the
+    panel is opened. Zero rows in a window read as zero — the row always comes
+    back, never ``None``.
+    """
+    return await pool.fetchrow(
+        """
+        SELECT
+            count(*) FILTER (WHERE created_at >= $2 AND created_at < $3)        AS cur_total,
+            count(*) FILTER (WHERE NOT ok AND created_at >= $2 AND created_at < $3) AS cur_failed,
+            count(*) FILTER (WHERE created_at >= $1 AND created_at < $2)        AS prev_total,
+            count(*) FILTER (WHERE NOT ok AND created_at >= $1 AND created_at < $2) AS prev_failed
+          FROM group_downloads
+         WHERE created_at >= $1 AND created_at < $3
+        """,
+        prev_start,
+        cur_start,
+        cur_end,
+    )
+
+
 async def group_failure_codes(pool: asyncpg.Pool, *, limit: int = 5) -> list[asyncpg.Record]:
     """What group downloads die of — codes and counts, nothing else."""
     return await pool.fetch(

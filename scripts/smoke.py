@@ -384,8 +384,10 @@ async def main() -> int:
     preflight.note_anonymous_refusal()
     try:
         refused_alone = preflight.youtube_preflight(youtube_link, settings.cookie_file)
+        # Rendered in Persian: the wording asserted below is the Persian one
+        # (the product's default is English, so the language must be pinned here).
         refused_with_fallback = preflight.youtube_preflight(
-            youtube_link, settings.cookie_file, fallback_available=True
+            youtube_link, settings.cookie_file, fallback_available=True, lang="fa"
         )
     finally:
         preflight.clear_anonymous_refusal()

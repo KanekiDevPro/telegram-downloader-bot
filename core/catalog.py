@@ -344,6 +344,9 @@ MESSAGES: Final[Catalog] = {
     "media.wait": {"en": "⏳", "fa": "⏳"},
     "media.progress": {"en": "⏳ {percent:.0f}%", "fa": "⏳ {percent:.0f}%"},
     "media.retry": {"en": "🔄 Try again", "fa": "🔄 دوباره تلاش کن"},
+    # On a quality row whose size the source never reported — the resolution is
+    # real and stays, and the size says plainly that nobody knows it.
+    "media.size_unknown": {"en": "size unknown", "fa": "حجم نامشخص"},
 
     # ---------------------------------------------------------------------
     # Worker: the download's own narration
@@ -409,6 +412,14 @@ MESSAGES: Final[Catalog] = {
     "err.CONVERSION_MISMATCH": {
         "en": "The file that came back is not the format you chose — try another option.",
         "fa": "فایلی که برگشت فرمت انتخابی تو نبود — یک گزینهٔ دیگر رو امتحان کن.",
+    },
+    "err.FILE_TOO_LARGE": {
+        "en": "The finished file is bigger than Telegram accepts here — pick a smaller quality.",
+        "fa": "حجم فایل نهایی از سقف آپلود تلگرام بیشتر است — کیفیت کوچک‌تری را انتخاب کن.",
+    },
+    "err.DELIVERY_FAILED": {
+        "en": "Telegram refused the file. Try again in a moment.",
+        "fa": "تلگرام فایل را نپذیرفت؛ کمی بعد دوباره تلاش کن.",
     },
     "err.UNSUPPORTED_URL": {
         "en": "The extraction engine does not support this link.",
@@ -653,6 +664,36 @@ MESSAGES: Final[Catalog] = {
         "fa": "❌ شکست‌های گروهی: {failed}",
     },
     "admin.groups_code": {"en": "{code} — {count}", "fa": "{code} — {count}"},
+    # Week-over-week: two whole weeks of the same seven local days, so the two
+    # numbers are comparable (see services/panel.py:groups_text).
+    "admin.groups_week_title": {
+        "en": "📊 This week (7 days)",
+        "fa": "📊 هفتهٔ جاری (۷ روز)",
+    },
+    "admin.groups_week_volume": {
+        "en": "⬇️ Downloads: {total}",
+        "fa": "⬇️ دانلود: {total}",
+    },
+    "admin.groups_week_volume_delta": {
+        "en": "📈 vs last week: {delta} ({percent})",
+        "fa": "📈 نسبت به هفتهٔ قبل: {delta} ({percent})",
+    },
+    "admin.groups_week_volume_first": {
+        "en": "📈 vs last week: no baseline",
+        "fa": "📈 نسبت به هفتهٔ قبل: مبنایی نیست",
+    },
+    "admin.groups_week_fail_rate": {
+        "en": "❌ Failure rate: {rate}",
+        "fa": "❌ نرخ خطا: {rate}",
+    },
+    "admin.groups_week_fail_delta": {
+        "en": "📉 vs last week: {delta}",
+        "fa": "📉 نسبت به هفتهٔ قبل: {delta}",
+    },
+    "admin.groups_week_fail_first": {
+        "en": "📉 vs last week: no baseline",
+        "fa": "📉 نسبت به هفتهٔ قبل: مبنایی نیست",
+    },
     "admin.btn_system": {"en": "🖥 System", "fa": "🖥 سیستم"},
     "admin.btn_settings": {"en": "⚙️ Settings", "fa": "⚙️ تنظیمات"},
     "admin.btn_reload": {"en": "🔄 Refresh", "fa": "🔄 تازه‌سازی"},

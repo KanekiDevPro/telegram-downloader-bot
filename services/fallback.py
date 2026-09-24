@@ -51,6 +51,12 @@ logger = logging.getLogger(__name__)
 FALLBACK_ERROR_CODES: frozenset[str] = BLOCK_EXTRACTION_CODES | {
     DRM_PROTECTED_CODE,
     IMAGE_ONLY,
+    # "This engine has no handler for that URL shape" is a verdict about the
+    # engine, not about the source: the other engine has its own handlers (and
+    # reaches some links through a different service entirely). Only when both
+    # engines refuse may the user honestly hear that nothing here supports the
+    # link.
+    "UNSUPPORTED_URL",
 }
 
 #: Host → the platform name the caption shows. Unmapped hosts fall back to their own

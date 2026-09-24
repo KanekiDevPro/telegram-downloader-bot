@@ -1000,6 +1000,18 @@ async def test_a_photo_post_is_downloaded_without_a_format_question(
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _links_stay_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The question flow resolves share links over the network before routing;
+    these tests speak in synthetic links and must stay offline. The resolver
+    itself is pinned in tests/test_capability.py."""
+
+    async def _same(url: str) -> str:
+        return url
+
+    monkeypatch.setattr(user_module, "_canonical_url", _same)
+
+
 async def _state(url: str = "https://youtu.be/abc") -> FSMContext:
     context = _fresh_state()
     await context.set_state(DownloadStates.waiting_format)
@@ -1384,8 +1396,8 @@ async def test_the_quality_menu_shows_what_the_link_actually_has(
     """Sizes second, quality first — and never a size the site did not report.
 
     The extractor's list arrives unsorted and is sorted here: 1080p, 720p, 360p.
-    An estimated size wears its ``~``; an exact one does not; a missing one is
-    *omitted* rather than invented.
+    An estimated size wears its ``~``; an exact one does not; a missing one says
+    «size unknown» — real resolution, honest gap, never an invented number.
     """
 
     async def supported(url: str) -> bool:
@@ -1426,8 +1438,8 @@ async def test_the_quality_menu_shows_what_the_link_actually_has(
     assert rows[1] == ("720p · 8 MB", "fmt:video:720"), (
         "an exact size wears no ~"
     )
-    assert rows[3] == ("240p", "fmt:video:240"), (
-        "a size the site never reported is omitted, not invented"
+    assert rows[3] == ("240p · حجم نامشخص", "fmt:video:240"), (
+        "a size the site never reported says so — the resolution is real and stays"
     )
     assert [len(row) for row in bot.keyboards[-1].inline_keyboard] == [1] * 5, (
         "one per row: quality is the headline, the size is secondary"

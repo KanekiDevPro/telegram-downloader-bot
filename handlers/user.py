@@ -26,8 +26,10 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
+import aiohttp
 import asyncpg
 from aiogram import Bot, F, Router
+from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -58,6 +60,7 @@ from handlers.payment import plans_keyboard
 from services import cache as cache_service
 from services import content, preflight, spotify
 from services.delivery import (
+    ActionPulse,
     group_add_link,
     media_card,
     quality_label,
@@ -66,10 +69,13 @@ from services.delivery import (
     send_cached_file,
 )
 from services.extractor import (
+    AudioCapability,
     ExtractorService,
     MediaInfo,
     VideoOption,
     audio_bitrate,
+    audio_capability,
+    audio_is_original,
     audio_size_estimate,
 )
 from services.queue import DownloadTask, TaskQueue
@@ -176,8 +182,9 @@ def _sized_quality_rows(
     best first — never a raw extractor list, never an invented tier, no ranking
     labels over the top of them. The quality is named the conventional way
     (1920x1080 is 1080p — never a pixel width; the big ones get their 2K/4K);
-    a size the site only estimated wears its ``~``; a size it never reported is
-    *omitted*, because a wrong number is worse than no number.
+    a size the site only estimated wears its ``~``; a size it never reported
+    *says so* — the resolution is real and stays on the row, because a missing
+    row hides the truth harder than a missing number ever could.
     """
     rows: list[tuple[str, str]] = []
     ordered = sorted(options, key=lambda option: option.label_p, reverse=True)
@@ -187,6 +194,8 @@ def _sized_quality_rows(
             size = _compact_size(option.size_bytes)
             if size:
                 label = f"{label} · {'' if option.size_exact else '~'}{size}"
+        else:
+            label = f"{label} · {t('media.size_unknown', lang)}"
         rows.append((label, _fmt_callback("video", str(option.height))))
     return rows
 
@@ -209,7 +218,11 @@ def _compact_size(num_bytes: int) -> str:
 
 
 def _question_keyboard(
-    url: str, lang: str, *, options: Sequence[VideoOption] = ()
+    url: str,
+    lang: str,
+    *,
+    options: Sequence[VideoOption] = (),
+    capability: AudioCapability | None = None,
 ) -> InlineKeyboardMarkup:
     """What can be asked for *this* link — and nothing else.
 
@@ -230,7 +243,12 @@ def _question_keyboard(
                 routing.media_choice.media_format, routing.media_choice.quality
             ),
         )
-    for codec in _producible_formats(routing.audio_formats):
+    offered_audio = _producible_formats(routing.audio_formats)
+    if capability is not None:
+        # What this source can really become beats the static catalogue — the
+        # capability model decides the buttons (services.extractor.audio_capability).
+        offered_audio = tuple(codec for codec in offered_audio if codec in capability.formats)
+    for codec in offered_audio:
         builder.button(
             text=t(content.AUDIO_FORMAT_LABELS[codec], lang),
             callback_data=(
@@ -239,24 +257,26 @@ def _question_keyboard(
                 else _fmt_callback("audio", codec)
             ),
         )
-    if not routing.audio_formats and routing.media_choice is None:
-        # No audio menu and no post to describe — the choices *are* the buttons.
-        # With probed metadata they are the link's own resolutions (one row each);
-        # without it, one plain «download it» tap: an invented ladder would be
-        # "up to" theatre with no facts behind it.
-        if options:
-            sized = _sized_quality_rows(options, lang)
-            for label, data in sized:
-                builder.button(text=label, callback_data=data)
-            # One per row when the ladder is long (mobile width fits the label);
-            # a short list shares rows so the screen is not three lonely strips.
-            row_width = 2 if len(sized) <= 2 else 1
-        else:
-            for choice in routing.choices:
-                builder.button(
-                    text=t(choice.label_key, lang),
-                    callback_data=_fmt_callback(choice.media_format, choice.quality),
-                )
+    # The link's own resolutions, one row each, whenever the probe really found
+    # them — a post link included, whose route would otherwise bury a valid
+    # format list before the screen is ever drawn. An audio link keeps its format
+    # grid as the only question (its streams have no resolutions to show).
+    show_rows = bool(options) and (not routing.audio_formats or routing.media_choice is not None)
+    if show_rows:
+        sized = _sized_quality_rows(options, lang)
+        for label, data in sized:
+            builder.button(text=label, callback_data=data)
+        # One per row when the ladder is long (mobile width fits the label);
+        # a short list shares rows so the screen is not three lonely strips.
+        row_width = 2 if len(sized) <= 2 else 1
+    elif not routing.audio_formats and routing.media_choice is None:
+        # Nothing probed and nothing to describe — one plain «download it» tap:
+        # an invented ladder would be "up to" theatre with no facts behind it.
+        for choice in routing.choices:
+            builder.button(
+                text=t(choice.label_key, lang),
+                callback_data=_fmt_callback(choice.media_format, choice.quality),
+            )
     # The way out leads to the Download screen — this question is its child (and
     # the retry's ⬅️ lands there too), never to an unrelated screen.
     builder.button(text=t("menu.back", lang), callback_data="menu:download")
@@ -284,7 +304,13 @@ def _marks(count: int) -> tuple[str, ...]:
 
 
 def _level_rows(
-    codec: str, lang: str, *, duration: float = 0, source_kbps: int | None = None
+    codec: str,
+    lang: str,
+    *,
+    duration: float = 0,
+    source_kbps: int | None = None,
+    copy_ok: bool = True,
+    upload_limit_bytes: int = 0,
 ) -> list[tuple[str, str]]:
     """``[(button label, callback), ...]`` for a codec's presets, best first.
 
@@ -292,14 +318,21 @@ def _level_rows(
     link's length is known — what the file will weigh (rate × length, so a ``~``
     estimate). When the source's own rate is known, the re-encodes *above* it are
     hidden: a bigger number on a smaller source is only a bigger file, and a menu
-    that offers it is a menu that lies. The untouched source stream is never
-    hidden (it *is* the source), and a ladder that would empty out keeps its floor
-    — the least misleading row left. Raw or lossless output never reaches here at
-    all (no presets, no screen).
+    that offers it is a menu that lies. The untouched source stream is kept (it
+    *is* the source) unless it would arrive in a different container than its
+    button names, and a row the transport cannot carry is gone too — an option
+    that only ends in a refusal is not an option. A ladder that would empty out
+    keeps its floor — the least misleading row left. Raw or lossless output never
+    reaches here at all (no presets, no screen).
     """
     def honest(level: str, tier: str) -> bool:
+        if audio_is_original(tier) and not copy_ok:
+            return False
         kbps = audio_bitrate(tier)
-        return source_kbps is None or kbps is None or kbps <= source_kbps
+        if kbps and source_kbps is not None and kbps > source_kbps:
+            return False
+        estimate = audio_size_estimate(tier, duration)
+        return not (estimate and upload_limit_bytes and estimate > upload_limit_bytes)
 
     levels = content.audio_tier_levels(codec)
     kept = [(level, tier) for level, tier in levels if honest(level, tier)]
@@ -339,8 +372,29 @@ def _source_rate_note(codec: str, data: dict[str, Any], lang: str) -> str:
     return t("audio.source_rate", lang, rate=rate)
 
 
+def _stored_capability(data: dict[str, Any]) -> AudioCapability | None:
+    """The question's audio capability as it was shown (``None`` for old menus).
+
+    What the buttons offered travels in the FSM — a crafted callback is data, and
+    the list it is checked against must be the list the user actually saw.
+    """
+    offered = data.get("audio_offered")
+    if offered is None:
+        return None
+    return AudioCapability(
+        formats=tuple(str(item) for item in offered),
+        copy_ok=data.get("copy_ok") is not False,
+    )
+
+
 def _level_keyboard(
-    codec: str, lang: str, *, duration: float = 0, source_kbps: int | None = None
+    codec: str,
+    lang: str,
+    *,
+    duration: float = 0,
+    source_kbps: int | None = None,
+    copy_ok: bool = True,
+    upload_limit_bytes: int = 0,
 ) -> InlineKeyboardMarkup:
     """A codec's quality presets, and the way back to the question before it.
 
@@ -351,7 +405,12 @@ def _level_keyboard(
     """
     builder = InlineKeyboardBuilder()
     for label, data in _level_rows(
-        codec, lang, duration=duration, source_kbps=source_kbps
+        codec,
+        lang,
+        duration=duration,
+        source_kbps=source_kbps,
+        copy_ok=copy_ok,
+        upload_limit_bytes=upload_limit_bytes,
     ):
         builder.button(text=label, callback_data=data)
     builder.adjust(1)
@@ -968,6 +1027,10 @@ async def _queue_url_flow(
     if not validate_url(url):
         await message.answer(t("intake.invalid_link", lang))
         return
+    # Share/short links and media *viewer* wrappers name their content somewhere
+    # else: resolve them once, here — routing, the engines and the direct-download
+    # path all see the real thing afterwards (see _canonical_url).
+    url = await _canonical_url(url)
     routing = content.routing_for(url)
     # The router decides whether the *extractor* gets a say. `is_url_supported`
     # answers "does yt-dlp have a site handler for this?"; a link that is itself a
@@ -1000,7 +1063,8 @@ async def _queue_url_flow(
     # sizes), so the menu is drawn from the link itself. A probe that gives
     # nothing costs only the polish: the tier menu and a card that shows its link.
     await _typing(bot, message.chat.id)
-    info = await _probe_meta(bot, url)
+    async with ActionPulse(bot, message.chat.id, ChatAction.TYPING):
+        info = await _probe_meta(bot, url)
     title = _clean_title(info, url)
     options = tuple(info.video_options) if info is not None else ()
     duration = float(info.duration or 0) if info is not None else 0.0
@@ -1012,6 +1076,13 @@ async def _queue_url_flow(
             duration = float((await spotify.lookup(url)).duration_s or 0)
         except Exception:
             logger.info("no track length for %.80s — sizes stay off the rows", url)
+    # One capability model, built from what the probe found, drives every screen
+    # this link can reach — the format grid, the bitrate rows and their sizes.
+    capability = audio_capability(
+        source_ext=(info.audio_ext if info is not None else None),
+        duration_s=duration,
+        upload_limit_bytes=get_settings().upload_limit_bytes,
+    )
     await state.set_state(DownloadStates.waiting_format)
     await state.update_data(
         url=url,
@@ -1020,6 +1091,8 @@ async def _queue_url_flow(
         source_kbps=(info.audio_kbps if info is not None else None),
         source_kbps_approx=(info.audio_kbps_approx if info is not None else False),
         offered=_offered_tiers(url, options),
+        audio_offered=(list(capability.formats) if routing.audio_formats else None),
+        copy_ok=capability.copy_ok,
         live=(info.is_live if info is not None else None),
         size_guess=(info.filesize_approx if info is not None else None),
         options=[
@@ -1029,7 +1102,7 @@ async def _queue_url_flow(
     )
     await message.answer(
         _question_text(url, lang, title=title),
-        reply_markup=_question_keyboard(url, lang, options=options),
+        reply_markup=_question_keyboard(url, lang, options=options, capability=capability),
     )
 
 
@@ -1078,29 +1151,90 @@ async def _typing(bot: Bot, chat_id: int) -> None:
 _SELF_SERVED_KINDS: frozenset[str] = frozenset({"image", "gallery"})
 
 
-#: How long a metadata probe may hold the question open. Long enough for a slow
-#: site, short enough that a hung one costs a fallback menu, not the UX.
+#: The probe's wait budget when the extractor carries no timeout of its own.
+#: Real extractors always carry one (``timeout_s``) and the budget defers to it:
+#: clipping the wait *shorter* than the extraction's own contract cancelled the
+#: probe while the extraction kept running in its thread — a valid format list
+#: arrived too late to draw the menu from, and every slow link silently degraded
+#: to the single «download» row. The slack covers the round trip around it.
 _META_PROBE_TIMEOUT_S = 5.0
+_META_PROBE_SLACK_S = 5.0
+
+#: How long a share/short link may take to say where it really points.
+_CANONICAL_RESOLVE_S = 8.0
+
+#: A browser's user agent — share pages are pages, and some of them answer a
+#: nameless client with a block page instead of a redirect.
+_PROBE_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+async def _canonical_url(url: str) -> str:
+    """Turn a share/viewer link into the page or file it names — or leave it be.
+
+    A `/s/ShareToken` link is not a page at all: it redirects to Reddit's media
+    *viewer* (`/media?url=…`), a wrapper no extractor handles, while the URL
+    inside it is a plain downloadable file. Resolving once at intake is what lets
+    routing, the engines and the direct-download path all see the real thing.
+    Only links the extractor catalogue cannot claim pay for the round trip, and
+    any failure (blocked, slow, offline) keeps the original link — the engines
+    and the fallback still get their turn on it.
+    """
+    unwrapped = content.unwrap_media_url(url)
+    if unwrapped != url or not content.claims_platform(url):
+        return unwrapped
+    if ExtractorService.is_url_supported(url):
+        return url
+    try:
+        timeout = aiohttp.ClientTimeout(total=_CANONICAL_RESOLVE_S)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                url, allow_redirects=True, headers={"User-Agent": _PROBE_USER_AGENT}
+            ) as response:
+                resolved = str(response.url)
+    except Exception:
+        logger.info("share link %.80s did not resolve — keeping it as-is", url)
+        return url
+    canonical = content.unwrap_media_url(resolved)
+    if canonical != resolved or ExtractorService.is_url_supported(canonical):
+        # Worth adopting when the redirect *revealed* something: a media file
+        # hiding behind a viewer wrapper, or a page the engines can claim. A
+        # cosmetic hop between page forms (youtu.be → watch?v=) changes nothing
+        # worth changing — the user's own link stays on the card and in the job.
+        if canonical != url:
+            logger.info("share link %.80s resolves to %.80s", url, canonical)
+        return canonical
+    return url
 
 
 async def _probe_meta(bot: Bot, url: str) -> MediaInfo | None:
     """What the question needs to know: the title, and which resolutions exist.
 
     Answered by the extraction pipeline's own metadata (``bot.state.extractor``) —
-    never a second engine, never a network call of this module's own. Anything
-    goes wrong (a blocked host, a slow one, a test double with no extractor at
-    all) and the answer is simply ``None``: the question is still asked, with the
-    tier menu and a card that shows its link.
+    never a second engine, never a network call of this module's own. The wait is
+    the extractor's *own* contract (``timeout_s``): a menu must be drawn from a
+    format list that is really there, not one this module cancelled early. A
+    probe that still gives nothing (a blocked host, a test double with no
+    extractor at all) answers ``None``, and says why in the log — the question is
+    still asked, with the tier menu and a card that shows its link.
     """
     extractor = getattr(getattr(bot, "state", None), "extractor", None)
     if extractor is None:
         return None
+    budget = float(getattr(extractor, "timeout_s", 0) or 0) or _META_PROBE_TIMEOUT_S
     try:
         return await asyncio.wait_for(
-            extractor.extract(url), timeout=_META_PROBE_TIMEOUT_S
+            extractor.extract(url), timeout=budget + _META_PROBE_SLACK_S
         )
-    except Exception:
-        logger.info("metadata probe gave nothing for %.80s — falling back to tiers", url)
+    except Exception as exc:
+        logger.warning(
+            "metadata probe gave nothing for %.80s (%s: %s) — falling back to tiers",
+            url,
+            type(exc).__name__,
+            exc,
+        )
         return None
 
 
@@ -1162,19 +1296,23 @@ async def on_audio_format(
         return
     title = str(data.get("title") or "")
     spec = (cb.data or "")[len(AUDF_PREFIX) :]
+    capability = _stored_capability(data)
     if spec == "back":
         await cb.answer()
         await _edit_or_reply(
             message,
             _question_text(url, lang, title=title),
-            reply_markup=_question_keyboard(url, lang),
+            reply_markup=_question_keyboard(url, lang, capability=capability),
         )
         return
     # Deliberately strict (same rule as find_choice): the codec must have been a
     # button on *this* link's question — an audio menu has no business opening
-    # for a video link, however the tap was spelled.
-    if spec not in content.routing_for(url).audio_formats or not content.audio_level_choices(
-        spec
+    # for a video link, however the tap was spelled. When the question was built
+    # from probed facts, its capability list *is* that vocabulary.
+    if (
+        spec not in content.routing_for(url).audio_formats
+        or not content.audio_level_choices(spec)
+        or (capability is not None and spec not in capability.formats)
     ):
         await cb.answer(t("intake.no_format", lang), show_alert=True)
         return
@@ -1191,6 +1329,8 @@ async def on_audio_format(
             lang,
             duration=float(data.get("duration") or 0),
             source_kbps=_source_kbps_of(data),
+            copy_ok=(capability.copy_ok if capability is not None else True),
+            upload_limit_bytes=get_settings().upload_limit_bytes,
         ),
     )
 
@@ -1269,17 +1409,25 @@ def _tap_was_offered(
 ) -> bool:
     """Whether this tap was a button on the screen that is up.
 
-    Two vocabularies, one rule. The router's static menu answers through
-    ``find_choice`` (deliberately strict — see its own note). The *probed* video
-    rows are a vocabulary no table knows, so what the question showed travels in
-    the FSM instead: the offered list decides, and a crafted height is still just
-    data (``is_video_height`` agrees). When a menu predates the offered list, the
+    Two probed vocabularies and one static — one rule. The router's static menu
+    answers through ``find_choice`` (deliberately strict — see its own note). The
+    *probed* rows — video resolutions and audio formats alike — are vocabularies
+    no table knows, so what the question showed travels in the FSM instead: the
+    offered list decides, and a crafted height is still just data
+    (``is_video_height`` agrees). When a menu predates the offered lists, the
     static rule is all there is.
     """
     if not media_format or not quality:
         return False
     if media_format == "video" and is_video_height(quality) and data.get("offered") is not None:
         return quality in [str(item) for item in data["offered"]]
+    if media_format == "audio" and data.get("audio_offered") is not None:
+        # The audio grid is probed too: what the question offered decides — and
+        # the untouched-stream row was only offered when its container is honest.
+        return (
+            quality.split(".", 1)[0] in [str(item) for item in data["audio_offered"]]
+            and not (audio_is_original(quality) and data.get("copy_ok") is False)
+        )
     return content.find_choice(url, media_format, quality) is not None
 
 

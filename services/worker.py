@@ -19,7 +19,12 @@ from typing import Any, Optional
 
 import asyncpg
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramEntityTooLarge,
+    TelegramRetryAfter,
+)
 from aiogram.types import Chat, FSInputFile, InputMediaPhoto, Message
 
 from core import database
@@ -28,7 +33,7 @@ from core.i18n import DEFAULT_LANG, error_message, t
 from core.ui import remember_retry, retry_keyboard
 from core.utils import MediaFormat, escape_html, format_size, sanitize_filename, today_local
 from services import cache as cache_service
-from services import cookie_refresh, fallback, preflight, recipients, spotify, telemetry
+from services import cookie_refresh, fallback, preflight, recipients, spotify, telemetry, verify
 from services.cobalt import CobaltError, CobaltService, audio_format_param
 from services.delivery import (
     ActionPulse,
@@ -74,6 +79,7 @@ _PERMANENT_ERROR_CODES = {
     "LIVE_STREAM",
     "PLAYLIST_NOT_SUPPORTED",
     "FFMPEG_REQUIRED",
+    "FILE_TOO_LARGE",
     # A post with no video in it has no video in it on the second attempt either.
     # The fallback (which serves the photos) runs before this list is consulted, so
     # this only saves the pointless retries when there is nobody to serve them.
@@ -551,6 +557,21 @@ async def _finish_upload(
             await _edit(status, _on_card(card, t("work.final_too_big", lang)))
             return 0.0
 
+        # The produced file testifies before it is captioned: a "MP3 · 320 kbps"
+        # caption under a 192 kbps file is the exact lie this refuses to send.
+        # Only the captioned media is checked (an album is named by its first
+        # file); see services/verify.py for the policy and its tolerances.
+        if _delivery_kind(files[0], result.media_format) in ("audio", "video"):
+            mismatch = await verify.verify_produced(
+                result.file_path,
+                media_format=result.media_format,
+                quality=result.quality,
+                suffix=result.file_path.suffix,
+                produced_p=result.info.label_p or result.info.height,
+            )
+            if mismatch:
+                raise ExtractionError("CONVERSION_MISMATCH", mismatch)
+
         # Upload to Telegram and remember the file_id (and how to send it again).
         # The card's ⏳ covers the upload too — one compact state for the whole
         # wait, removed the moment the file lands (the file *is* the "done").
@@ -562,9 +583,22 @@ async def _finish_upload(
         async with ActionPulse(
             bot, task.chat_id, upload_action(_delivery_kind(files[0], result.media_format))
         ):
-            delivered = await _upload(
-                bot, task.chat_id, result, lang, track=track, cover=cover, source_url=task.url
-            )
+            try:
+                delivered = await _upload(
+                    bot, task.chat_id, result, lang, track=track, cover=cover, source_url=task.url
+                )
+            except TelegramEntityTooLarge as exc:
+                # The transport's own ceiling refused the finished file (50 MB on
+                # the cloud — and on a local server without ``--local``). In its
+                # own category: "something went wrong on our side" would send the
+                # user retrying a limit no retry can move.
+                raise ExtractionError(
+                    "FILE_TOO_LARGE", "finished file exceeds the transport's upload ceiling"
+                ) from exc
+            except TelegramAPIError as exc:
+                # Telegram said no (bad file, revoked bot, full storage…) — a
+                # delivery failure, not an extraction one: the file itself is fine.
+                raise ExtractionError("DELIVERY_FAILED", str(exc)) from exc
         if delivered.cacheable:
             # The canonical name this file goes by — the song for a track, the
             # media's own title otherwise — so a replay's card is the first send's

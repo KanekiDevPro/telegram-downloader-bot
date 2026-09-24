@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,25 @@ async def _tunnel_up(url: str, timeout: float = 5.0) -> Any:
     return TunnelHealth(
         url=url, reachable=True, traced=True, warp="on", exit_ip="203.0.113.9"
     )
+
+
+@pytest.fixture(autouse=True)
+def fresh_settings() -> Iterator[None]:
+    """Tests must not inherit each other's settings cache.
+
+    ``get_settings`` is an ``lru_cache`` reading env at build time, and tests set
+    env before asking for settings — or warm the cache as a side effect (the
+    timezone helpers call it). Without this, a warm cache answers with an earlier
+    test's ``ADMIN_IDS``/``TIMEZONE``/… and later tests assert against another
+    suite's configuration. Individual tests that build the cache deliberately
+    (``tests/test_fallback.py``, ``tests/test_queue.py``) already clear it at both
+    ends; this makes that courtesy universal.
+    """
+    from core.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture(autouse=True)

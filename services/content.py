@@ -353,6 +353,29 @@ def _file_kind(path: str, query: str = "") -> ContentKind | None:
     return None
 
 
+def unwrap_media_url(url: str) -> str:
+    """The file a viewer/wrapper link names in one of its parameters, or itself.
+
+    Reddit's share links land on ``reddit.com/media?url=…`` — a media *viewer*
+    page no extractor handles, while the URL inside its parameter is a plain
+    ``i.redd.it/….jpeg`` file that downloads as-is. The wrapper says so out loud:
+    an absolute URL to a media file, in a parameter. Read only that (a path with
+    its own file suffix is already the real thing, and ``format=`` means a
+    different thing on CDNs — see ``_query_format``).
+    """
+    parsed = urlparse(url or "")
+    if _file_kind(parsed.path, parsed.query) is not None:
+        return url
+    for _key, value in parse_qsl(parsed.query, keep_blank_values=False):
+        candidate = value.strip()
+        if not candidate.startswith(("http://", "https://")):
+            continue
+        inner = urlparse(candidate)
+        if inner.netloc and _file_kind(inner.path, inner.query) is not None:
+            return candidate
+    return url
+
+
 def url_host(url: str) -> str:
     """The lowercased host of a link, without credentials or port (``""`` if none).
 

@@ -768,13 +768,16 @@ class Settings(BaseSettings):
     def upload_limit_mb(self) -> int:
         """Effective per-file ceiling for the transport we are actually using.
 
-        Falling back to the cloud API silently drops the ceiling to 50 MB, and a
-        download that big would only fail *after* all the work — so the limit is
-        lowered up front and the worker rejects the link immediately.
+        Only a local Bot API server running with ``TELEGRAM_API_LOCAL`` carries a
+        file over the cloud's 50 MB. A configured-but-not-local server enforces
+        the same 50 MB as the cloud — and falling back to the cloud drops it too.
+        A download bigger than the real ceiling would only fail *after* all the
+        work, so the limit is lowered up front: the intake guard rejects the
+        link and the quality menus never offer a file the transport will refuse.
         """
-        if self.cloud_api_fallback:
-            return min(self.max_file_size_mb, CLOUD_API_UPLOAD_LIMIT_MB)
-        return self.max_file_size_mb
+        if self.uses_local_api and self.telegram_api_local and not self.cloud_api_fallback:
+            return self.max_file_size_mb
+        return min(self.max_file_size_mb, CLOUD_API_UPLOAD_LIMIT_MB)
 
     @property
     def upload_limit_bytes(self) -> int:

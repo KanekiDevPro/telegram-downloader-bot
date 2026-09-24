@@ -15,13 +15,14 @@ something is broken is the one screen that must never break.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 import asyncpg
 
 from core import database
 from core.config import Settings, probe_url
 from core.i18n import DEFAULT_LANG, t
-from core.utils import escape_html, today_local
+from core.utils import escape_html, local_midnight, today_local
 from services.cobalt import CobaltNodeState, CobaltService
 from services.doctor import fallback_health, http_reachable
 from services.queue import TaskQueue
@@ -250,7 +251,11 @@ async def groups_text(pool: asyncpg.Pool, lang: str = DEFAULT_LANG) -> str:
         failed=f"{summary['failed']:,}",
         groups=f"{summary['groups']:,}",
     )
-    lines = [t("admin.groups_headline", lang), "", totals, ""]
+    lines = [t("admin.groups_headline", lang), "", totals]
+    week = await _week_block(pool, lang)
+    if week:
+        lines += ["", *week]
+    lines.append("")
     top = await database.top_groups(pool, limit=5)
     if not top:
         lines.append(t("admin.groups_empty", lang))
@@ -282,6 +287,84 @@ async def groups_text(pool: asyncpg.Pool, lang: str = DEFAULT_LANG) -> str:
                 )
             )
     return "\n".join(lines)
+
+
+def _signed_count(cur: int, prev: int) -> str:
+    """``+184`` / ``-12`` — movement as a count, with its direction attached."""
+    return f"{cur - prev:+,}"
+
+
+def _signed_percent(cur: int, prev: int) -> str:
+    """``+18.4%`` — movement as a share of last week (callers pass a live week)."""
+    return f"{(cur - prev) / prev * 100:+.1f}%"
+
+
+def _signed_points(cur_rate: float, prev_rate: float) -> str:
+    """``-1.1%`` — failure-rate movement in percentage points."""
+    return f"{cur_rate - prev_rate:+.1f}%"
+
+
+async def _week_block(pool: asyncpg.Pool, lang: str) -> list[str]:
+    """This week against last week: volume and failure rate, and their movement.
+
+    "Week" is the trailing seven *whole* local days against the seven before
+    them — whole days so the timezone boundary never splits one, and trailing so
+    the two windows are always the same size (a calendar week would compare a
+    partial week against a full one). Nothing renders when both weeks are empty:
+    a trend of no data is noise, and the totals above already said "none".
+    """
+    try:
+        today = today_local()
+        stats = await database.group_week_stats(
+            pool,
+            prev_start=local_midnight(today - timedelta(days=13)),
+            cur_start=local_midnight(today - timedelta(days=6)),
+            cur_end=local_midnight(today + timedelta(days=1)),
+        )
+    except Exception:
+        logger.exception("could not read the week-over-week group stats")
+        return []
+    cur_total, cur_failed = int(stats["cur_total"]), int(stats["cur_failed"])
+    prev_total, prev_failed = int(stats["prev_total"]), int(stats["prev_failed"])
+    if not (cur_total or prev_total):
+        return []
+    lines = [
+        t("admin.groups_week_title", lang),
+        t("admin.groups_week_volume", lang, total=f"{cur_total:,}"),
+    ]
+    if prev_total:
+        lines.append(
+            t(
+                "admin.groups_week_volume_delta",
+                lang,
+                delta=_signed_count(cur_total, prev_total),
+                percent=_signed_percent(cur_total, prev_total),
+            )
+        )
+    else:
+        lines.append(t("admin.groups_week_volume_first", lang))
+    cur_rate = (cur_failed / cur_total * 100) if cur_total else None
+    lines.append(
+        t(
+            "admin.groups_week_fail_rate",
+            lang,
+            rate="—" if cur_rate is None else f"{cur_rate:.1f}%",
+        )
+    )
+    if prev_total and cur_rate is not None:
+        lines.append(
+            t(
+                "admin.groups_week_fail_delta",
+                lang,
+                delta=_signed_points(cur_rate, prev_failed / prev_total * 100),
+            )
+        )
+    elif prev_total:
+        # Last week has data but this week has none: no rate to move from.
+        lines.append(t("admin.groups_week_fail_delta", lang, delta="—"))
+    else:
+        lines.append(t("admin.groups_week_fail_first", lang))
+    return lines
 
 
 def tools_text(lang: str = DEFAULT_LANG) -> str:

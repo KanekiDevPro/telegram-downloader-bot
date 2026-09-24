@@ -8,6 +8,7 @@ single tap.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -116,6 +117,22 @@ async def test_failure_codes_are_counts_and_nothing_else() -> None:
     assert "count(*)" in query
 
 
+async def test_the_week_stats_are_one_aggregate_row_with_two_windows() -> None:
+    pool = _Pool()
+    prev_start = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    cur_start = datetime(2026, 9, 14, tzinfo=timezone.utc)
+    cur_end = datetime(2026, 9, 21, tzinfo=timezone.utc)
+    await database.group_week_stats(
+        pool, prev_start=prev_start, cur_start=cur_start, cur_end=cur_end
+    )
+    query, args = pool.rows[0]
+    assert "FILTER (WHERE created_at >= $2 AND created_at < $3)" in query
+    assert "FILTER (WHERE created_at >= $1 AND created_at < $2)" in query
+    assert "FILTER (WHERE NOT ok" in query
+    assert args == (prev_start, cur_start, cur_end)
+    assert "GROUP BY" not in query, "one row, aggregated in SQL — never in Python"
+
+
 # ---------------------------------------------------------------------------
 # The screen
 # ---------------------------------------------------------------------------
@@ -127,6 +144,7 @@ def _patch_screen(
     summary: dict[str, Any],
     top: list[dict[str, Any]],
     codes: list[dict[str, Any]],
+    week: dict[str, Any] | None = None,
 ) -> None:
     async def fake_summary(pool: Any) -> Any:
         return summary
@@ -137,9 +155,13 @@ def _patch_screen(
     async def fake_codes(pool: Any, *, limit: int = 5) -> Any:
         return codes
 
+    async def fake_week(pool: Any, **_windows: Any) -> Any:
+        return week or {"cur_total": 0, "cur_failed": 0, "prev_total": 0, "prev_failed": 0}
+
     monkeypatch.setattr(panel.database, "group_usage_summary", fake_summary)
     monkeypatch.setattr(panel.database, "top_groups", fake_top)
     monkeypatch.setattr(panel.database, "group_failure_codes", fake_codes)
+    monkeypatch.setattr(panel.database, "group_week_stats", fake_week)
 
 
 async def test_the_groups_screen_reports_only_what_the_rows_know(
@@ -173,6 +195,111 @@ async def test_an_empty_groups_screen_stays_quiet(
     text = await panel.groups_text(object(), EN)
     assert t("admin.groups_empty", EN) in text
     assert t("admin.groups_failures", EN, failed="0") not in text
+
+
+# ---------------------------------------------------------------------------
+# Week-over-week
+# ---------------------------------------------------------------------------
+
+
+def _week(monkeypatch: pytest.MonkeyPatch, **stats: int) -> Any:
+    async def fake_week(pool: Any, **_windows: Any) -> Any:
+        return {
+            "cur_total": stats.get("cur_total", 0),
+            "cur_failed": stats.get("cur_failed", 0),
+            "prev_total": stats.get("prev_total", 0),
+            "prev_failed": stats.get("prev_failed", 0),
+        }
+
+    monkeypatch.setattr(panel.database, "group_week_stats", fake_week)
+    return fake_week
+
+
+def test_the_movement_helpers_sign_their_answers() -> None:
+    assert panel._signed_count(1184, 1000) == "+184"
+    assert panel._signed_count(988, 1000) == "-12"
+    assert panel._signed_percent(1184, 1000) == "+18.4%"
+    assert panel._signed_percent(988, 1000) == "-1.2%"
+    assert panel._signed_points(2.7, 4.0) == "-1.3%"
+
+
+async def test_a_growing_week_shows_both_movement_numbers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _week(monkeypatch, cur_total=1184, cur_failed=32, prev_total=1000, prev_failed=40)
+    lines = await panel._week_block(object(), EN)
+    text = "\n".join(lines)
+    assert t("admin.groups_week_title", EN) in text
+    assert "1,184" in text
+    assert "+184" in text and "+18.4%" in text
+    assert "2.7%" in text, "the failure rate of the week itself"
+    assert "-1.3%" in text, "failure rate moving in the right direction"
+
+
+async def test_a_shrinking_week_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _week(monkeypatch, cur_total=988, cur_failed=50, prev_total=1000, prev_failed=40)
+    text = "\n".join(await panel._week_block(object(), EN))
+    assert "-12" in text and "-1.2%" in text
+    assert "+1.1%" in text, "worse failure rate, named as movement"
+
+
+async def test_a_first_week_has_no_baseline_and_does_not_invent_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _week(monkeypatch, cur_total=5, cur_failed=1, prev_total=0, prev_failed=0)
+    text = "\n".join(await panel._week_block(object(), EN))
+    assert t("admin.groups_week_volume_first", EN) in text
+    assert t("admin.groups_week_fail_first", EN) in text
+    assert "20.0%" in text, "this week's own rate is still honest"
+    assert "+18.4%" not in text and "%!" not in text
+
+
+async def test_a_silent_current_week_has_no_rate_to_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _week(monkeypatch, cur_total=0, cur_failed=0, prev_total=12, prev_failed=1)
+    text = "\n".join(await panel._week_block(object(), EN))
+    assert t("admin.groups_week_fail_rate", EN, rate="—") in text
+    assert "-12" in text and "-100.0%" in text
+    assert t("admin.groups_week_fail_delta", EN, delta="—") in text
+
+
+async def test_two_silent_weeks_are_not_a_trend(monkeypatch: pytest.MonkeyPatch) -> None:
+    _week(monkeypatch, cur_total=0, cur_failed=0, prev_total=0, prev_failed=0)
+    assert await panel._week_block(object(), EN) == []
+
+
+async def test_the_trend_sits_on_the_groups_screen(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_screen(
+        monkeypatch,
+        summary={"total": 10, "successes": 9, "failed": 1, "groups": 2},
+        top=[],
+        codes=[],
+        week={"cur_total": 1184, "cur_failed": 32, "prev_total": 1000, "prev_failed": 40},
+    )
+    text = await panel.groups_text(object(), EN)
+    assert t("admin.groups_week_title", EN) in text
+    assert "+18.4%" in text
+
+
+async def test_an_unreadable_week_never_breaks_the_groups_screen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def broken_week(pool: Any, **_windows: Any) -> Any:
+        raise RuntimeError("database down")
+
+    _patch_screen(
+        monkeypatch,
+        summary={"total": 10, "successes": 9, "failed": 1, "groups": 2},
+        top=[],
+        codes=[],
+    )
+    monkeypatch.setattr(panel.database, "group_week_stats", broken_week)
+    text = await panel.groups_text(object(), EN)
+    assert t("admin.groups_headline", EN) in text, "the screen survives its trend"
+    assert t("admin.groups_week_title", EN) not in text
 
 
 # ---------------------------------------------------------------------------

@@ -208,6 +208,19 @@ def today_local() -> date:
     return datetime.now(tz).date()
 
 
+def local_midnight(day: date) -> datetime:
+    """The instant a local day starts — a window boundary that is a whole day.
+
+    Same timezone resolution as :func:`today_local` (misconfigured TIMEZONE →
+    UTC), so a window built from these never cuts a local day in half.
+    """
+    try:
+        tz: tzinfo = ZoneInfo(get_settings().timezone)
+    except ZoneInfoNotFoundError:
+        tz = timezone.utc
+    return datetime(day.year, day.month, day.day, tzinfo=tz)
+
+
 def format_size(num_bytes: int | None, *, unknown: str = "?") -> str:
     """Human-readable size, e.g. 245.1 MB.
 

@@ -382,10 +382,34 @@ def test_env_file_argument_is_honoured(tmp_path: Path) -> None:
 # Upload ceiling per transport
 # ---------------------------------------------------------------------------
 
-def test_upload_limit_follows_configured_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_cloud_ceiling_binds_without_a_local_mode_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings = _settings(monkeypatch, MAX_FILE_SIZE_MB="2000")
+    assert settings.upload_limit_mb == CLOUD_API_UPLOAD_LIMIT_MB
+
+
+def test_only_a_local_mode_server_carries_a_file_over_50mb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(
+        monkeypatch,
+        MAX_FILE_SIZE_MB="2000",
+        TELEGRAM_API_BASE_URL="http://telegram-api:8081",
+        TELEGRAM_API_LOCAL="true",
+    )
     assert settings.upload_limit_mb == 2000
     assert settings.upload_limit_bytes == 2000 * 1024 * 1024
+
+
+def test_a_plain_local_server_still_enforces_the_cloud_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A server without --local uploads under the same 50 MB wall as the cloud.
+    settings = _settings(
+        monkeypatch, MAX_FILE_SIZE_MB="2000", TELEGRAM_API_BASE_URL="http://telegram-api:8081"
+    )
+    assert settings.upload_limit_mb == CLOUD_API_UPLOAD_LIMIT_MB
 
 
 def test_cloud_fallback_caps_the_upload_limit(monkeypatch: pytest.MonkeyPatch) -> None:

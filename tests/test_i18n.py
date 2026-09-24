@@ -64,6 +64,13 @@ def test_the_new_analytics_and_rate_keys_speak_both_languages() -> None:
         "admin.groups_unknown",
         "admin.groups_failures",
         "admin.groups_code",
+        "admin.groups_week_title",
+        "admin.groups_week_volume",
+        "admin.groups_week_volume_delta",
+        "admin.groups_week_volume_first",
+        "admin.groups_week_fail_rate",
+        "admin.groups_week_fail_delta",
+        "admin.groups_week_fail_first",
         "audio.source_rate",
     ):
         assert key in MESSAGES, f"{key} missing from the catalogue"

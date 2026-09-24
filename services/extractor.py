@@ -29,7 +29,7 @@ import yt_dlp
 from yt_dlp.cookies import SUPPORTED_BROWSERS, SUPPORTED_KEYRINGS, load_cookies
 from yt_dlp.utils import DownloadError
 
-from core.utils import MediaFormat, normalize_quality
+from core.utils import AUDIO_FORMATS, MediaFormat, normalize_quality
 
 ProgressHook = Callable[[dict[str, Any]], None]
 T = TypeVar("T")
@@ -155,6 +155,12 @@ VIDEO_FORMAT_SELECTOR = "/".join(
 )
 AUDIO_FORMAT_SELECTOR = "bestaudio[ext=m4a]/bestaudio/best"
 MERGE_OUTPUT_FORMAT = "mp4/mkv"
+#: yt-dlp ``format_sort`` for every download: resolution first, then HEVC on ties.
+#: One constant because two places must agree on it forever — the download opts
+#: (``_base_opts``) and the menu's prediction of what a tier will deliver
+#: (:func:`selected_streams`); a drift between them would re-open the gap where
+#: the menu promised a rung the chain never delivered.
+FORMAT_SORT: tuple[str, ...] = ("res", "vcodec:hevc")
 
 
 def _video_selector(height: int) -> str:
@@ -264,6 +270,60 @@ def audio_size_estimate(quality: object, duration_s: float) -> int | None:
         # loose and the caller keeps the tilde.
         return int(duration_s * 176_400 * 1.02)
     return None
+
+
+@dataclass(frozen=True)
+class AudioCapability:
+    """What an audio request against *this* source can honestly become.
+
+    One model, asked by every screen — the format grid and the bitrate rows both
+    read it — so the UI can never promise what the pipeline cannot deliver:
+
+    * ``formats`` — the output codecs genuinely producible here. Re-encodes need
+      ffmpeg; lossless output (wav/flac) additionally needs a finished file the
+      transport can actually carry (its WAV-shaped size is the one ceiling that
+      exists before downloading — anything incompressible lands near it), and an
+      option the upload would only refuse is not an option at all.
+    * ``copy_ok`` — whether the untouched-stream tier (bare ``m4a``, no
+      conversion) is honest here: only when that stream really is AAC in an M4A
+      container. On an opus or mp3 source a copy delivers a different container
+      than the button named, so the row is gone. Unknown source → ``True``:
+      nothing learned contradicts it, and the produced-container guard is the
+      backstop.
+    """
+
+    formats: tuple[str, ...]
+    copy_ok: bool
+
+
+def audio_capability(
+    *,
+    source_ext: Optional[str] = None,
+    duration_s: float = 0.0,
+    has_ffmpeg: Optional[bool] = None,
+    upload_limit_bytes: int = 0,
+) -> AudioCapability:
+    """See :class:`AudioCapability` — the only place those rules live."""
+    if has_ffmpeg is None:
+        has_ffmpeg = shutil.which("ffmpeg") is not None
+    copy_ok = source_ext is None or source_ext in ("m4a", "aac", "m4b")
+    lossless_deliverable = (
+        upload_limit_bytes <= 0
+        or duration_s <= 0
+        or (audio_size_estimate("wav", duration_s) or 0) <= upload_limit_bytes
+    )
+    formats: list[str] = []
+    for codec in AUDIO_FORMATS:
+        if codec == "m4a":
+            if has_ffmpeg or copy_ok:
+                formats.append(codec)
+        elif not has_ffmpeg:
+            continue
+        elif codec in ("wav", "flac") and not lossless_deliverable:
+            continue
+        else:
+            formats.append(codec)
+    return AudioCapability(formats=tuple(formats), copy_ok=copy_ok)
 
 
 def format_selector(media_format: MediaFormat, quality: object = "") -> str:
@@ -1076,6 +1136,10 @@ class MediaInfo:
     #: menu is drawn from this, never from a static tier table (see
     #: :func:`video_options`). Empty when the site reports no format list.
     video_options: tuple[VideoOption, ...] = ()
+    #: The container the untouched-stream pick actually arrives in (see
+    #: :func:`source_audio_ext`) — what a no-conversion request would deliver.
+    #: ``None`` when the source declares no audio stream of its own.
+    audio_ext: Optional[str] = None
     #: The source's own audio rate (see :func:`_audio_rate_kbps`) — what the menu
     #: uses to stop offering re-encodes *above* it. ``None`` means the site said
     #: nothing, and the whole ladder stays.
@@ -1169,9 +1233,50 @@ def _to_media_info(source_url: str, info: dict[str, Any]) -> MediaInfo:
         height=_reported_height(info),
         label_p=quality_label_p(_reported_width(info), _reported_height(info)),
         video_options=video_options(info),
+        audio_ext=source_audio_ext(info),
         audio_kbps=audio_kbps,
         audio_kbps_approx=audio_kbps_approx,
     )
+
+
+def source_audio_ext(info: Mapping[str, Any]) -> Optional[str]:
+    """The container an untouched-stream request would actually arrive in.
+
+    Mirrors what ``AUDIO_FORMAT_SELECTOR`` picks — ``bestaudio[ext=m4a]/bestaudio``
+    — so an M4A audio stream when the source has one (whatever its rate), else its
+    best audio-only stream by declared/measured rate. A source with no audio-only
+    stream at all still answers: the copy would carry whatever container the
+    muxed download has. ``None`` only when nothing declares audio. This is the
+    one fact that decides whether the no-conversion tier's button tells the truth.
+    """
+    picked: Optional[Mapping[str, Any]] = None
+    picked_rate = -1.0
+    saw_audio = False
+    for stream in info.get("formats") or []:
+        if not isinstance(stream, dict):
+            continue
+        if stream.get("acodec") in (None, "none"):
+            continue
+        saw_audio = True
+        if stream.get("vcodec") not in (None, "none"):
+            continue
+        ext = str(stream.get("ext") or "").lower()
+        if ext == "m4a":
+            return "m4a"  # the selector's own first pick, whatever its rate
+        rates = [
+            float(stream[key])
+            for key in ("abr", "tbr")
+            if isinstance(stream.get(key), (int, float)) and float(stream[key]) > 0
+        ]
+        rate = max(rates, default=0.0)
+        if picked is None or rate > picked_rate:
+            picked, picked_rate = stream, rate
+    if picked is not None:
+        return str(picked.get("ext") or "").lower() or None
+    if saw_audio:
+        # Muxed only: the copy would carry the download's own container.
+        return str(info.get("ext") or "").lower() or None
+    return None
 
 
 def _audio_rate_kbps(info: Mapping[str, Any]) -> tuple[Optional[int], bool]:
@@ -1222,6 +1327,72 @@ def _reported_width(info: dict[str, Any]) -> Optional[int]:
     return None
 
 
+def selected_streams(info: Mapping[str, Any], quality: object) -> tuple[dict[str, Any], ...]:
+    """The streams the production chain would really download for a quality tap.
+
+    This *is* the chain, asked what it would do — not a re-implementation of it:
+    yt-dlp's own ``build_format_selector`` over yt-dlp's own ``sort_formats``,
+    given the very ``format_selector`` string and :data:`FORMAT_SORT` that
+    ``ExtractorService.download`` hands it (see ``_base_opts``), evaluated on the
+    formats the extraction already returned. No network, no second probe.
+
+    Merged picks come back expanded to their parts (video + audio), shaped like
+    the ``requested_formats`` a finished download reports. ``()`` means the chain
+    matched nothing — a request that would fail.
+    """
+    formats = [dict(f) for f in (info.get("formats") or []) if isinstance(f, dict)]
+    if not formats:
+        return ()
+    sortable = {"formats": formats}
+    with yt_dlp.YoutubeDL(
+        {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "format_sort": list(FORMAT_SORT),
+        }
+    ) as ydl:
+        ydl.sort_formats(sortable)
+        picked = list(
+            ydl.build_format_selector(format_selector("video", quality))(sortable)
+        )
+    streams: list[dict[str, Any]] = []
+    for entry in picked:
+        parts = entry.get("requested_formats")
+        if parts:
+            streams.extend(dict(p) for p in parts if isinstance(p, dict))
+        else:
+            streams.append(dict(entry))
+    return tuple(streams)
+
+
+def _chain_reaches_rung(info: Mapping[str, Any], option: VideoOption) -> bool:
+    """Whether a tap on this row really lands on the rung it names — the menu contract.
+
+    Asks :func:`selected_streams` what requesting this row's height would
+    deliver, and compares rung names. A row whose request resolves to some
+    *other* rung is a promise delivery would not keep (1440p on a source whose
+    1440p is VP9-only arrives as 1080p H.264), so the menu must not show it.
+    When nothing can be proven — the pick reports no height, or the selection
+    machinery itself refuses — the row stays: an unprovable row is not a proven
+    lie, and a silently emptied menu is its own lie.
+    """
+    try:
+        streams = selected_streams(info, option.height)
+    except Exception:  # noqa: BLE001 — the prediction must never break extraction
+        logger.debug("could not simulate the format chain for height %s", option.height)
+        return True
+    video = next(
+        (f for f in streams if f.get("vcodec") not in (None, "none")), None
+    )
+    if not video or not video.get("height"):
+        return True
+    delivered = quality_label_p(video.get("width"), video.get("height")) or int(
+        video["height"]
+    )
+    return delivered == option.label_p
+
+
 def video_options(info: Mapping[str, Any]) -> tuple[VideoOption, ...]:
     """The downloadable resolutions of a link, best first — sizes included.
 
@@ -1232,6 +1403,12 @@ def video_options(info: Mapping[str, Any]) -> tuple[VideoOption, ...]:
     height has several candidates (HEVC and AVC, say) the download may pick any
     of them, so the size becomes an estimate even if the parts were exact —
     "~" is a promise, not decoration.
+
+    The menu contract (see :func:`_chain_reaches_rung`): a rung is advertised
+    only when the production format chain delivers *that* rung for it — a menu
+    row must never silently resolve lower than it claims. Rungs whose streams
+    exist but that the chain would trade down (VP9/AV1-only above the H.264/HEVC
+    ceiling, say) are simply not offered.
     """
     formats = [f for f in (info.get("formats") or []) if isinstance(f, dict)]
     if not formats:
@@ -1287,7 +1464,9 @@ def video_options(info: Mapping[str, Any]) -> tuple[VideoOption, ...]:
             _, _, height, width = max(candidates, key=lambda c: c[2])
             size = max(c[0] for c in candidates)
             exact = False
-        options.append(VideoOption(height, size, exact, width))
+        option = VideoOption(height, size, exact, width)
+        if _chain_reaches_rung(info, option):
+            options.append(option)
     return tuple(options)
 
 
@@ -1521,8 +1700,8 @@ class ExtractorService:
             "concurrent_fragment_downloads": 4,
             "format": format_selector(media_format, quality),
             "merge_output_format": MERGE_OUTPUT_FORMAT,
-            # Resolution first, then HEVC on ties — consistent with the selector.
-            "format_sort": ["res", "vcodec:hevc"],
+            # Resolution first, then HEVC on ties — see :data:`FORMAT_SORT`.
+            "format_sort": list(FORMAT_SORT),
         }
         if self.proxy:
             opts["proxy"] = self.proxy
