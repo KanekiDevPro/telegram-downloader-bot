@@ -10,14 +10,14 @@ sudo bash -c "$(wget -qO- https://raw.githubusercontent.com/KanekiDevPro/telegra
 
 ## Features
 
-- **Honest media menus.** Video rows show only the resolutions the link really has (480p → 2160p (4K), named 2K/4K when applicable) with an estimated size per row; audio rows show real bitrates with sizes, capped by the source's own quality — no "best", no fake upscales.
-- **Source-aware audio formats** — MP3 / M4A / OPUS / FLAC / WAV, offered only when this source and the active transport can actually produce and deliver them.
-- **Delivery verification.** Before upload, `ffprobe` measures the produced file; a caption that would disagree with the real codec/bitrate/resolution is refused instead of sent.
+- **Honest media menus.** Video rows show only the resolutions the link really has (480p → 2160p (4K), named 2K/4K when applicable) with an estimated size per row; audio rows show real bitrates with sizes, capped by the source's own quality — no "best", no fake upscales. A link whose qualities cannot be discovered gets an explicit localized retry message instead of a silent default download (an automatic "best available" row exists only behind the opt-in `MENU_AUTO_BEST` and labels itself as an automatic pick).
+- **Source-aware audio formats** — MP3 / M4A / OPUS / FLAC / WAV, offered only when this source and the active transport can actually produce and deliver them. Each format is labelled for what it is: **source-native** (passed through untouched) or **converted** (transcoded) — a converted MP3 is never presented as source-native.
+- **Delivery verification.** Before upload, `ffprobe` measures the produced file; a caption that would disagree with the real codec/bitrate/resolution is refused instead of sent, the delivered quality is checked against the user's actual selection, and missing / empty / stream-less files never leave the server.
 - **One-message UI** in Persian and English (chosen on first run): Home → Download / Profile / Admin, every screen edited in place.
 - **Group support** — add the bot to a group, send a link, get the same compact flow without chatter; admin analytics track group usage with week-over-week trends.
 - Background queue and workers, with a smart cache that replays finished files instantly (same caption as a fresh send).
 - Premium (VIP) with manual receipt payments and admin approval; daily quotas for free and VIP users.
-- Admin dashboard (server-side authorized): Statistics, Users, Broadcast, Blocks, Trends, Failures, Groups, System, Settings.
+- Admin dashboard (server-side authorized), organized into category submenus — Users & groups, Downloads & media, Sources & extractors, Messages & localization, System & configuration, Diagnostics & maintenance — every screen with Back/Home navigation. Includes **Bot texts**: view, edit, preview and reset any user-facing message per language (validated markup and placeholders, audited changes).
 - YouTube survival kit: cookie login from a read-only jar (copy-on-write), automatic cookie export with admin alerts, Smart-TV OAuth login, PO-token and session helpers, optional WARP exit, and `/doctor` for a one-verdict diagnosis.
 - Optional self-hosted Telegram Bot API server for uploads beyond the cloud API's 50 MB cap, with transport-aware file limits.
 
@@ -91,6 +91,7 @@ Everything is environment-driven; the full annotated list is in [.env.example](.
 | `YTDLP_POT_PROVIDER_URL` | `http://pot-provider:4416` | PO-token helper; empty = off |
 | `YOUTUBE_SESSION_SERVER` | `http://yt-session-generator:8080` | session helper for the fallback; empty = off |
 | `BOT_MODE` / `WEBHOOK_PATH` | `polling` / `/webhook` | webhook mode needs a public HTTPS reverse proxy |
+| `MENU_AUTO_BEST` | `false` | offer a clearly-labelled automatic "best available" row when a link's qualities can't be discovered; `false` = explicit retry message instead |
 | `TIMEZONE` | `Asia/Tehran` | daily quota reset and analytics week boundaries |
 
 > **Writing `.env`:** keep comments on their own lines — a trailing comment after an empty value (`TELEGRAM_API_ID=  # note`) is absorbed into the value by both dotenv and Docker Compose's parser.
@@ -148,14 +149,14 @@ sudo bash -c "$(wget -qO- https://raw.githubusercontent.com/KanekiDevPro/telegra
 
 ## امکانات
 
-- **منوهای صادقانه.** ردیف‌های ویدیو فقط کیفیت‌هایی را نشان می‌دهند که واقعاً در لینک هستند (۴۸۰p تا ۲۱۶۰p (4K)) همراه با حجم تخمینی هر ردیف؛ ردیف‌های صدا بیت‌ریت واقعی با حجم تخمینی نشان می‌دهند و از کیفیت خود منبع بالاتر نمی‌روند — نه «بهترین کیفیت»، نه کیفیت ساختگی.
-- **فرمت‌های صدای وابسته به منبع** — MP3 / M4A / OPUS / FLAC / WAV، فقط وقتی نمایش داده می‌شوند که همین منبع و مسیر انتقال فعال واقعاً بتواند آن‌ها را بسازد و تحویل دهد.
-- **تأیید هنگام تحویل.** پیش از آپلود، `ffprobe` فایل ساخته‌شده را اندازه می‌گیرد؛ اگر کپشن با کدک/بیت‌ریت/رزولوشن واقعی نخواند، به‌جای ارسالِ گمراه‌کننده رد می‌شود.
+- **منوهای صادقانه.** ردیف‌های ویدیو فقط کیفیت‌هایی را نشان می‌دهند که واقعاً در لینک هستند (۴۸۰p تا ۲۱۶۰p (4K)) همراه با حجم تخمینی هر ردیف؛ ردیف‌های صدا بیت‌ریت واقعی با حجم تخمینی نشان می‌دهند و از کیفیت خود منبع بالاتر نمی‌روند — نه «بهترین کیفیت»، نه کیفیت ساختگی. اگر کیفیت‌های لینکی قابل کشف نباشند، به‌جای دانلود خودکارِ بی‌صدا پیام صریح «کشف نشد» با دکمهٔ تلاش مجدد نشان داده می‌شود (ردیف خودکار «بهترین کیفیت موجود» فقط با سوییچ اختیاری `MENU_AUTO_BEST` می‌آید و خودش را انتخاب خودکار می‌نامد).
+- **فرمت‌های صدای وابسته به منبع** — MP3 / M4A / OPUS / FLAC / WAV، فقط وقتی نمایش داده می‌شوند که همین منبع و مسیر انتقال فعال واقعاً بتواند آن‌ها را بسازد و تحویل دهد. هر فرمت برچسب درست می‌گیرد: **اصلیِ منبع** (همان استریم، بدون تبدیل) یا **تبدیل‌شده** (ترانسکد) — MP3 تبدیل‌شده هرگز اصلی جا زده نمی‌شود.
+- **تأیید هنگام تحویل.** پیش از آپلود، `ffprobe` فایل ساخته‌شده را اندازه می‌گیرد؛ اگر کپشن با کدک/بیت‌ریت/رزولوشن واقعی نخواند، به‌جای ارسالِ گمراه‌کننده رد می‌شود. کیفیت تحویل‌شده با انتخاب خودِ کاربر هم سنجیده می‌شود و فایل خالی یا بدون استریم هرگز فرستاده نمی‌شود.
 - **رابط تک‌پیامی** به فارسی و انگلیسی (انتخاب در اولین ورود): خانه ← دانلود / پروفایل / ادمین، و هر صفحه به‌جای پیام جدید ویرایش می‌شود.
 - **کار در گروه** — ربات را به گروه اضافه کنید، لینک بفرستید و بدون شلوغ‌کاری همان فلوی فشرده را بگیرید؛ آمار گروه‌ها با روند هفته به هفته در پنل ادمین.
 - صف پس‌زمینه و ورکرها، با کش هوشمند که فایل‌های آماده را آنی دوباره می‌فرستد (همان کپشنِ ارسال تازه).
 - اشتراک VIP با پرداخت رسید دستی و تأیید ادمین؛ سهمیهٔ روزانه برای کاربران عادی و VIP.
-- داشبورد ادمین (مجوز سمت سرور): آمار، کاربران، اطلاع‌رسانی، مسدودها، روندها، خطاها، گروه‌ها، سیستم، تنظیمات.
+- داشبورد ادمین (مجوز سمت سرور) در زیرمنوهای دسته‌بندی‌شده — کاربران و گروه‌ها، دانلودها و رسانه، منابع و استخراج‌گرها، پیام‌ها و زبان، سیستم و پیکربندی، عیب‌یابی و نگهداری — با دکمه‌های بازگشت/خانه در هر صفحه. بخش **متن‌های ربات**: مشاهده، ویرایش، پیش‌نمایش و بازنشانی هر پیام کاربرمحور به هر زبان (با اعتبارسنجی قالب‌بندی و ثبت در تاریخچهٔ تغییرات).
 - جعبه‌ابزار بقای یوتیوب: لاگین کوکی از فایل فقط‌خواندنی (کپی هنگام نوشتن)، خروجی خودکار کوکی با هشدار به ادمین، لاگین OAuth تلویزیونی، ابزارهای PO-token و session، خروجی WARP اختیاری و دستور `/doctor` برای تشخیص یک‌جوابه.
 - سرور Bot API شخصی اختیاری برای آپلودهای بالای سقف ۵۰ مگابایتِ API ابری، با سقف فایل هوشمند نسبت به مسیر انتفال.
 
@@ -199,7 +200,7 @@ cp .env.example .env   # → BOT_TOKEN و ADMIN_IDS
 
 ## پیکربندی
 
-همه‌چیز با متغیرهای محیطی تنظیم می‌شود؛ فهرست کامل با توضیح در [.env.example](.env.example) است. متغیرهای پرکاربرد: `BOT_TOKEN`، `ADMIN_IDS`، `DATABASE_URL`، `REDIS_URL`، `WORKER_COUNT`، `MAX_FILE_SIZE_MB`، `TELEGRAM_API_BASE_URL`، `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`، `COOKIE_FILE`، `DEFAULT_DAILY_LIMIT` / `PREMIUM_DAILY_LIMIT`، `YTDLP_PROXY`، `COBALT_API_URL`، `YTDLP_POT_PROVIDER_URL`، `YOUTUBE_SESSION_SERVER`، `BOT_MODE` / `WEBHOOK_PATH` و `TIMEZONE` (مرز بازنشانی سهمیهٔ روزانه و هفته‌های آمار).
+همه‌چیز با متغیرهای محیطی تنظیم می‌شود؛ فهرست کامل با توضیح در [.env.example](.env.example) است. متغیرهای پرکاربرد: `BOT_TOKEN`، `ADMIN_IDS`، `DATABASE_URL`، `REDIS_URL`، `WORKER_COUNT`، `MAX_FILE_SIZE_MB`، `TELEGRAM_API_BASE_URL`، `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`، `COOKIE_FILE`، `DEFAULT_DAILY_LIMIT` / `PREMIUM_DAILY_LIMIT`، `YTDLP_PROXY`، `COBALT_API_URL`، `YTDLP_POT_PROVIDER_URL`، `YOUTUBE_SESSION_SERVER`، `MENU_AUTO_BEST` (نمایش اختیاری ردیف خودکار «بهترین کیفیت موجود»؛ پیش‌فرض خاموش)، `BOT_MODE` / `WEBHOOK_PATH` و `TIMEZONE` (مرز بازنشانی سهمیهٔ روزانه و هفته‌های آمار).
 
 > **نوشتن `.env`:** کامنت‌ها را در خط جدا بگذارید — کامنت بعد از مقدار خالی (`TELEGRAM_API_ID=  # note`) توسط dotenv و Docker Compose بخشی از مقدار تلقی می‌شود.
 

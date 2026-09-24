@@ -22,8 +22,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import User
 
+from core import texts as text_store
 from core.config import CLOUD_API_UPLOAD_LIMIT_MB, Settings, get_settings, probe_url
-from core.database import create_pool, init_db
+from core.database import create_pool, init_db, text_overrides
 from core.logging import setup_logging
 from core.telegram_api import build_session, session_target
 from handlers.admin import publish_commands
@@ -199,6 +200,11 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
 
     pool = await create_pool()
     await init_db(pool)  # automated schema setup + plan seeding
+    # Admin-edited texts go live at boot: the catalogue stays the default and
+    # the override layer (core.texts) is what t() consults from here on.
+    loaded = text_store.apply_overrides(await text_overrides(pool))
+    if loaded:
+        logger.info("%d admin text override(s) are live", loaded)
 
     redis_client: Optional[aioredis.Redis] = None
     if settings.queue_backend == "redis":
@@ -211,6 +217,15 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
                 settings.redis_url,
             )
             redis_client = None
+
+    # The override layer stays coherent across processes: the database is the
+    # source of truth, one Redis counter is the invalidation signal, and a
+    # deployment without a reachable Redis degrades to a bounded-TTL re-read of
+    # the table (see core.texts.OverrideStore). Texts never need a restart.
+    text_store.bind_store(
+        lambda: text_overrides(pool),
+        text_store.RedisVersionChannel(redis_client) if redis_client else None,
+    )
 
     # Redis also powers the FSM (user state machine) — as required by the spec.
     storage = RedisStorage(redis_client) if redis_client else MemoryStorage()

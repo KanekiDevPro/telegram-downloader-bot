@@ -547,3 +547,19 @@ def test_the_session_server_is_normalised_like_every_other_base_url(
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
     assert settings.youtube_session_server == "http://yt-session-generator:8080"
+
+
+def test_menu_auto_best_is_off_when_absent_and_needs_a_deliberate_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The empty-menu safety switch, deployment-shaped: an upgrade with no
+    ``MENU_AUTO_BEST`` in ``.env`` ships the honest retry message — an automatic
+    "best available" row appears only when an operator deliberately enables it."""
+    monkeypatch.delenv("MENU_AUTO_BEST", raising=False)
+    assert Settings(_env_file=None).menu_auto_best is False  # type: ignore[call-arg]
+
+    monkeypatch.setenv("MENU_AUTO_BEST", "1")
+    assert Settings(_env_file=None).menu_auto_best is True  # type: ignore[call-arg]
+
+    monkeypatch.setenv("MENU_AUTO_BEST", "0")
+    assert Settings(_env_file=None).menu_auto_best is False  # type: ignore[call-arg]

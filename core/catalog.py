@@ -279,6 +279,52 @@ MESSAGES: Final[Catalog] = {
         "fa": "استفاده: /download <لینک> — یا لینک رو مستقیم بفرست.",
     },
     "intake.cancelled": {"en": "✅ Cancelled.", "fa": "✅ لغو شد."},
+    # A video-capable link whose qualities could *not* be discovered says so and
+    # offers a retry — it never silently becomes a default download.
+    "intake.probe_failed": {
+        "en": (
+            "❌ I couldn't read the qualities available for this link right now. "
+            "Tap try again — or send the link again in a moment."
+        ),
+        "fa": (
+            "❌ الان نتونستم کیفیت‌های موجود برای این لینک رو بخونم. «تلاش دوباره» "
+            "رو بزن — یا لینک رو کمی بعد دوباره بفرست."
+        ),
+    },
+    "intake.probe_retry_btn": {"en": "🔁 Try again", "fa": "🔁 تلاش دوباره"},
+    "intake.probe_still": {
+        "en": "❌ Still no qualities to show — try again in a moment.",
+        "fa": "❌ باز هم کیفیتی برای نمایش پیدا نشد — کمی بعد دوباره تلاش کن.",
+    },
+    # The deliberately opt-in fallback row (MENU_AUTO_BEST=1) — labelled as an
+    # automatic pick, never as an exact quality.
+    "intake.auto_best_btn": {
+        "en": "⚡ Automatic (best available)",
+        "fa": "⚡ خودکار (بهترین موجود)",
+    },
+    # Spotify's own streams are DRM'd: the honest thing is to say where the file
+    # will really come from *before* the menu is drawn.
+    "intake.spotify_note": {
+        "en": (
+            "ℹ️ Spotify's own streams are DRM-protected — this track is served "
+            "from its public YouTube counterpart, and the quality follows that "
+            "source."
+        ),
+        "fa": (
+            "ℹ️ استریم‌های خود اسپاتیفای DRM هستند — این آهنگ از نسخهٔ عمومی "
+            "یوتیوب آن پخش می‌شود و کیفیت تابع همان منبع است."
+        ),
+    },
+    "intake.spotify_unresolved": {
+        "en": (
+            "❌ This Spotify track could not be mapped to a downloadable source "
+            "right now. Try again in a moment."
+        ),
+        "fa": (
+            "❌ این آهنگ اسپاتیفای الان به منبع قابل دانلودی نرسید. کمی بعد "
+            "دوباره تلاش کن."
+        ),
+    },
 
     # ---------------------------------------------------------------------
     # Format / quality buttons and their headers
@@ -317,6 +363,17 @@ MESSAGES: Final[Catalog] = {
         "en": "ℹ️ Source quality: {rate}",
         "fa": "ℹ️ کیفیت منبع: {rate}",
     },
+    # What a bitrate row *is*: an encoding target, not a source-quality promise.
+    "audio.converted_note": {
+        "en": (
+            "ℹ️ Rate rows are conversion targets (the file is encoded at that "
+            "rate); \u00abOriginal\u00bb is the source's own stream, untouched."
+        ),
+        "fa": (
+            "ℹ️ ردیف‌های نرخ، هدف تبدیل‌اند (فایل با همان نرخ رمزگذاری می‌شود)؛ "
+            "«کیفیت اصلی» همان جریان دست‌نخوردهٔ منبع است."
+        ),
+    },
 
     # ---------------------------------------------------------------------
     # The media card: the standard block for anything downloadable — the screen
@@ -339,6 +396,13 @@ MESSAGES: Final[Catalog] = {
     "media.quality_p": {"en": "{height}p", "fa": "{height}p"},
     # The quality line of a copied stream: named honestly, never a bitrate.
     "media.original": {"en": "Original", "fa": "اصلی"},
+    # Appended to a quality label when the rate on it is the encoder's target
+    # over a weaker source — a true number that could still mislead about
+    # quality, said where the label is read (the caption and its cached replay).
+    "media.upscale_mark": {
+        "en": "from a ≈{source} kbps source",
+        "fa": "از منبع ≈{source} kbps",
+    },
     # The one compact state a long download shows, appended to the card and
     # removed with it: never a sentence, never a second message.
     "media.wait": {"en": "⏳", "fa": "⏳"},
@@ -629,10 +693,8 @@ MESSAGES: Final[Catalog] = {
     # Admin panel
     # ---------------------------------------------------------------------
     "admin.only": {"en": "⛔️ Admins only.", "fa": "⛔️ فقط ادمین می‌تونه."},
-    "admin.btn_trend": {"en": "📈 Trend", "fa": "📈 روند شکست‌ها"},
     "admin.btn_blocks": {"en": "🚫 Blocks", "fa": "🚫 بلاک‌ها"},
     "admin.btn_users": {"en": "👥 Users", "fa": "👥 کاربران"},
-    "admin.btn_failures": {"en": "❌ Recent failures", "fa": "❌ شکست‌های اخیر"},
     "admin.btn_groups": {"en": "👥 Groups", "fa": "👥 گروه‌ها"},
     "admin.groups_headline": {"en": "👥 Group usage", "fa": "👥 آمار گروه‌ها"},
     "admin.groups_totals": {
@@ -696,11 +758,115 @@ MESSAGES: Final[Catalog] = {
     },
     "admin.btn_system": {"en": "🖥 System", "fa": "🖥 سیستم"},
     "admin.btn_settings": {"en": "⚙️ Settings", "fa": "⚙️ تنظیمات"},
+    # The panel's category submenus — the hub lists these six, one screen deep
+    # from each (see handlers/admin.py).
+    "admin.cat_users": {"en": "👥 Users and groups", "fa": "👥 کاربران و گروه‌ها"},
+    "admin.cat_downloads": {
+        "en": "📥 Downloads and media",
+        "fa": "📥 دانلودها و رسانه",
+    },
+    "admin.cat_sources": {
+        "en": "🌐 Sources and extractors",
+        "fa": "🌐 منابع و استخراج‌گرها",
+    },
+    "admin.cat_messages": {
+        "en": "\u2709\ufe0f Messages and localization",
+        "fa": "\u2709\ufe0f پیام‌ها و زبان",
+    },
+    "admin.cat_system": {
+        "en": "🖥 System and configuration",
+        "fa": "🖥 سیستم و پیکربندی",
+    },
+    "admin.cat_diagnostics": {
+        "en": "🛠 Diagnostics and maintenance",
+        "fa": "🛠 عیب‌یابی و نگهداری",
+    },
+    "admin.btn_home": {"en": "🏠 Home", "fa": "🏠 خانه"},
+    "admin.btn_texts": {"en": "📝 Bot texts", "fa": "📝 متن‌های ربات"},
+    "admin.btn_sources": {"en": "🌐 Sources status", "fa": "🌐 وضعیت منابع"},
+    "admin.texts_reason_locked": {
+        "en": "that text is internal or operator-facing and cannot be edited",
+        "fa": "آن متن داخلی یا مخصوص اپراتور است و قابل ویرایش نیست",
+    },
+    "admin.sources_head": {
+        "en": "🌐 <b>Sources &amp; extractors</b>",
+        "fa": "🌐 <b>منابع و استخراج‌گرها</b>",
+    },
+    "admin.sources_tools": {
+        "en": "🧰 <code>/fixlogin</code> — guided cookie login · <code>/oauth</code> — Smart-TV login",
+        "fa": "🧰 <code>/fixlogin</code> — راهنمای لاگین کوکی · <code>/oauth</code> — لاگین اسمارت‌تی‌وی",
+    },
+    # --- The editable-texts screens (admin only) --------------------------
+    "admin.texts_title": {
+        "en": "📝 <b>Bot texts</b> — pick a category:",
+        "fa": "📝 <b>متن‌های ربات</b> — یک دسته را انتخاب کن:",
+    },
+    "admin.texts_category": {
+        "en": "📝 <b>{category}</b> — pick a text to edit:",
+        "fa": "📝 <b>{category}</b> — متن مورد نظر را انتخاب کن:",
+    },
+    "admin.texts_key_title": {
+        "en": "🔤 <code>{key}</code>\n\n🇬🇧 {en}\n\n🇮🇷 {fa}",
+        "fa": "🔤 <code>{key}</code>\n\n🇬🇧 {en}\n\n🇮🇷 {fa}",
+    },
+    "admin.texts_edit_en": {"en": "✏️ Edit EN", "fa": "✏️ ویرایش EN"},
+    "admin.texts_edit_fa": {"en": "✏️ Edit FA", "fa": "✏️ ویرایش FA"},
+    "admin.texts_reset_en": {"en": "🔄 Reset EN", "fa": "🔄 بازنشانی EN"},
+    "admin.texts_reset_fa": {"en": "🔄 Reset FA", "fa": "🔄 بازنشانی FA"},
+    "admin.texts_preview": {"en": "👁 Preview", "fa": "👁 پیش‌نمایش"},
+    "admin.texts_prompt": {
+        "en": (
+            "🔤 Send the new text for <code>{key}</code> ({lang}). Keep every "
+            "placeholder exactly as the default has it."
+        ),
+        "fa": (
+            "🔤 متن جدید <code>{key}</code> ({lang}) را بفرست. همهٔ جای‌نگهدارها "
+            "را دقیقاً مثل متن پیش‌فرض نگه دار."
+        ),
+    },
+    "admin.texts_saved": {
+        "en": "✅ Saved <code>{key}</code> ({lang}).",
+        "fa": "✅ <code>{key}</code> ({lang}) ذخیره شد.",
+    },
+    "admin.texts_reset_done": {
+        "en": "🔄 <code>{key}</code> ({lang}) is back to its default.",
+        "fa": "🔄 <code>{key}</code> ({lang}) به حالت پیش‌فرض برگشت.",
+    },
+    "admin.texts_invalid": {"en": "❌ Not saved — {reason}", "fa": "❌ ذخیره نشد — {reason}"},
+    "admin.texts_reason_markup": {
+        "en": "the HTML markup is unbalanced or uses unsupported tags",
+        "fa": "چینش HTML نامتوازن است یا برچسب‌های پشتیبانی‌نشده دارد",
+    },
+    "admin.texts_reason_placeholder": {
+        "en": "it introduces a placeholder the default does not have",
+        "fa": "جای‌نگهداری دارد که متن پیش‌فرض ندارد",
+    },
+    "admin.texts_reason_length": {
+        "en": "it is longer than Telegram messages allow",
+        "fa": "طولانی‌تر از حد مجاز پیام‌های تلگرام است",
+    },
+    # The text categories — a menu of features, never a wall of keys.
+    "admin.textcat_start": {"en": "Start & menu", "fa": "شروع و منو"},
+    "admin.textcat_language": {"en": "Language", "fa": "زبان"},
+    "admin.textcat_intake": {"en": "Link intake", "fa": "دریافت لینک"},
+    "admin.textcat_media": {
+        "en": "Media & quality menus",
+        "fa": "منوهای رسانه و کیفیت",
+    },
+    "admin.textcat_download": {
+        "en": "Download & progress",
+        "fa": "دانلود و پیشرفت",
+    },
+    "admin.textcat_errors": {
+        "en": "Errors & verification",
+        "fa": "خطاها و راستی‌آزمایی",
+    },
+    "admin.textcat_profile": {"en": "Profile & premium", "fa": "پروفایل و ویژه"},
+    "admin.textcat_pay": {"en": "Payments", "fa": "پرداخت‌ها"},
     "admin.btn_reload": {"en": "🔄 Refresh", "fa": "🔄 تازه‌سازی"},
     "admin.btn_search": {"en": "🔎 Search", "fa": "🔎 جستجو"},
     "admin.btn_prev": {"en": "◀️ Prev", "fa": "◀️ قبلی"},
     "admin.btn_next": {"en": "▶️ Next", "fa": "▶️ بعدی"},
-    "admin.failures_headline": {"en": "Recent failures", "fa": "شکست‌های اخیر"},
     "admin.users": {
         "en": (
             "👥 <b>Users</b>\n"
@@ -760,7 +926,6 @@ MESSAGES: Final[Catalog] = {
     "admin.btn_health": {"en": "🩺 Health", "fa": "🩺 سلامت"},
     "admin.btn_queue": {"en": "🕒 Queue", "fa": "🕒 صف"},
     "admin.btn_tools": {"en": "🔧 Tools", "fa": "🔧 ابزارها"},
-    "admin.btn_back": {"en": "⬅️ Back to panel", "fa": "⬅️ بازگشت به پنل"},
     "admin.btn_doctor": {"en": "🩺 Run the YouTube doctor", "fa": "🩺 اجرای دکتر یوتیوب"},
     "admin.btn_refresh": {"en": "♻️ Re-export the cookie jar now", "fa": "♻️ اکسپورت دوبارهٔ کوکی"},
     "admin.btn_broadcast": {"en": "📣 Broadcast", "fa": "📣 پیام همگانی"},

@@ -17,6 +17,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from core import database
+from core import texts as text_store
 from core.config import get_settings
 from core.i18n import lang_of, normalize_lang
 
@@ -28,6 +29,11 @@ class UserMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        # Keep the admin-editable texts coherent across processes before any
+        # handler reads one: a cheap, rate-limited version check that reloads
+        # the database only when the texts actually changed (core.texts — never
+        # a query per message).
+        await text_store.sync_overrides()
         pool: asyncpg.Pool | None = data.get("pool")
         if pool is not None and isinstance(event, (Message, CallbackQuery)):
             from_user = event.from_user

@@ -37,6 +37,7 @@ from aiogram.types import (
 from core.i18n import DEFAULT_LANG, t
 from core.utils import default_quality, escape_html, normalize_quality
 from services.extractor import audio_bitrate, audio_is_original
+from services.verify import upscale_disclaimer
 
 #: What one media group may hold — aiogram's own union, spelled out so a list of
 #: ``InputMediaPhoto`` can be handed over without a cast (lists are invariant).
@@ -286,6 +287,7 @@ def produced_quality_label(
     lang: str = DEFAULT_LANG,
     *,
     produced_p: object = None,
+    source_kbps: int | None = None,
 ) -> str:
     """The quality line for a file that exists — named by what it actually is.
 
@@ -294,6 +296,13 @@ def produced_quality_label(
     container the file system says — ``.flac`` is FLAC whatever button folklore
     remembers — with the bitrate named only when the codec asked for is the codec
     that happened. Never «320 kbps» under a file that is something else.
+
+    ``source_kbps`` is the source's own lossy rate when the extraction reported
+    one: a rate *above* it is the encoder's target, not the source's quality, so
+    the label names the source too (``media.upscale_mark``, via
+    :func:`services.verify.upscale_disclaimer`) — a true number over a weaker
+    source must not read as a quality claim. An unknown source rate marks
+    nothing: nothing is invented either way.
     """
     if media_format != "audio":
         return resolution_name(produced_p, lang) if produced_p else ""
@@ -304,7 +313,11 @@ def produced_quality_label(
         return f"{name} · {t('media.original', lang)}"
     kbps = audio_bitrate(tier)
     if kbps and suffix == _TIER_EXT.get(tier.split(".")[0]):
-        return f"{name} · {kbps} kbps"
+        label = f"{name} · {kbps} kbps"
+        upscale = upscale_disclaimer("audio", tier, source_kbps)
+        if upscale is not None:
+            label = f"{label} · {t('media.upscale_mark', lang, source=upscale[1])}"
+        return label
     return name
 
 

@@ -47,12 +47,14 @@ the previous release's code runs unchanged against the new schema:
 | `smart_cache.kind / title / label` | ignored; old code reads `SELECT *` and uses only the columns it knows |
 | `block_events`, `bot_state`, `fix_events`, `helper_events` | untouched and unused by old code — telemetry rows preserved |
 | `group_downloads` | unused by old code — group analytics history preserved |
+| `bot_texts` | unused by old code — admin text edits are preserved but not applied; old code ships the catalogue defaults |
 | new indexes | harmless |
 
 **Only if** you are certain the rollback is permanent *and* want the schema
 exactly as before, run this cleanup manually (optional, off by default):
 
 ```sql
+DROP TABLE IF EXISTS bot_texts;
 DROP TABLE IF EXISTS group_downloads;
 DROP TABLE IF EXISTS helper_events;
 DROP TABLE IF EXISTS fix_events;
@@ -71,6 +73,8 @@ Consequences of the optional cleanup (read before running):
 - `users.language` dropping **loses every user's language choice** — usually a
   bad trade. Prefer leaving it.
 - Telemetry history (blocks, fixes, helper states, group analytics) is gone.
+- Dropping `bot_texts` **loses every admin text edit** (a global reset to the
+  shipped defaults). To keep the edits but stop applying them, skip this DROP.
 
 There is no "down migration" in the codebase on purpose: schema direction is
 forward-only, and this table is the rollback.
@@ -88,6 +92,8 @@ Config-only issues need no code rollback — edit `.env` and restart:
 | Helper flapping | clear `YTDLP_POT_PROVIDER_URL` / `YOUTUBE_SESSION_SERVER` to disable those routes |
 | Wrong quota behaviour | `DEFAULT_DAILY_LIMIT` / `PREMIUM_DAILY_LIMIT` |
 | Wrong daily-reset timezone | `TIMEZONE` (also drives the analytics week boundaries) |
+| Automatic "best available" row unwanted after enabling it | clear `MENU_AUTO_BEST` (or set it to `0`), restart — empty quality lookups go back to the explicit retry message |
+| An admin text edit reads wrong or broke a send | admin panel → Messages → Bot texts → Reset — or `DELETE FROM bot_texts WHERE key = '<key>';` (defaults take over on the next save/restart) |
 
 Secrets rotation (token/cookie compromise) is not a rollback: rotate
 `BOT_TOKEN` or re-export the cookie jar (`scripts/export_cookies.py`), restart.
@@ -108,5 +114,6 @@ docker compose exec postgres pg_dump -U postgres <db> > backup-$(date +%F).sql
 - `docker compose logs -f bot` — clean start, no tracebacks.
 - One video link + one Spotify link end-to-end.
 - One cached replay of a link downloaded *before* the rollback.
-- Admin panel opens (Statistics + Groups render).
+- Admin panel opens (all six category submenus render; Bot texts lists the
+  defaults and any edits).
 - If the DB was touched: `scripts/smoke.py`.

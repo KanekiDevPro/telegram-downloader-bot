@@ -25,6 +25,7 @@ import logging
 import re
 from typing import Literal
 
+from core import texts as text_store
 from core.catalog import MESSAGES, SEEDED_PLAN_ALIASES
 
 logger = logging.getLogger(__name__)
@@ -125,19 +126,45 @@ def lang_of(user: object, default: str | None = None) -> Lang:
     return normalize_lang("", default)
 
 
+def _template(key: str, lang: object) -> str:
+    """The raw template for ``key``: an admin override first, then the catalogue.
+
+    The override layer (:mod:`core.texts`) is what the admin panel's text editor
+    writes; ``t()`` stays synchronous and reads the in-memory snapshot — kept
+    coherent across processes (and across restarts) by
+    :class:`core.texts.OverrideStore`, never by a query in here. A missing
+    override *is* the catalogue default.
+    """
+    entry = MESSAGES[key]
+    code = normalize_lang(lang)
+    return text_store.override_for(key, code) or entry.get(code) or entry[DEFAULT_LANG]
+
+
 def t(key: str, lang: object = None, /, **values: object) -> str:
     """The message for ``key`` in ``lang``, formatted with ``values``.
 
     A key that does not exist is a programming error and raises: a typo that silently
     returns the key itself is how users end up reading ``work.uploading`` in a chat.
     A *language* without that key, on the other hand, falls back to the default one —
-    a half-translated catalogue must still produce a sentence.
+    a half-translated catalogue must still produce a sentence. An *override* that
+    somehow fails to format (a stale row predating its validation) likewise falls
+    back to the default rather than breaking the send it was meant to improve.
     """
-    entry = MESSAGES.get(key)
-    if entry is None:
+    if key not in MESSAGES:
         raise KeyError(f"unknown message key: {key!r}")
-    template = entry.get(normalize_lang(lang)) or entry[DEFAULT_LANG]
-    return template.format(**values) if values else template
+    template = _template(key, lang)
+    if not values:
+        return template
+    try:
+        return template.format(**values)
+    except (KeyError, ValueError, IndexError, AttributeError):
+        logger.warning(
+            "text override for %s failed to format — falling back to the default",
+            key,
+            exc_info=True,
+        )
+        entry = MESSAGES[key]
+        return (entry.get(normalize_lang(lang)) or entry[DEFAULT_LANG]).format(**values)
 
 
 def error_message(code: str, lang: object = None, fallback: str = "") -> str:
@@ -150,10 +177,9 @@ def error_message(code: str, lang: object = None, fallback: str = "") -> str:
     """
     entry = MESSAGES.get(f"err.{code}")
     if entry is None:
-        return fallback or MESSAGES["err.GENERAL"].get(
-            normalize_lang(lang), MESSAGES["err.GENERAL"][DEFAULT_LANG]
-        )
-    template = entry.get(normalize_lang(lang)) or entry[DEFAULT_LANG]
+        template = _template("err.GENERAL", lang)
+        return fallback or template
+    template = _template(f"err.{code}", lang)
     return template.format(detail=fallback) if "{detail}" in template else template
 
 

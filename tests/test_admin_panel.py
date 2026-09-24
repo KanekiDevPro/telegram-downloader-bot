@@ -187,7 +187,9 @@ async def test_the_panel_opens_for_an_admin(stats: dict[str, Any]) -> None:
 
     assert "پنل مدیریت" in bot.screens[0] or "Admin panel" in bot.screens[0]
     assert "120" in bot.screens[0], "the numbers are the point"
-    assert _buttons(bot.keyboards[0])[0][1] == "admin:stats"
+    assert _buttons(bot.keyboards[0])[0][1] == "admin:cat_users", (
+        "the hub is the map of categories, not a wall of screens"
+    )
 
 
 async def test_a_stranger_is_not_shown_the_numbers(stats: dict[str, Any]) -> None:
@@ -220,7 +222,7 @@ async def test_the_menu_button_opens_the_panel_for_an_admin(stats: dict[str, Any
     await admin_module.on_menu_admin(_callback(bot, "menu:admin"), object(), _queue(), None)
 
     assert bot.screens and "120" in bot.screens[0]
-    assert _buttons(bot.keyboards[0])[0][1] == "admin:stats"
+    assert _buttons(bot.keyboards[0])[0][1] == "admin:cat_users"
 
 
 async def test_the_menu_button_is_admin_only_too(stats: dict[str, Any]) -> None:
@@ -285,6 +287,7 @@ async def test_every_screen_renders_for_an_admin(
     stored: dict[str, str],
     users_db: list[dict[str, Any]],
     telemetry: None,
+    groups_db: None,
 ) -> None:
     for screen in (
         "home",
@@ -292,15 +295,25 @@ async def test_every_screen_renders_for_an_admin(
         "users",
         "broadcast",
         "blocks",
-        "trend",
-        "failures",
+        "groups",
         "system",
         "settings",
+        "texts",
+        "sources",
+        # …the six category submenus:
+        "cat_users",
+        "cat_downloads",
+        "cat_sources",
+        "cat_messages",
+        "cat_system",
+        "cat_diagnostics",
         # …and the names an older keyboard still carries:
         "health",
         "queue",
         "tools",
         "support",
+        "trend",
+        "failures",
     ):
         text, keyboard = await admin_module.panel_screen(
             screen, healthy, _queue(), _cobalt(), lang="fa"
@@ -366,7 +379,12 @@ async def test_the_tools_screen_points_at_the_tools_that_already_exist() -> None
 
     from services.cookie_watch import DOCTOR_CALLBACK, REFRESH_CALLBACK
 
-    destinations = [data for _, data in _buttons(keyboard)]
+    # The two extractor actions live under Sources & extractors now — one home
+    # per action — and the System screen names the commands that do the same.
+    _, sources_keyboard = await admin_module.panel_screen(
+        "cat_sources", object(), _queue(), None, lang="en"
+    )
+    destinations = [data for _, data in _buttons(sources_keyboard)]
     assert DOCTOR_CALLBACK in destinations and REFRESH_CALLBACK in destinations
     assert "/doctor" in text and "/refresh" in text, "the commands still work too"
 
@@ -404,10 +422,12 @@ def test_an_unknown_state_is_shown_as_it_is() -> None:
 
 def test_every_panel_button_has_somewhere_to_go() -> None:
     """Every destination any panel keyboard can produce must be answered in the
-    module — including the templated ones (``usr:page:<offset>``), which appear
-    in the source as an f-string prefix rather than as a literal."""
+    module — including the templated ones (``usr:page:<offset>``,
+    ``txt:key:<name>``), which appear in the source as an f-string prefix rather
+    than as a literal. A stale button from an older keyboard is included on
+    purpose: it must land on a *living* screen, never an unhandled callback."""
     source = inspect.getsource(admin_module)
-    offered = {"admin:home", "menu:home"}
+    offered = {"admin:home", "menu:home", "admin:trend", "admin:failures"}
     offered |= {data for _, data in _buttons(admin_module._panel_keyboard("en"))}
     offered |= {data for _, data in _buttons(admin_module._section_keyboard("en", "stats"))}
     offered |= {data for _, data in _buttons(admin_module._system_keyboard("en"))}
@@ -417,6 +437,14 @@ def test_every_panel_button_has_somewhere_to_go() -> None:
     offered |= {data for _, data in _buttons(admin_module._done_keyboard("en"))}
     offered |= {data for _, data in _buttons(admin_module._support_keyboard("en", configured=True))}
     offered |= {data for _, data in _buttons(admin_module._back_to_menu("en", to="admin:users"))}
+    for category in admin_module._CATEGORY_LABELS:
+        offered |= {data for _, data in _buttons(admin_module._category_keyboard("en", category))}
+    _, texts_home = admin_module._texts_screen("en")
+    offered |= {data for _, data in _buttons(texts_home)}
+    _, texts_keys = admin_module._texts_keys_screen("intake", 0, "en")
+    offered |= {data for _, data in _buttons(texts_keys)}
+    _, texts_key = admin_module._text_key_screen("intake.stale", "en")
+    offered |= {data for _, data in _buttons(texts_key)}
 
     from services.cookie_watch import DOCTOR_CALLBACK, REFRESH_CALLBACK
 
@@ -425,30 +453,33 @@ def test_every_panel_button_has_somewhere_to_go() -> None:
             return True  # the cookie-jar alert's own buttons — handled here too
         if f'"{data}"' in source:
             return True
-        prefix = ":".join(data.split(":")[:2])
-        return f'"{prefix}:' in source
+        # Templated payloads live behind their namespace's prefix (``admin:`` is
+        # one router, ``txt:`` is one parser) — that namespace must be handled.
+        namespace = data.split(":", 1)[0]
+        return f'"{namespace}:' in source
 
     missing = [data for data in sorted(offered) if not has_handler(data)]
     assert missing == [], missing
 
 
-def test_the_hub_is_nine_sections_and_leaves_to_the_user_menu() -> None:
-    """The dashboard's map, pinned: categories in pairs, and the one ⬅️ that
-    leaves the panel for the user menu every admin also has."""
+def test_the_hub_is_six_categories_and_leaves_to_the_user_menu() -> None:
+    """The dashboard's map, pinned: six categories in pairs, and the one ⬅️ that
+    leaves the panel for the user menu every admin also has. The two retired
+    buttons (failure trends, recent failures) are gone — their views live on in
+    the diagnostics digest."""
     keyboard = admin_module._panel_keyboard("en")
 
     assert dict(_buttons(keyboard)) == {
-        "📊 Statistics": "admin:stats",
-        "👥 Users": "admin:users",
-        "📣 Broadcast": "admin:broadcast",
-        "🚫 Blocks": "admin:blocks",
-        "📈 Trend": "admin:trend",
-        "❌ Recent failures": "admin:failures",
-        "👥 Groups": "admin:groups",
-        "🖥 System": "admin:system",
-        "⚙️ Settings": "admin:settings",
+        "👥 Users and groups": "admin:cat_users",
+        "📥 Downloads and media": "admin:cat_downloads",
+        "🌐 Sources and extractors": "admin:cat_sources",
+        "✉️ Messages and localization": "admin:cat_messages",
+        "🖥 System and configuration": "admin:cat_system",
+        "🛠 Diagnostics and maintenance": "admin:cat_diagnostics",
         "⬅️ Back": "menu:home",
     }
+    offered = {data for _, data in _buttons(keyboard)}
+    assert "admin:trend" not in offered and "admin:failures" not in offered
 
 
 @pytest.fixture
@@ -482,6 +513,29 @@ def users_db(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
 
 @pytest.fixture
+def groups_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The group analytics, answered without a database (their own pins live in
+    test_group_analytics; here only the screen wiring is under test)."""
+
+    async def group_usage_summary(pool: Any) -> dict[str, Any]:
+        return {"total": 5, "successes": 4, "failed": 1, "groups": 2, "last_at": None}
+
+    async def top_groups(pool: Any, *, limit: int = 5) -> list[dict[str, Any]]:
+        return [{"chat_id": -1, "chat_title": "G", "total": 3, "failed": 0}]
+
+    async def group_week_stats(pool: Any, **kwargs: Any) -> dict[str, int]:
+        return {"cur_total": 0, "cur_failed": 0, "prev_total": 0, "prev_failed": 0}
+
+    async def group_failure_codes(pool: Any, *, limit: int = 5) -> list[dict[str, Any]]:
+        return []
+
+    monkeypatch.setattr(panel_module.database, "group_usage_summary", group_usage_summary)
+    monkeypatch.setattr(panel_module.database, "top_groups", top_groups)
+    monkeypatch.setattr(panel_module.database, "group_week_stats", group_week_stats)
+    monkeypatch.setattr(panel_module.database, "group_failure_codes", group_failure_codes)
+
+
+@pytest.fixture
 def telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
     """The report builders, without a database — their shapes are pinned in
     test_telemetry; here only the screen wiring is under test."""
@@ -497,38 +551,57 @@ def telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(admin_module, "build_trend", build)
     monkeypatch.setattr(admin_module, "build_digest", build)
-    monkeypatch.setattr(admin_module, "build_recent_digest", build)
     monkeypatch.setattr(
         admin_module, "render_trend", lambda trend, *, headline=None: "trend line"
     )
     monkeypatch.setattr(admin_module, "_failure_report", failure_report)
 
 
-async def test_every_section_comes_back_to_the_hub(
+async def test_every_submenu_has_back_and_home_navigation(
     stats: dict[str, Any],
     stored: dict[str, str],
     users_db: list[dict[str, Any]],
     telemetry: None,
     healthy: Any,
+    groups_db: None,
 ) -> None:
-    """Back is the *parent* — the hub — on every section: never "wherever", and
-    never a screen that dead-ends because its keyboard went missing."""
+    """Back walks to the *parent*, Home jumps to the user menu — on every
+    submenu and every screen: never "wherever", and never a screen that
+    dead-ends because its keyboard went missing."""
+    for category in admin_module._CATEGORY_LABELS:
+        _, keyboard = await admin_module.panel_screen(
+            category, healthy, _queue(), _cobalt(), lang="en"
+        )
+        destinations = dict(_buttons(keyboard))
+        assert destinations["⬅️ Back"] == admin_module.PANEL_HOME, category
+        assert destinations["🏠 Home"] == "menu:home", category
+
     for screen in (
         "stats",
         "users",
         "broadcast",
         "blocks",
-        "trend",
-        "failures",
+        "groups",
         "system",
         "settings",
+        "texts",
+        "sources",
     ):
         _, keyboard = await admin_module.panel_screen(
             screen, healthy, _queue(), _cobalt(), lang="en"
         )
+        destinations = dict(_buttons(keyboard))
+        assert destinations["🏠 Home"] == "menu:home", screen
+        assert destinations["⬅️ Back"] == f"admin:{admin_module._SCREEN_PARENT[screen]}", (
+            f"{screen}: back is its category"
+        )
 
-        assert _buttons(keyboard), screen
-        assert admin_module.PANEL_HOME in {data for _, data in _buttons(keyboard)}, screen
+    # A button from last week's keyboard lands on a living screen, not a void.
+    for stale in ("trend", "failures", "health", "queue", "tools", "support"):
+        text, keyboard = await admin_module.panel_screen(
+            stale, healthy, _queue(), _cobalt(), lang="en"
+        )
+        assert text.strip() and _buttons(keyboard), stale
 
 
 async def test_the_users_screen_counts_totals_and_never_dumps_the_table(
@@ -542,7 +615,8 @@ async def test_the_users_screen_counts_totals_and_never_dumps_the_table(
     destinations = dict(_buttons(keyboard))
     assert destinations["🔎 Search"] == "usr:search"
     assert destinations["▶️ Next"] == "usr:page:6", "a next page while there is more"
-    assert destinations["⬅️ Back to panel"] == admin_module.PANEL_HOME
+    assert destinations["⬅️ Back"] == "admin:cat_users", "back to its category"
+    assert destinations["🏠 Home"] == "menu:home"
 
 
 async def test_the_lookup_is_its_own_step_and_answers_with_a_screen(

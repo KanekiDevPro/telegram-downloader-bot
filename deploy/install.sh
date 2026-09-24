@@ -3,7 +3,8 @@
 #
 #   bash deploy/install.sh
 #
-# Creates .venv, installs dependencies, sanity-checks ffmpeg and seeds .env.
+# Creates .venv, installs dependencies, verifies the ffmpeg/ffprobe toolchain
+# and seeds .env.
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -22,6 +23,26 @@ command -v "$PYTHON_BIN" >/dev/null 2>&1 || {
     exit 1
 }
 
+# The pipeline needs both halves of the toolchain *before* anything is
+# installed: ffmpeg converts (audio, stream merges) and ffprobe verifies what
+# was produced (services/verify.py). A missing binary is a broken install, so
+# this fails early with the exact fix instead of surfacing as a failed download
+# three days later.
+missing=""
+command -v ffmpeg  >/dev/null 2>&1 || missing="$missing ffmpeg"
+command -v ffprobe >/dev/null 2>&1 || missing="$missing ffprobe"
+if [ -n "$missing" ]; then
+    echo "ERROR: required binaries missing:$missing" >&2
+    echo "       Both ship in the one ffmpeg package:" >&2
+    echo "         Debian/Ubuntu:  sudo apt-get install -y ffmpeg" >&2
+    echo "         RHEL/Fedora:    sudo dnf install -y ffmpeg" >&2
+    echo "         Alpine:         apk add ffmpeg" >&2
+    echo "       Then re-run: bash deploy/install.sh" >&2
+    exit 1
+fi
+echo "==> ffmpeg: $(ffmpeg -version | head -n1)"
+echo "==> ffprobe: $(ffprobe -version | head -n1)"
+
 if [ ! -d .venv ]; then
     echo "==> creating virtualenv"
     "$PYTHON_BIN" -m venv .venv
@@ -30,13 +51,6 @@ fi
 echo "==> installing dependencies"
 ./.venv/bin/python -m pip install --upgrade pip
 ./.venv/bin/python -m pip install -r requirements.txt
-
-if command -v ffmpeg >/dev/null 2>&1; then
-    echo "==> ffmpeg: $(ffmpeg -version | head -n1)"
-else
-    echo "WARNING: ffmpeg not found on PATH — MP3 (audio) downloads will be rejected."
-    echo "         Install it (apt-get install ffmpeg / yum install ffmpeg) and re-run."
-fi
 
 if [ ! -f .env ]; then
     cp .env.example .env

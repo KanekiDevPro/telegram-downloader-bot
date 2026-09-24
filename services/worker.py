@@ -28,10 +28,18 @@ from aiogram.exceptions import (
 from aiogram.types import Chat, FSInputFile, InputMediaPhoto, Message
 
 from core import database
+from core import texts as text_store
 from core.config import get_settings
 from core.i18n import DEFAULT_LANG, error_message, t
 from core.ui import remember_retry, retry_keyboard
-from core.utils import MediaFormat, escape_html, format_size, sanitize_filename, today_local
+from core.utils import (
+    MediaFormat,
+    escape_html,
+    format_size,
+    is_video_height,
+    sanitize_filename,
+    today_local,
+)
 from services import cache as cache_service
 from services import cookie_refresh, fallback, preflight, recipients, spotify, telemetry, verify
 from services.cobalt import CobaltError, CobaltService, audio_format_param
@@ -373,6 +381,10 @@ async def process_download_task(
     that have not opened one get it here, which is what keeps this function usable
     on its own.
     """
+    # The narration below reads the editable texts: refresh this process's
+    # snapshot first (a cheap, rate-limited version check — never a query per
+    # job; see core.texts.OverrideStore).
+    await text_store.sync_overrides()
     settings = get_settings()
     lang = task.lang or DEFAULT_LANG
     started = time.monotonic()
@@ -568,6 +580,14 @@ async def _finish_upload(
                 quality=result.quality,
                 suffix=result.file_path.suffix,
                 produced_p=result.info.label_p or result.info.height,
+                # The user's *selection* is a claim too: a 720p tap must land on
+                # the rung the menu promised, not be silently re-captioned to
+                # whatever arrived (a format that vanished between the menu and
+                # the download fails clearly, with a retry on the card).
+                selected_p=(task.quality if is_video_height(task.quality) else None),
+                # Source rate feeds the upscale *observation* only — see
+                # services/verify.py (delivered-as-requested is never a failure).
+                source_kbps=result.info.audio_kbps,
             )
             if mismatch:
                 raise ExtractionError("CONVERSION_MISMATCH", mismatch)
@@ -620,6 +640,7 @@ async def _finish_upload(
                     result.file_path.suffix,
                     lang,
                     produced_p=result.info.label_p or result.info.height,
+                    source_kbps=result.info.audio_kbps,
                 ),
             )
         await _note_group_download(pool, task, ok=True)
@@ -785,6 +806,7 @@ def _upload_caption(
         result.file_path.suffix,
         lang,
         produced_p=result.info.label_p or result.info.height,
+        source_kbps=result.info.audio_kbps,
     )
     real_size = format_size(
         sum(path.stat().st_size for path in (result.file_path, *result.extra_paths)),

@@ -797,11 +797,27 @@ def test_an_ambiguous_post_is_offered_media_and_audio() -> None:
     assert len(routing.choices) == 15, "the post's own media plus every audio tier"
 
 
+def _fake_spotify_lookup(monkeypatch: pytest.MonkeyPatch, duration_s: float = 150.0) -> None:
+    """The Spotify resolver, answered offline: one public track, one length.
+
+    The production flow maps a Spotify link through ``services.spotify`` (its
+    own page, then the YouTube counterpart) — a test that left that to the real
+    network would be flaky by construction. Failure has its own cases below.
+    """
+    from types import SimpleNamespace
+
+    async def lookup(url: str, **kwargs: Any) -> Any:
+        return SimpleNamespace(duration_s=duration_s)
+
+    monkeypatch.setattr(user_module.spotify, "lookup", lookup)
+
+
 async def test_the_question_matches_the_link(monkeypatch: pytest.MonkeyPatch) -> None:
     async def supported(url: str) -> bool:
         return True
 
     monkeypatch.setattr(user_module, "_probe_supported", supported)
+    _fake_spotify_lookup(monkeypatch)
     bot = RecordingBot()
     message = _message("https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC", bot)
 
@@ -817,6 +833,9 @@ async def test_the_question_matches_the_link(monkeypatch: pytest.MonkeyPatch) ->
     )
 
     assert t("intake.choose_audio", FA) in bot.screens[-1]
+    # The resolver is said out loud: a Spotify file comes from its public
+    # counterpart, and the quality follows that source.
+    assert t("intake.spotify_note", FA) in bot.screens[-1]
     # The question is the *format* grid — the quality presets are one tap deeper.
     assert ("🎧 MP3", "audf:mp3") in _buttons(bot.keyboards[-1])
     assert ("🎧 FLAC", "fmt:audio:flac") in _buttons(bot.keyboards[-1]), (
@@ -936,7 +955,10 @@ async def test_a_group_message_without_a_link_is_not_answered() -> None:
     assert bot.texts == [] and bot.edits == []
 
 
-async def test_a_group_message_with_a_link_gets_the_same_question() -> None:
+async def test_a_group_message_with_a_link_gets_the_same_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_spotify_lookup(monkeypatch)
     bot = RecordingBot()
     message = _message(
         "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
@@ -1049,11 +1071,12 @@ async def test_a_link_no_layer_recognizes_stays_unsupported() -> None:
     )
 
 
-async def test_the_question_is_the_first_and_only_message(
+async def test_an_undiscovered_ladder_says_so_and_offers_a_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No "Analysing the link…" before it: the question *is* the acknowledgement —
-    one message carrying the card and the choice."""
+    """The empty-menu bug, pinned: a video link whose qualities cannot be
+    discovered gets an explicit error and a retry — never a silent default
+    download standing in for the capability lookup that failed."""
     async def supported(url: str) -> bool:
         return True
 
@@ -1074,12 +1097,17 @@ async def test_the_question_is_the_first_and_only_message(
 
     assert len(bot.screens) == 1, "one message, not two"
     assert bot.texts[0].startswith("🔗 https://youtu.be/abc")
-    assert t("intake.choose_quality", FA) in bot.texts[0]
-    # A probe that answers nothing (this bot double has no extractor at all)
-    # falls back to one honest row: the flow never blocks on metadata, and no
-    # quality is claimed that the bot cannot name.
-    assert ("⬇️ دانلود", "fmt:video:best") in _buttons(bot.keyboards[-1])
-    back_label, back_data = _buttons(bot.keyboards[-1])[-1]
+    assert t("intake.probe_failed", FA) in bot.texts[0], (
+        "the card names the link, and the screen says why there is no menu"
+    )
+    rows = _buttons(bot.keyboards[-1])
+    assert (t("intake.probe_retry_btn", FA), user_module.PROBE_CALLBACK) in rows, (
+        "one retry, which re-extracts"
+    )
+    assert all(data != "fmt:video:best" for _, data in rows), (
+        "and no default download is offered in place of the ladder"
+    )
+    back_label, back_data = rows[-1]
     assert back_data == "menu:download", "the question's parent is the Download screen"
     assert back_label.startswith("⬅️"), "and says so the way every back button does"
 

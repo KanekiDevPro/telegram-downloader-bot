@@ -277,23 +277,45 @@ class AudioCapability:
     """What an audio request against *this* source can honestly become.
 
     One model, asked by every screen — the format grid and the bitrate rows both
-    read it — so the UI can never promise what the pipeline cannot deliver:
+    read it — so the UI can never promise what the pipeline cannot deliver. The
+    model keeps the three honest answers to "where does this format come from"
+    apart, and a format that is none of them is simply absent:
 
-    * ``formats`` — the output codecs genuinely producible here. Re-encodes need
-      ffmpeg; lossless output (wav/flac) additionally needs a finished file the
-      transport can actually carry (its WAV-shaped size is the one ceiling that
-      exists before downloading — anything incompressible lands near it), and an
-      option the upload would only refuse is not an option at all.
-    * ``copy_ok`` — whether the untouched-stream tier (bare ``m4a``, no
-      conversion) is honest here: only when that stream really is AAC in an M4A
-      container. On an opus or mp3 source a copy delivers a different container
-      than the button named, so the row is gone. Unknown source → ``True``:
-      nothing learned contradicts it, and the produced-container guard is the
-      backstop.
+    * ``native`` — formats *directly provided by the source*, deliverable
+      untouched (no re-encode). Only the bare ``m4a`` tier copies the stream, and
+      only when that stream really is AAC in an M4A container (``copy_ok``). On
+      an opus or mp3 source a copy delivers a different container than the button
+      named, so it is not native there.
+    * ``converted`` — formats obtainable through supported post-processing
+      (ffmpeg re-encode). ``m4a`` sits here too when only its bitrate tiers
+      (re-encodes) are honest but its copy is not. Lossless output (wav/flac)
+      additionally needs a finished file the transport can actually carry (its
+      WAV-shaped size is the one ceiling that exists before downloading —
+      anything incompressible lands near it), and an option the upload would only
+      refuse is not an option at all.
+    * ``formats`` — the union, in catalogue order: every codec genuinely
+      producible here (kept as one field so every existing reader — and the
+      vocabulary a tap is validated against — is unchanged).
+
+    ``copy_ok`` — whether the untouched-stream tier is honest here at all.
+    Unknown source → ``True``: nothing learned contradicts it, and the
+    produced-container guard is the backstop. A format this source cannot
+    produce at all is in none of the fields — undeliverable is the absence of a
+    promise, never a flagged one.
     """
 
     formats: tuple[str, ...]
     copy_ok: bool
+    native: tuple[str, ...] = ()
+    converted: tuple[str, ...] = ()
+
+    def is_native(self, codec: str) -> bool:
+        """Whether ``codec`` is delivered by the source untouched here."""
+        return codec in self.native
+
+    def is_converted(self, codec: str) -> bool:
+        """Whether ``codec`` is only obtainable by re-encoding here."""
+        return codec in self.converted
 
 
 def audio_capability(
@@ -313,17 +335,31 @@ def audio_capability(
         or (audio_size_estimate("wav", duration_s) or 0) <= upload_limit_bytes
     )
     formats: list[str] = []
+    native: list[str] = []
+    converted: list[str] = []
     for codec in AUDIO_FORMATS:
         if codec == "m4a":
-            if has_ffmpeg or copy_ok:
+            if copy_ok:
                 formats.append(codec)
+                native.append(codec)
+            elif has_ffmpeg:
+                # The copy would name a container the source does not have — but
+                # the bitrate tiers are real re-encodes and still deliverable.
+                formats.append(codec)
+                converted.append(codec)
         elif not has_ffmpeg:
             continue
         elif codec in ("wav", "flac") and not lossless_deliverable:
             continue
         else:
             formats.append(codec)
-    return AudioCapability(formats=tuple(formats), copy_ok=copy_ok)
+            converted.append(codec)
+    return AudioCapability(
+        formats=tuple(formats),
+        copy_ok=copy_ok,
+        native=tuple(native),
+        converted=tuple(converted),
+    )
 
 
 def format_selector(media_format: MediaFormat, quality: object = "") -> str:

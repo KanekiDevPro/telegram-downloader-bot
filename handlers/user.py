@@ -52,7 +52,6 @@ from core.utils import (
     escape_html,
     extract_url,
     format_size,
-    is_video_height,
     today_local,
     validate_url,
 )
@@ -89,6 +88,11 @@ FMT_PREFIX = "fmt:"
 #: The callback prefix for the audio menu's first step: ``audf:<codec>`` (open
 #: that codec's quality presets) — ``audf:back`` returns to the question.
 AUDF_PREFIX = "audf:"
+#: The one retry on a question whose qualities could not be discovered: it
+#: re-runs the metadata probe (a stale screen is re-extracted, never answered
+#: with a default download). Constant, not a payload — the link it re-probes is
+#: server-side state (the FSM), so a crafted callback can at most name it.
+PROBE_CALLBACK = "probe:retry"
 LANG_PREFIX = "lang:"
 
 
@@ -261,6 +265,11 @@ def _question_keyboard(
     # them — a post link included, whose route would otherwise bury a valid
     # format list before the screen is ever drawn. An audio link keeps its format
     # grid as the only question (its streams have no resolutions to show).
+    #
+    # A video-capable link with *no* discovered ladder never reaches this
+    # function: the intake flow answers it with an explicit error and a retry
+    # (see ``_ask_again``) — a generic «download it» row here would silently
+    # substitute the default format for a capability lookup that failed.
     show_rows = bool(options) and (not routing.audio_formats or routing.media_choice is not None)
     if show_rows:
         sized = _sized_quality_rows(options, lang)
@@ -269,14 +278,6 @@ def _question_keyboard(
         # One per row when the ladder is long (mobile width fits the label);
         # a short list shares rows so the screen is not three lonely strips.
         row_width = 2 if len(sized) <= 2 else 1
-    elif not routing.audio_formats and routing.media_choice is None:
-        # Nothing probed and nothing to describe — one plain «download it» tap:
-        # an invented ladder would be "up to" theatre with no facts behind it.
-        for choice in routing.choices:
-            builder.button(
-                text=t(choice.label_key, lang),
-                callback_data=_fmt_callback(choice.media_format, choice.quality),
-            )
     # The way out leads to the Download screen — this question is its child (and
     # the retry's ⬅️ lands there too), never to an unrelated screen.
     builder.button(text=t("menu.back", lang), callback_data="menu:download")
@@ -1057,25 +1058,85 @@ async def _queue_url_flow(
             tap=None,
         )
         return
-    # The question's header is the media card: 🎬 and 🔗 answer "what is this and
-    # where is it from" before asking "what should I do with it". The probe that
-    # fills the title also discovers the resolutions that really exist (and their
-    # sizes), so the menu is drawn from the link itself. A probe that gives
-    # nothing costs only the polish: the tier menu and a card that shows its link.
-    await _typing(bot, message.chat.id)
-    async with ActionPulse(bot, message.chat.id, ChatAction.TYPING):
-        info = await _probe_meta(bot, url)
-    title = _clean_title(info, url)
-    options = tuple(info.video_options) if info is not None else ()
-    duration = float(info.duration or 0) if info is not None else 0.0
-    if not duration and spotify.is_spotify_url(url):
-        # yt-dlp refuses Spotify by policy, so the probe knows nothing — but the
-        # song's own page does (the same lookup the worker uses to map the link).
-        # Its length is what puts a size on every bitrate row and on the card.
+    await _ask_about_link(
+        message, state, user, url, lang, bot=bot, pool=pool, queue=queue
+    )
+
+
+async def _ask_about_link(
+    message: Message,
+    state: FSMContext,
+    user: asyncpg.Record,
+    url: str,
+    lang: str,
+    *,
+    bot: Bot,
+    pool: asyncpg.Pool,
+    queue: TaskQueue,
+    edit: bool = False,
+) -> None:
+    """Probe what this link really has, then ask — or say why there is no menu.
+
+    The question's header is the media card: 🎬 and 🔗 answer "what is this and
+    where is it from" before asking "what should I do with it". The probe that
+    fills the title also discovers the resolutions that really exist (and their
+    sizes), so the menu is drawn from the link itself. When a *video-capable*
+    link's qualities cannot be discovered, the answer is an explicit error with a
+    retry that re-extracts — never a silent substitution of the default format
+    for a capability lookup that failed. ``edit`` rewrites the message being
+    watched (the retry case) instead of opening a new one.
+    """
+    routing = content.routing_for(url)
+    info: MediaInfo | None = None
+    duration = 0.0
+    prompt: str | None = None
+    if spotify.is_spotify_url(url):
+        # yt-dlp refuses Spotify by policy, so there is nothing to probe — the
+        # link is served by mapping it to its public YouTube counterpart, and
+        # that mapping starts at the song's own page. An unresolvable track gets
+        # an honest message and a retry; it never gets a menu of formats no
+        # source has been found to deliver. Its length is also what puts a size
+        # on every bitrate row and on the card.
         try:
             duration = float((await spotify.lookup(url)).duration_s or 0)
         except Exception:
-            logger.info("no track length for %.80s — sizes stay off the rows", url)
+            logger.warning("spotify lookup gave nothing for %.80s", url)
+            await _ask_again(
+                message,
+                state,
+                url,
+                lang,
+                t("intake.spotify_unresolved", lang),
+                edit=edit,
+            )
+            return
+        # Honest about the resolver in front of the menu: the file comes from
+        # the mapped source, and the quality follows it.
+        prompt = f"{t(routing.header_key, lang)}\n\n{t('intake.spotify_note', lang)}"
+    else:
+        await _typing(bot, message.chat.id)
+        async with ActionPulse(bot, message.chat.id, ChatAction.TYPING):
+            info = await _probe_meta(bot, url)
+        duration = float(info.duration or 0) if info is not None else 0.0
+    title = _clean_title(info, url)
+    options = tuple(info.video_options) if info is not None else ()
+    if routing.kind == "video" and not options:
+        # The reported bug, pinned to one place: a video link whose qualities
+        # were not discovered says so and offers a retry (which re-extracts).
+        # The automatic row is drawn only when an operator deliberately enabled
+        # it (MENU_AUTO_BEST) — and it names itself an automatic pick, never an
+        # exact quality.
+        await _ask_again(
+            message,
+            state,
+            url,
+            lang,
+            t("intake.probe_failed", lang),
+            edit=edit,
+            title=title,
+            auto_best=get_settings().menu_auto_best,
+        )
+        return
     # One capability model, built from what the probe found, drives every screen
     # this link can reach — the format grid, the bitrate rows and their sizes.
     capability = audio_capability(
@@ -1100,10 +1161,60 @@ async def _queue_url_flow(
             for option in options
         ],
     )
-    await message.answer(
-        _question_text(url, lang, title=title),
-        reply_markup=_question_keyboard(url, lang, options=options, capability=capability),
+    text = _question_text(url, lang, title=title, prompt=prompt)
+    keyboard = _question_keyboard(url, lang, options=options, capability=capability)
+    if edit:
+        await _edit_or_reply(message, text, reply_markup=keyboard)
+    else:
+        await message.answer(text, reply_markup=keyboard)
+
+
+async def _ask_again(
+    message: Message,
+    state: FSMContext,
+    url: str,
+    lang: str,
+    prompt: str,
+    *,
+    edit: bool,
+    title: str = "",
+    auto_best: bool = False,
+) -> None:
+    """The honest "could not read this link" screen: retry, or leave.
+
+    Shared by every capability lookup that came back empty (no qualities, no
+    resolvable track). The retry button re-enters the probe (``on_probe_retry``)
+    — a stale or failed lookup is re-extracted, never papered over. The one
+    download-shaped button here is the deliberately opt-in automatic pick, and
+    it is spelled as an automatic pick; whatever is *not* drawn is the point.
+    """
+    await state.set_state(DownloadStates.waiting_format)
+    await state.update_data(
+        url=url,
+        title=title,
+        offered=(["best"] if auto_best else []),
+        options=[],
     )
+    text = _question_text(url, lang, title=title, prompt=prompt)
+    keyboard = _probe_retry_keyboard(lang, auto_best=auto_best)
+    if edit:
+        await _edit_or_reply(message, text, reply_markup=keyboard)
+    else:
+        await message.answer(text, reply_markup=keyboard)
+
+
+def _probe_retry_keyboard(lang: str, *, auto_best: bool = False) -> InlineKeyboardMarkup:
+    """Retry the probe — and, only when deliberately enabled, the automatic row."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("intake.probe_retry_btn", lang), callback_data=PROBE_CALLBACK)
+    if auto_best:
+        builder.button(
+            text=t("intake.auto_best_btn", lang),
+            callback_data=_fmt_callback("video", "best"),
+        )
+    builder.button(text=t("menu.back", lang), callback_data="menu:download")
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 def _question_text(
@@ -1129,7 +1240,13 @@ def _offered_tiers(url: str, options: Sequence[VideoOption]) -> list[str]:
     """Exactly what the question's buttons say a tap may choose — the vocabulary
     the tap is later validated against (a crafted callback is data)."""
     if options:
-        return [str(option.height) for option in options]
+        tiers = [str(option.height) for option in options]
+        routing = content.routing_for(url)
+        if routing.media_choice is not None:
+            # A post link's question carries its "send the media" button
+            # alongside the ladder — that request belongs to the vocabulary too.
+            tiers.append(str(routing.media_choice.quality))
+        return tiers
     return [choice.quality for choice in content.routing_for(url).choices]
 
 
@@ -1318,9 +1435,11 @@ async def on_audio_format(
         return
     await cb.answer()
     prompt = t("audio.choose_level_fmt", lang, format=spec.upper())
-    note = _source_rate_note(spec, data, lang)
-    if note:
-        prompt = f"{prompt}\n\n{note}"
+    notes = [note for note in (_source_rate_note(spec, data, lang),) if note]
+    # What a rate row *is*, said once: a conversion target, not a claim about the
+    # source — and «Original», when its row is here, is the untouched stream.
+    notes.append(t("audio.converted_note", lang))
+    prompt = f"{prompt}\n\n" + "\n".join(notes)
     await _edit_or_reply(
         message,
         _question_text(url, lang, title=title, prompt=prompt),
@@ -1332,6 +1451,39 @@ async def on_audio_format(
             copy_ok=(capability.copy_ok if capability is not None else True),
             upload_limit_bytes=get_settings().upload_limit_bytes,
         ),
+    )
+
+
+@router.callback_query(DownloadStates.waiting_format, F.data == PROBE_CALLBACK)
+async def on_probe_retry(
+    cb: CallbackQuery,
+    state: FSMContext,
+    user: asyncpg.Record,
+    pool: asyncpg.Pool,
+    queue: TaskQueue,
+    bot: Bot,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """The error screen's retry: run the capability lookup again, in place.
+
+    Re-extraction is the point: a menu that could not be drawn because the probe
+    failed is drawn again from a *fresh* probe (the link is server-side state in
+    the FSM — a crafted callback names at most that). A second failure re-opens
+    the same honest screen.
+    """
+    message = callback_message(cb)
+    if message is None:
+        await cb.answer(t("intake.stale", lang), show_alert=True)
+        return
+    data = await state.get_data()
+    url = data.get("url")
+    if not url:
+        await cb.answer(t("intake.link_expired", lang), show_alert=True)
+        await state.clear()
+        return
+    await cb.answer()
+    await _ask_about_link(
+        message, state, user, str(url), lang, bot=bot, pool=pool, queue=queue, edit=True
     )
 
 
@@ -1419,7 +1571,11 @@ def _tap_was_offered(
     """
     if not media_format or not quality:
         return False
-    if media_format == "video" and is_video_height(quality) and data.get("offered") is not None:
+    if media_format == "video" and data.get("offered") is not None:
+        # Every video request is judged by the offered list — "best" included.
+        # The automatic row is only in that list when the menu really drew it
+        # (MENU_AUTO_BEST), so a crafted ``fmt:video:best`` on a failed lookup
+        # gets exactly what a crafted height gets: nothing.
         return quality in [str(item) for item in data["offered"]]
     if media_format == "audio" and data.get("audio_offered") is not None:
         # The audio grid is probed too: what the question offered decides — and
@@ -1492,6 +1648,14 @@ async def on_stale_media_tap(cb: CallbackQuery, user: asyncpg.Record, lang: str 
     if _double_tap(user["telegram_id"], request):
         await cb.answer()
         return
+    await cb.answer(t("intake.stale", lang), show_alert=True)
+
+
+@router.callback_query(F.data == PROBE_CALLBACK)
+async def on_stale_probe_tap(cb: CallbackQuery, lang: str = DEFAULT_LANG) -> None:
+    """A retry tap on a screen that is no longer live: the same clear answer
+    every stale selection gets — send the link again, and the probe re-runs with
+    it. (An unanswered callback spins forever, which is worse than any answer.)"""
     await cb.answer(t("intake.stale", lang), show_alert=True)
 
 

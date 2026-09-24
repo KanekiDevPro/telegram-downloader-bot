@@ -233,8 +233,109 @@ async def test_ffprobe_being_absent_is_unavailable_not_failure(
 
 def test_a_malformed_probe_answer_is_unreadable_not_a_mismatch() -> None:
     assert verify._parse_probe(b"not json at all") is None
-    assert verify._parse_probe(json.dumps({"streams": []}).encode()) is None
     assert verify._parse_probe(json.dumps({"format": {}, "streams": "oops"}).encode()) is None
+    assert verify._parse_probe(json.dumps({"format": {}}).encode()) is None
+
+
+def test_a_file_with_no_media_stream_is_a_mismatch_not_an_unreadable_answer() -> None:
+    """A *readable* probe reporting zero media streams measured the truth: a
+    container with nothing in it is not the file anyone was promised.
+
+    (Contract change, deliberate: this exact shape — ``{"streams": []}`` — used
+    to be classed "unreadable" and failed open. Stream existence is part of the
+    delivery contract now.)
+    """
+    facts = verify._parse_probe(json.dumps({"streams": []}).encode())
+    assert facts is not None and facts.media_streams == 0
+    mismatch = check_produced(facts, media_format="audio", quality="flac", suffix=".flac")
+    assert mismatch is not None and "stream" in mismatch
+
+
+async def test_a_missing_or_empty_output_is_refused_before_any_probe(tmp_path: Path) -> None:
+    missing = tmp_path / "gone.mp3"
+    mismatch = await verify.verify_produced(missing, media_format="audio", quality="mp3.best")
+    assert mismatch is not None and "missing or empty" in mismatch
+
+    empty = tmp_path / "empty.mp3"
+    empty.write_bytes(b"")
+    mismatch = await verify.verify_produced(empty, media_format="audio", quality="mp3.best")
+    assert mismatch is not None and "missing or empty" in mismatch
+
+
+# ---------------------------------------------------------------------------
+# The user's selection is a claim too — and an upscale is only an observation
+# ---------------------------------------------------------------------------
+
+
+def test_a_delivered_rung_below_the_selected_one_fails_clearly() -> None:
+    """A 720p tap that lands on 480p (the format vanished before the download)
+    is refused — never silently re-captioned to whatever arrived."""
+    mismatch = check_produced(
+        _facts(format_name="mp4", codec="h264", width=854, height=480),
+        media_format="video",
+        quality="720",
+        suffix=".mp4",
+        produced_p=480,
+        selected_p=720,
+    )
+    assert mismatch is not None and "selected 720p" in mismatch
+
+
+def test_a_delivered_rung_matching_the_selection_passes() -> None:
+    assert (
+        check_produced(
+            _facts(format_name="mp4", codec="h264", width=1280, height=720),
+            media_format="video",
+            quality="720",
+            suffix=".mp4",
+            produced_p=720,
+            selected_p=720,
+        )
+        is None
+    )
+
+
+def test_an_unselected_rung_makes_no_selection_claim() -> None:
+    '''A "best" request names no rung: only the caption's own claim is checked.'''
+    assert (
+        check_produced(
+            _facts(format_name="mp4", codec="h264", width=854, height=480),
+            media_format="video",
+            quality="best",
+            suffix=".mp4",
+            produced_p=480,
+        )
+        is None
+    )
+
+
+async def test_a_source_upscale_is_observed_and_never_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A 320 kbps target over a ~130 kbps source is delivered as requested —
+    the observation is a log line, not a verdict and not a user-facing state."""
+
+    async def fake_probe(path: Path) -> MediaFacts:
+        return _facts(codec="mp3", bitrate_bps=318_400, media_streams=1)
+
+    monkeypatch.setattr(verify, "probe_media", fake_probe)
+    produced = tmp_path / "song.mp3"
+    produced.write_bytes(b"\x00" * 32)
+
+    with caplog.at_level("INFO", logger="services.verify"):
+        mismatch = await verify.verify_produced(
+            produced, media_format="audio", quality="mp3.best", source_kbps=130
+        )
+    assert mismatch is None, "the requested encoding target was produced"
+    assert "upscale observed" in caplog.text
+
+    # …and an unknown source rate infers nothing in either direction.
+    caplog.clear()
+    with caplog.at_level("INFO", logger="services.verify"):
+        mismatch = await verify.verify_produced(
+            produced, media_format="audio", quality="mp3.best", source_kbps=None
+        )
+    assert mismatch is None and "upscale" not in caplog.text
 
 
 def test_unknown_probe_fields_never_guess() -> None:
@@ -265,7 +366,14 @@ def _result(tmp_path: Path, quality: str = "mp3.best") -> DownloadResult:
     info = type(
         "Info",
         (),
-        {"label_p": None, "height": None, "title": "Song", "platform": "test", "duration": 0},
+        {
+            "label_p": None,
+            "height": None,
+            "title": "Song",
+            "platform": "test",
+            "duration": 0,
+            "audio_kbps": None,
+        },
     )()
     return DownloadResult(
         file_path=produced,
@@ -301,6 +409,58 @@ async def test_the_worker_delivers_no_lie_even_mid_upload(
             _task(), None, object(), None, _result(tmp_path, quality="flac")  # type: ignore[arg-type]
         )
     assert caught.value.code == "CONVERSION_MISMATCH"
+
+
+async def test_the_worker_verifies_against_the_users_selection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """What reaches verification is the *selection* — the rung the tap promised
+    — plus the source rate for the upscale observation. A vanished format is a
+    clear failure here, never a silent re-caption."""
+    seen: dict[str, Any] = {}
+
+    async def fake_verify(path: Path, **claim: Any) -> str:
+        seen.update(claim)
+        return "resolution: selected 720p, measured height 480"
+
+    monkeypatch.setattr(worker.verify, "verify_produced", fake_verify)
+    job = tmp_path / "job-y"
+    job.mkdir()
+    produced = job / "clip.mp4"
+    produced.write_bytes(b"\x00")
+    info = type(
+        "Info",
+        (),
+        {
+            "label_p": 480,
+            "height": 480,
+            "title": "Clip",
+            "platform": "test",
+            "duration": 0,
+            "audio_kbps": 130,
+        },
+    )()
+    result = DownloadResult(
+        file_path=produced, info=info, media_format="video", quality="720"
+    )
+    task = DownloadTask(
+        chat_id=5,
+        telegram_id=5,
+        url="https://example.com/v",
+        media_format="video",
+        quality="720",
+        lang="en",
+        title="Clip",
+        chat_title="",
+    )
+
+    with pytest.raises(ExtractionError) as caught:
+        await worker._finish_upload(task, None, object(), None, result)  # type: ignore[arg-type]
+
+    assert caught.value.code == "CONVERSION_MISMATCH"
+    assert seen["selected_p"] == "720", "the user's selection is the claim"
+    assert seen["produced_p"] == 480, "and so is what the caption would say"
+    assert seen["source_kbps"] == 130, "the source rate rides along (observation only)"
 
 
 # ---------------------------------------------------------------------------
@@ -477,3 +637,55 @@ def test_video_verification_is_unchanged() -> None:
         produced_p=1080,
     )
     assert mismatch is not None and "1080" in mismatch
+
+
+# ---------------------------------------------------------------------------
+# The documented height tolerance (±5% of the claim, at least 16 px)
+# ---------------------------------------------------------------------------
+
+
+def test_the_height_tolerance_is_documented_and_absorbs_only_near_misses() -> None:
+    """Coded padding and normal variance live inside the tolerance; another
+    rung never does. The numbers are the documented contract (verify.py module
+    docstring, docs/RELEASE_RUNBOOK.md §7) — pinned so they cannot drift."""
+    assert verify.HEIGHT_TOLERANCE_PX == 16
+    assert verify.HEIGHT_TOLERANCE_RATIO == 0.05
+
+    # 720p allows 36 px (5%): 690 is inside, 683 is a different rung.
+    assert (
+        check_produced(
+            _facts(codec="h264", width=1226, height=690),
+            media_format="video",
+            quality="720",
+            suffix=".mp4",
+            produced_p=720,
+            selected_p=720,
+        )
+        is None
+    )
+    mismatch = check_produced(
+        _facts(codec="h264", width=1214, height=683),
+        media_format="video",
+        quality="720",
+        suffix=".mp4",
+        produced_p=720,
+        selected_p=720,
+    )
+    assert mismatch is not None and "683" in mismatch
+
+
+def test_a_720p_selection_is_never_delivered_or_captioned_as_480p() -> None:
+    """The exact release case: 720p tapped, 480p produced. The check fails the
+    delivery (the worker raises before any upload — see the wiring cases above)
+    and the caption could only ever have said 480p
+    (tests/test_delivery_honesty.py)."""
+    mismatch = check_produced(
+        _facts(codec="h264", width=854, height=480),
+        media_format="video",
+        quality="720",
+        suffix=".mp4",
+        produced_p=480,
+        selected_p=720,
+    )
+    assert mismatch is not None
+    assert "selected 720p" in mismatch and "480" in mismatch

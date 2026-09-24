@@ -17,6 +17,7 @@ receives is not a dead end.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -36,8 +37,10 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from core import database
+from core import texts as text_store
+from core.catalog import MESSAGES
 from core.config import get_settings
-from core.i18n import DEFAULT_LANG, t
+from core.i18n import DEFAULT_LANG, LANGS, t
 from core.ui import Screen, edit_quietly
 from core.utils import escape_html
 from handlers.user import _back_to_menu, support_target
@@ -60,7 +63,6 @@ from services.telemetry import (
     DIGEST_DAYS,
     TREND_DAYS,
     build_digest,
-    build_recent_digest,
     build_trend,
     render_digest,
     render_trend,
@@ -146,6 +148,9 @@ class AdminStates(StatesGroup):
     broadcast = State()
     support = State()
     user_search = State()
+    #: One user-facing text being rewritten (which key and language travels in
+    #: the FSM data — the next message from this admin is the new value).
+    text_edit = State()
 
 
 def _chunks(text: str, limit: int = CHUNK_LIMIT) -> list[str]:
@@ -488,7 +493,8 @@ async def on_alert_check(
 
 #: The panel's own callback namespace (``admin:<screen>``).
 PANEL_HOME = "admin:home"
-#: The dashboard's sections, as the hub lists them.
+#: The screens the panel serves: the category submenus and the sections inside
+#: them. One level deep from the hub, all of them.
 _PANEL_SCREENS: frozenset[str] = frozenset(
     {
         "home",
@@ -496,22 +502,83 @@ _PANEL_SCREENS: frozenset[str] = frozenset(
         "users",
         "broadcast",
         "blocks",
-        "trend",
-        "failures",
         "groups",
         "system",
         "settings",
+        "texts",
+        "sources",
+        # …and the six category submenus themselves.
+        "cat_users",
+        "cat_downloads",
+        "cat_sources",
+        "cat_messages",
+        "cat_system",
+        "cat_diagnostics",
     }
 )
 #: Screens an *older* keyboard may still name. They render as their modern
-#: section (queue and health live on System now, tools split between System and
-#: Settings) — a forwarded panel from last week must not dead-end.
+#: section — a forwarded panel from last week must not dead-end. The retired
+#: "trend"/"failures" screens live on as the diagnostics digest.
 _PANEL_ALIASES: dict[str, str] = {
     "health": "system",
     "queue": "system",
     "tools": "system",
     "support": "settings",
+    "trend": "blocks",
+    "failures": "blocks",
 }
+#: Every screen's *parent*: Back is the parent, never "wherever" — and a
+#: category's own screens come back to it, one level up, always.
+_SCREEN_PARENT: dict[str, str] = {
+    "stats": "cat_downloads",
+    "users": "cat_users",
+    "groups": "cat_users",
+    "broadcast": "cat_messages",
+    "texts": "cat_messages",
+    "blocks": "cat_diagnostics",
+    "system": "cat_system",
+    "settings": "cat_system",
+    "sources": "cat_sources",
+}
+#: The hub's six categories, in hub order: id → its label key.
+_CATEGORY_LABELS: dict[str, str] = {
+    "cat_users": "admin.cat_users",
+    "cat_downloads": "admin.cat_downloads",
+    "cat_sources": "admin.cat_sources",
+    "cat_messages": "admin.cat_messages",
+    "cat_system": "admin.cat_system",
+    "cat_diagnostics": "admin.cat_diagnostics",
+}
+#: …and what each submenu lists: ``(button label key, destination)``. The two
+#: extractor actions live under Sources (they are the same callbacks the
+#: cookie-jar alert uses — one implementation, one set of tests).
+_CATEGORY_ITEMS: dict[str, tuple[tuple[str, str], ...]] = {
+    "cat_users": (
+        ("admin.btn_users", "admin:users"),
+        ("admin.btn_groups", "admin:groups"),
+    ),
+    "cat_downloads": (("admin.btn_stats", "admin:stats"),),
+    "cat_sources": (
+        ("admin.btn_doctor", DOCTOR_CALLBACK),
+        ("admin.btn_refresh", REFRESH_CALLBACK),
+        ("admin.btn_sources", "admin:sources"),
+    ),
+    "cat_messages": (
+        ("admin.btn_texts", "admin:texts"),
+        ("admin.btn_broadcast", "admin:broadcast"),
+    ),
+    "cat_system": (
+        ("admin.btn_system", "admin:system"),
+        ("admin.btn_settings", "admin:settings"),
+    ),
+    "cat_diagnostics": (("admin.btn_blocks", "admin:blocks"),),
+}
+#: The texts editor's own callback namespace: ``txt:<action>:…``. Actions and
+#: payloads stay short on purpose — Telegram caps callback data at 64 bytes and
+#: the longest catalogue key must fit behind the prefix.
+TXT_PREFIX = "txt:"
+#: How many keys fit on one page of a category's key listing.
+TEXTS_PAGE_SIZE = 6
 #: The two confirmations (they are not screens: they act).
 BC_SEND = "bc:send"
 BC_CANCEL = "bc:cancel"
@@ -521,59 +588,70 @@ SUP_CLEAR = "sup:clear"
 
 
 def _panel_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """The dashboard hub: eight sections in pairs, then the way to the user menu.
+    """The dashboard hub: six categories in pairs, then the way to the user menu.
 
-    Categories, not one giant list — everything an operator can *read*
-    (Statistics, Users, Blocks, Trends, Failures) sits with its peers, actions
-    and configuration have their own homes (Broadcast, System, Settings), and
-    every section is one screen deep from here. The back button leaves the panel
-    entirely: an admin is also a user of the same one-message UI.
+    Categories, not one giant list — every action lives one screen deep inside
+    its category (users with groups, the editable texts with the broadcast, the
+    failure views under diagnostics), so the hub itself stays a map anyone can
+    read on a phone. The back button leaves the panel entirely: an admin is also
+    a user of the same one-message UI.
     """
     builder = InlineKeyboardBuilder()
-    builder.button(text=t("admin.btn_stats", lang), callback_data="admin:stats")
-    builder.button(text=t("admin.btn_users", lang), callback_data="admin:users")
-    builder.button(text=t("admin.btn_broadcast", lang), callback_data="admin:broadcast")
-    builder.button(text=t("admin.btn_blocks", lang), callback_data="admin:blocks")
-    builder.button(text=t("admin.btn_trend", lang), callback_data="admin:trend")
-    builder.button(text=t("admin.btn_failures", lang), callback_data="admin:failures")
-    builder.button(text=t("admin.btn_groups", lang), callback_data="admin:groups")
-    builder.button(text=t("admin.btn_system", lang), callback_data="admin:system")
-    builder.button(text=t("admin.btn_settings", lang), callback_data="admin:settings")
+    for category in _CATEGORY_LABELS:
+        builder.button(
+            text=t(_CATEGORY_LABELS[category], lang), callback_data=f"admin:{category}"
+        )
     builder.adjust(2)
     builder.button(text=t("menu.back", lang), callback_data="menu:home")
     builder.adjust(2)
     return builder.as_markup()
 
 
-def _system_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """System's own actions, then the way back to the hub.
+def _leave(builder: InlineKeyboardBuilder, lang: str, *, to: str) -> None:
+    """Every submenu's way out, in one place: Back is the parent, Home is Home.
 
-    The first two call the *same* callbacks the cookie-jar alert uses, so an
-    operator who taps here and one who taps there get identical behaviour — one
-    implementation and one set of tests. The reload re-reads this screen; fixlogin
-    and oauth stay commands (they are long guided flows) and are named in the text.
+    Back walks *up* (a screen to its category, a category to the hub); Home
+    jumps straight to the user menu every admin also has. Both on every submenu
+    — a screen that can only go back is a screen someone gets lost in.
+    """
+    builder.button(text=t("menu.back", lang), callback_data=to)
+    builder.button(text=t("admin.btn_home", lang), callback_data="menu:home")
+    builder.adjust(2)
+
+
+def _category_keyboard(lang: str, category: str) -> InlineKeyboardMarkup:
+    """One category's items, then Back (to the hub) and Home."""
+    builder = InlineKeyboardBuilder()
+    for label_key, destination in _CATEGORY_ITEMS[category]:
+        builder.button(text=t(label_key, lang), callback_data=destination)
+    builder.adjust(2)
+    _leave(builder, lang, to=PANEL_HOME)
+    return builder.as_markup()
+
+
+def _system_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """System's own screen: re-read it, back to its category, or home.
+
+    The extractor actions (doctor, cookie re-export) live under *Sources* now —
+    one home per action — and fixlogin/oauth stay commands (they are long guided
+    flows) and are named in the System screen's text.
     """
     builder = InlineKeyboardBuilder()
-    builder.button(text=t("admin.btn_doctor", lang), callback_data=DOCTOR_CALLBACK)
-    builder.button(text=t("admin.btn_refresh", lang), callback_data=REFRESH_CALLBACK)
     builder.button(text=t("admin.btn_reload", lang), callback_data="admin:system")
-    builder.adjust(2)
-    builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
-    builder.adjust(2)
+    _leave(builder, lang, to=f"admin:{_SCREEN_PARENT['system']}")
     return builder.as_markup()
 
 
 def _section_keyboard(lang: str, screen: str) -> InlineKeyboardMarkup:
-    """A read-only section: re-read it, or leave to its parent — the hub.
+    """A read-only section: re-read it, back to its category, or home.
 
     One shape for every report screen, so the buttons never move around between
-    them: refresh on the left, back on the right, and "back" is always the
-    section's *parent* (the dashboard hub), never "wherever".
+    them: refresh first, then the way out — and "back" is always the section's
+    *parent* (its category submenu), never "wherever".
     """
     builder = InlineKeyboardBuilder()
     builder.button(text=t("admin.btn_reload", lang), callback_data=f"admin:{screen}")
-    builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
-    builder.adjust(2)
+    _leave(builder, lang, to=f"admin:{_SCREEN_PARENT.get(screen, 'home')}")
     return builder.as_markup()
 
 
@@ -587,10 +665,9 @@ def _broadcast_keyboard(lang: str) -> InlineKeyboardMarkup:
 
 
 def _done_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """A finished flow's only question is "where to now" — the hub."""
+    """A finished flow's only question is "where to now" — the hub, or Home."""
     builder = InlineKeyboardBuilder()
-    builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
-    builder.adjust(1)
+    _leave(builder, lang, to=PANEL_HOME)
     return builder.as_markup()
 
 
@@ -620,8 +697,10 @@ def _users_keyboard(lang: str, *, offset: int, total: int) -> InlineKeyboardMark
         nav += 1
     if nav:
         widths.append(nav)  # prev and next share a row; one alone is fine too
-    builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
-    widths.append(1)
+    parent = _SCREEN_PARENT.get("users", "home")
+    builder.button(text=t("menu.back", lang), callback_data=f"admin:{parent}")
+    builder.button(text=t("admin.btn_home", lang), callback_data="menu:home")
+    widths.append(2)
     builder.adjust(*widths)
     return builder.as_markup()
 
@@ -637,8 +716,7 @@ def _support_keyboard(lang: str, *, configured: bool) -> InlineKeyboardMarkup:
     if configured:
         builder.button(text=t("admin.support_clear", lang), callback_data=SUP_CLEAR)
     builder.adjust(2)
-    builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
-    builder.adjust(2)
+    _leave(builder, lang, to=f"admin:{_SCREEN_PARENT.get('settings', 'home')}")
     return builder.as_markup()
 
 
@@ -660,26 +738,25 @@ async def panel_screen(
     keyboard still uses resolve to their modern section via ``_PANEL_ALIASES``.
     """
     settings = get_settings()
+    if screen in _CATEGORY_LABELS:
+        return Screen(t(_CATEGORY_LABELS[screen], lang), _category_keyboard(lang, screen))
     if screen == "stats":
         return Screen(await panel.stats_text(pool, lang), _section_keyboard(lang, "stats"))
     if screen == "users":
         return await _users_screen(pool, lang, offset=offset)
     if screen == "broadcast":
         return await _broadcast_screen(pool, lang)
-    if screen == "trend":
-        trend = await build_trend(pool, days=TREND_DAYS)
-        headline = t("admin.trend_headline", lang, days=TREND_DAYS)
-        return Screen(render_trend(trend, headline=headline), _section_keyboard(lang, "trend"))
     if screen == "blocks":
         return Screen(await _failure_report(pool, cobalt, lang), _section_keyboard(lang, "blocks"))
     if screen == "groups":
         return Screen(await panel.groups_text(pool, lang), _section_keyboard(lang, "groups"))
-    if screen == "failures":
-        # The short window on purpose: Trends owns the long view, this screen
-        # answers "is it failing *right now*" — and what to do about it.
-        digest = await build_recent_digest(pool)
-        text = render_digest(digest, headline=t("admin.failures_headline", lang))
-        return Screen(text, _section_keyboard(lang, "failures"))
+    if screen == "texts":
+        return _texts_screen(lang)
+    if screen == "sources":
+        return Screen(
+            await panel.sources_text(pool, settings, cobalt, lang),
+            _section_keyboard(lang, "sources"),
+        )
     if screen in ("system", "health", "queue", "tools"):
         health = await panel.health_text(pool, queue, settings, cobalt, lang)
         queue_line = await panel.queue_text(queue, settings, lang)
@@ -706,8 +783,7 @@ async def _broadcast_screen(pool: asyncpg.Pool, lang: str) -> Screen:
     total = await database.count_users(pool)
     builder = InlineKeyboardBuilder()
     builder.button(text=t("admin.broadcast_start", lang), callback_data=BC_START)
-    builder.button(text=t("admin.btn_back", lang), callback_data=PANEL_HOME)
-    builder.adjust(2)
+    _leave(builder, lang, to=f"admin:{_SCREEN_PARENT.get('broadcast', 'home')}")
     return Screen(t("admin.broadcast_intro", lang, users=total), builder.as_markup())
 
 
@@ -719,6 +795,346 @@ async def _support_screen(pool: asyncpg.Pool, lang: str) -> Screen:
         t("admin.support_intro", lang, contact=escape_html(shown)),
         _support_keyboard(lang, configured=bool(contact)),
     )
+
+
+# ---------------------------------------------------------------------------
+# The texts editor: user-facing messages, by feature, editable at the desk
+# ---------------------------------------------------------------------------
+
+
+async def _show(message: Message, screen: Screen) -> None:
+    """Put a whole screen (text *and* buttons) into the message being watched."""
+    await _edit(message, screen.text, reply_markup=screen.keyboard)
+
+
+def _text_key_keyboard(key: str, lang: str) -> InlineKeyboardMarkup:
+    """The key screen's buttons alone (for answers under a message of their own)."""
+    return _text_key_screen(key, lang).keyboard
+
+
+def _texts_screen(lang: str) -> Screen:
+    """The editor's home: one button per feature category."""
+    builder = InlineKeyboardBuilder()
+    for category in text_store.category_ids():
+        builder.button(
+            text=t(text_store.CATEGORY_LABEL_KEYS[category], lang),
+            callback_data=f"{TXT_PREFIX}cat:{category}",
+        )
+    builder.adjust(2)
+    _leave(builder, lang, to=f"admin:{_SCREEN_PARENT.get('texts', 'home')}")
+    return Screen(t("admin.texts_title", lang), builder.as_markup())
+
+
+def _page(raw: str) -> int:
+    """A page number from callback data — ``0`` for anything that is not one."""
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
+def _texts_keys_screen(category: str, page: int, lang: str) -> Screen:
+    """One page of a category's texts — each row its key, marked when edited."""
+    keys = text_store.category_keys(category)
+    pages = max(1, (len(keys) + TEXTS_PAGE_SIZE - 1) // TEXTS_PAGE_SIZE)
+    page = min(page, pages - 1)
+    window = keys[page * TEXTS_PAGE_SIZE : (page + 1) * TEXTS_PAGE_SIZE]
+    builder = InlineKeyboardBuilder()
+    widths: list[int] = []
+    for key in window:
+        mark = "✏️ " if any(text_store.is_edited(key, code) for code in LANGS) else ""
+        builder.button(text=f"{mark}{key}", callback_data=f"{TXT_PREFIX}key:{key}")
+        widths.append(1)
+    nav = 0
+    if page > 0:
+        builder.button(
+            text=t("admin.btn_prev", lang),
+            callback_data=f"{TXT_PREFIX}keys:{category}:{page - 1}",
+        )
+        nav += 1
+    if page < pages - 1:
+        builder.button(
+            text=t("admin.btn_next", lang),
+            callback_data=f"{TXT_PREFIX}keys:{category}:{page + 1}",
+        )
+        nav += 1
+    if nav:
+        widths.append(nav)
+    builder.button(text=t("menu.back", lang), callback_data="admin:texts")
+    builder.button(text=t("admin.btn_home", lang), callback_data="menu:home")
+    widths.append(2)
+    builder.adjust(*widths)
+    return Screen(
+        t(
+            "admin.texts_category",
+            lang,
+            category=t(text_store.CATEGORY_LABEL_KEYS[category], lang),
+        ),
+        builder.as_markup(),
+    )
+
+
+def _text_key_screen(key: str, lang: str) -> Screen:
+    """One text: what it says now in both languages, and what may be done to it.
+
+    Both values are shown *escaped* — an admin is reading markup source here,
+    and the screen's own markup must not be the edited text's guest.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=t("admin.texts_edit_en", lang), callback_data=f"{TXT_PREFIX}edit:en:{key}"
+    )
+    builder.button(
+        text=t("admin.texts_edit_fa", lang), callback_data=f"{TXT_PREFIX}edit:fa:{key}"
+    )
+    builder.adjust(2)
+    builder.button(
+        text=f"{t('admin.texts_preview', lang)} EN",
+        callback_data=f"{TXT_PREFIX}preview:en:{key}",
+    )
+    builder.button(
+        text=f"{t('admin.texts_preview', lang)} FA",
+        callback_data=f"{TXT_PREFIX}preview:fa:{key}",
+    )
+    builder.adjust(2)
+    widths = [2, 2]
+    resets = [
+        code
+        for code in LANGS
+        if text_store.is_edited(key, code)
+    ]
+    if resets:
+        for code in resets:
+            builder.button(
+                text=t(f"admin.texts_reset_{code}", lang),
+                callback_data=f"{TXT_PREFIX}reset:{code}:{key}",
+            )
+        widths.append(len(resets))
+    builder.button(
+        text=t("menu.back", lang),
+        callback_data=f"{TXT_PREFIX}keys:{text_store.category_of(key) or 'start'}:0",
+    )
+    builder.button(text=t("admin.btn_home", lang), callback_data="menu:home")
+    widths.append(2)
+    builder.adjust(*widths)
+    return Screen(
+        t(
+            "admin.texts_key_title",
+            lang,
+            key=key,
+            en=escape_html(text_store.effective(key, "en")),
+            fa=escape_html(text_store.effective(key, "fa")),
+        ),
+        builder.as_markup(),
+    )
+
+
+def _text_audit(
+    action: str,
+    key: str,
+    lang: str,
+    actor: int,
+    before: str | None,
+    after: str | None,
+) -> str:
+    """The audit row for one text change: actor, key, language, before/after.
+
+    The row's own ``created_at`` is the timestamp. ``null`` means the catalogue
+    default (there was no override, or there no longer is). Concurrent edits
+    are **last-write-wins** over the database upsert — and every write is its
+    own row with its own before/after pair, so an overwritten value is never
+    lost from the history, only from the present. The values are the texts
+    themselves (validated user-facing strings), never secrets.
+    """
+    return json.dumps(
+        {
+            "action": action,
+            "key": key,
+            "lang": lang,
+            "actor": actor,
+            "before": before,
+            "after": after,
+        },
+        ensure_ascii=False,
+    )
+
+
+@router.callback_query(F.data.startswith(TXT_PREFIX))
+async def on_texts_button(
+    cb: CallbackQuery,
+    state: FSMContext,
+    pool: asyncpg.Pool,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """Every texts-editor button: browse, edit, preview, reset.
+
+    One handler and one parser on purpose — the admin check runs exactly once
+    per tap, and every payload is validated against the catalogue before it
+    names anything (a crafted ``txt:key:…`` can at most name a key that exists:
+    locked families are not editable even then).
+    """
+    if not get_settings().is_admin(cb.from_user.id):
+        await cb.answer(t("admin.only", lang), show_alert=True)
+        return
+    message = cb.message if isinstance(cb.message, Message) else None
+    if message is None:
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    parts = (cb.data or "")[len(TXT_PREFIX) :].split(":")
+    action = parts[0] if parts else ""
+
+    if action == "cat" and len(parts) == 2 and parts[1] in text_store.category_ids():
+        await cb.answer()
+        await _show(message, _texts_keys_screen(parts[1], 0, lang))
+        return
+    if (
+        action == "keys"
+        and len(parts) == 3
+        and parts[1] in text_store.category_ids()
+    ):
+        await cb.answer()
+        await _show(message, _texts_keys_screen(parts[1], _page(parts[2]), lang))
+        return
+    if not (len(parts) == 2 or (action in ("edit", "preview", "reset") and len(parts) == 3)):
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    code = parts[1] if len(parts) == 3 else ""
+    key = parts[-1]
+    if key not in MESSAGES or (code and code not in LANGS):
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+
+    if action == "key":
+        await cb.answer()
+        await _show(message, _text_key_screen(key, lang))
+        return
+    if not text_store.editable(key):
+        # A crafted payload naming a locked family gets the honest answer — the
+        # catalogue default is not anybody's to replace from here.
+        await cb.answer(t("admin.only", lang), show_alert=True)
+        return
+    if action == "edit":
+        await cb.answer()
+        await state.set_state(AdminStates.text_edit)
+        await state.update_data(txt_key=key, txt_lang=code)
+        builder = InlineKeyboardBuilder()
+        _leave(builder, lang, to=f"{TXT_PREFIX}key:{key}")
+        await _edit(
+            message,
+            t("admin.texts_prompt", lang, key=key, lang=code),
+            reply_markup=builder.as_markup(),
+        )
+        return
+    if action == "preview":
+        # Byte-for-byte what a user would receive (placeholders visible — they
+        # are runtime values, and the admin must keep them). Telegram refusing
+        # the markup is itself the validation verdict.
+        try:
+            await message.answer(text_store.effective(key, code))
+        except TelegramBadRequest:
+            await cb.answer(
+                t(
+                    "admin.texts_invalid",
+                    lang,
+                    reason=t("admin.texts_reason_markup", lang),
+                ),
+                show_alert=True,
+            )
+            return
+        await cb.answer()
+        await _show(message, _text_key_screen(key, lang))
+        return
+    if action == "reset":
+        before = text_store.override_for(key, code)
+        await database.reset_text_override(pool, key, code)
+        await text_store.cleared(key, code)
+        await database.record_fix_event(
+            pool,
+            kind="text_reset",
+            detail=_text_audit("reset", key, code, int(cb.from_user.id), before, None),
+        )
+        await cb.answer()
+        screen = _text_key_screen(key, lang)
+        await _edit(
+            message,
+            f"{t('admin.texts_reset_done', lang, key=key, lang=code)}\n\n{screen.text}",
+            reply_markup=screen.keyboard,
+        )
+        logger.info("text override reset by admin %s: %s (%s)", cb.from_user.id, key, code)
+        return
+    await cb.answer(t("admin.stale", lang), show_alert=True)
+
+
+@router.message(AdminStates.text_edit)
+async def on_text_edit_value(
+    message: Message, state: FSMContext, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
+) -> None:
+    """The new text itself — validated, proven sendable, then saved.
+
+    Three gates before anything is stored: the value validates (length,
+    placeholders the default already has, balanced Telegram markup), then it is
+    *sent as a message* — the preview is the proof, byte-for-byte what users
+    will receive — and only then does it reach the database and the live
+    override layer. "Invalid markup must not break the bot" is enforced by
+    Telegram itself, right here, instead of in some future user's chat. Every
+    save and reset is an audit row (fix_events).
+    """
+    user = message.from_user
+    admin_id = user.id if user else None
+    if not get_settings().is_admin(admin_id):
+        await state.clear()
+        await message.answer(t("admin.only", lang))
+        return
+    data = await state.get_data()
+    key = str(data.get("txt_key") or "")
+    code = str(data.get("txt_lang") or "")
+    await state.clear()
+    if key not in MESSAGES or code not in LANGS or not text_store.editable(key):
+        await message.answer(t("admin.stale", lang))
+        return
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer(
+            t("admin.texts_prompt", lang, key=key, lang=code),
+            reply_markup=_text_key_keyboard(key, lang),
+        )
+        return
+    problem = text_store.validate_text(key, value)
+    if problem:
+        await message.answer(
+            t(
+                "admin.texts_invalid",
+                lang,
+                reason=t(f"admin.texts_reason_{problem}", lang),
+            ),
+            reply_markup=_text_key_keyboard(key, lang),
+        )
+        return
+    try:
+        await message.answer(value)
+    except TelegramBadRequest:
+        await message.answer(
+            t(
+                "admin.texts_invalid",
+                lang,
+                reason=t("admin.texts_reason_markup", lang),
+            ),
+            reply_markup=_text_key_keyboard(key, lang),
+        )
+        return
+    before = text_store.override_for(key, code)
+    await database.set_text_override(pool, key, code, value, updated_by=int(admin_id or 0))
+    await text_store.saved(key, code, value)
+    await database.record_fix_event(
+        pool,
+        kind="text_override",
+        detail=_text_audit("set", key, code, int(admin_id or 0), before, value),
+    )
+    await message.answer(
+        t("admin.texts_saved", lang, key=key, lang=code),
+        reply_markup=_text_key_keyboard(key, lang),
+    )
+    logger.info("text override saved by admin %s: %s (%s)", admin_id, key, code)
 
 
 @router.message(Command("admin"))

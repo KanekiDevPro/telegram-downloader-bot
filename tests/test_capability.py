@@ -377,6 +377,7 @@ async def _finish_with_send_error(
                 platform="soundcloud",
                 label_p=None,
                 height=None,
+                audio_kbps=None,
             ),
         ),
         media_format="audio",

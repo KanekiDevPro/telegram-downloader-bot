@@ -367,6 +367,45 @@ async def _week_block(pool: asyncpg.Pool, lang: str) -> list[str]:
     return lines
 
 
+async def sources_text(
+    pool: asyncpg.Pool,
+    settings: Settings,
+    cobalt: CobaltService | None,
+    lang: str = DEFAULT_LANG,
+) -> str:
+    """Sources & extractors: where every route into the download path stands.
+
+    The same probe lines the health screen shows, under their own heading — an
+    operator asking "what fetches the bytes" gets the fallback engine and the
+    two YouTube helpers without the database/queue lines, and the two guided
+    fixes named in text because they are commands, not buttons.
+    """
+    cobalt_line = await _cobalt_line(pool, settings, cobalt, lang)
+    pot_line = await _helper_line(
+        "panel.pot_line",
+        settings.ytdlp_pot_provider_url,
+        lang,
+        name="PO-token provider",
+    )
+    session_line = await _helper_line(
+        "panel.session_line",
+        settings.youtube_session_server,
+        lang,
+        name="YouTube session server",
+    )
+    return "\n".join(
+        (
+            t("admin.sources_head", lang),
+            "",
+            cobalt_line,
+            pot_line,
+            session_line,
+            "",
+            t("admin.sources_tools", lang),
+        )
+    )
+
+
 def tools_text(lang: str = DEFAULT_LANG) -> str:
     """The maintenance legend on System: what the buttons do, and the commands
     that do the same things without them."""

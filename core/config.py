@@ -315,6 +315,14 @@ class Settings(BaseSettings):
     webhook_secret: str = Field(default="", alias="WEBHOOK_SECRET")
     webhook_host: str = Field(default="0.0.0.0", alias="WEBHOOK_HOST")
     webhook_port: int = Field(default=8080, alias="WEBHOOK_PORT")
+    #: What to do when a video-capable link's qualities cannot be discovered (the
+    #: metadata probe fails or reports no ladder). ``False`` (default) = show an
+    #: explicit error with a retry button and *no* download button: a menu that
+    #: silently substitutes the default format for a capability lookup that
+    #: failed is a menu that lies. ``True`` = additionally offer one clearly
+    #: labelled "automatic (best available)" row — deliberately opt-in, and never
+    #: presented as an exact quality.
+    menu_auto_best: bool = Field(default=False, alias="MENU_AUTO_BEST")
 
     # --- Local Telegram Bot API server (optional, recommended for >50 MB) ----
     # Empty base URL = talk to the official cloud API. Setting it routes every
@@ -660,7 +668,7 @@ class Settings(BaseSettings):
             return 0
         return value
 
-    @field_validator("telegram_api_local", "ytdlp_force_ipv4", mode="before")
+    @field_validator("telegram_api_local", "ytdlp_force_ipv4", "menu_auto_best", mode="before")
     @classmethod
     def _parse_bool_flag(cls, value: object) -> object:
         """Accept 1/0, true/false, yes/no — and a blank value meaning "off"."""

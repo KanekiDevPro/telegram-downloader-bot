@@ -329,8 +329,9 @@ async def test_a_crafted_groups_callback_is_rejected_for_non_admins(
 
 
 def test_the_groups_section_is_wired_into_the_panel() -> None:
+    """Groups lives under its category (Users and groups), one tap deep."""
     assert "groups" in admin._PANEL_SCREENS
-    markup = admin._panel_keyboard(EN)
+    markup = admin._category_keyboard(EN, "cat_users")
     buttons = [button for row in markup.inline_keyboard for button in row]
     assert any(button.callback_data == "admin:groups" for button in buttons)
     assert any(button.text == t("admin.btn_groups", EN) for button in buttons)

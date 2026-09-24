@@ -182,6 +182,23 @@ CREATE TABLE IF NOT EXISTS group_downloads (
 
 CREATE INDEX IF NOT EXISTS ix_group_downloads_created_at ON group_downloads (created_at);
 CREATE INDEX IF NOT EXISTS ix_group_downloads_chat_id    ON group_downloads (chat_id);
+
+-- Admin-edited replacements for user-facing texts. The catalogue
+-- (core.catalog.MESSAGES) stays the source of truth; a row here replaces one
+-- key in one language. No row = the default, and "reset to default" is a delete
+-- — the whole migration story. Only *validated* texts reach this table
+-- (core.texts.validate_text: bounded length, default placeholders only,
+-- balanced Telegram markup), so an edit can never break a send.
+CREATE TABLE IF NOT EXISTS bot_texts (
+    key        TEXT NOT NULL,
+    lang       TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    -- Who changed it last (Telegram id; 0 = unknown). The audit trail proper is
+    -- fix_events (kind 'text_override'); this is just the last hand on the row.
+    updated_by BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (key, lang)
+);
 """
 
 # Inserted on first bootstrap; edit freely afterwards in DB (seeding is one-shot).
@@ -811,6 +828,40 @@ async def prune_fix_events(pool: asyncpg.Pool, keep_days: int = 90) -> int:
         keep_days,
     )
     return int(status.rsplit(" ", 1)[-1])  # "DELETE 12"
+
+
+# ---------------------------------------------------------------------------
+# bot_texts (admin-edited user-facing texts)
+# ---------------------------------------------------------------------------
+
+async def text_overrides(pool: asyncpg.Pool) -> list[asyncpg.Record]:
+    """Every stored text replacement — what boots the override layer (core.texts)."""
+    return await pool.fetch("SELECT key, lang, value, updated_by FROM bot_texts")
+
+
+async def set_text_override(
+    pool: asyncpg.Pool, key: str, lang: str, value: str, updated_by: int = 0
+) -> None:
+    """Store one edited text (an edit is an upsert — one row per key and language)."""
+    await pool.execute(
+        """
+        INSERT INTO bot_texts (key, lang, value, updated_by, updated_at)
+        VALUES ($1, $2, $3, $4, now())
+        ON CONFLICT (key, lang) DO UPDATE
+            SET value = EXCLUDED.value,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = now()
+        """,
+        key,
+        lang,
+        value,
+        updated_by,
+    )
+
+
+async def reset_text_override(pool: asyncpg.Pool, key: str, lang: str) -> None:
+    """Put the catalogue default back: one delete, no history to reconcile."""
+    await pool.execute("DELETE FROM bot_texts WHERE key = $1 AND lang = $2", key, lang)
 
 
 async def get_state(pool: asyncpg.Pool, key: str) -> str | None:
