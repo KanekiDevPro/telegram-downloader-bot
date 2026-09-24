@@ -305,6 +305,12 @@ class Settings(BaseSettings):
     # ``NoDecode`` keeps the raw env string so the validator below can accept
     # "1,2", "1 2" or "[1, 2]" — pydantic-settings would otherwise require JSON.
     admin_ids: Annotated[list[int], NoDecode] = Field(default_factory=list, alias="ADMIN_IDS")
+    #: The one account that may back up and restore the bot's configuration.
+    #: Deliberately *no fallback*: unset (or 0) means the feature is OFF — no
+    #: admin inherits it, because "the first admin" is also a privilege
+    #: escalation the moment a second admin exists. The buttons are hidden and
+    #: every action refuses (see :meth:`Settings.is_owner`).
+    owner_id: int = Field(default=0, alias="OWNER_ID")
     #: What a *new* user gets when their Telegram client does not speak a language
     #: this bot knows. 'en' (the product default) or 'fa'. A user whose locale is
     #: ``fa``/``fa-IR`` starts in Persian regardless; a stored choice always wins.
@@ -559,6 +565,12 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Validators
     # ------------------------------------------------------------------
+
+    @field_validator("owner_id", mode="before")
+    @classmethod
+    def _blank_owner_is_unset(cls, value: object) -> object:
+        """An empty ``OWNER_ID`` means "unset", not "parse error"."""
+        return 0 if value in (None, "") else value
 
     @field_validator("admin_ids", mode="before")
     @classmethod
@@ -879,6 +891,23 @@ class Settings(BaseSettings):
             return False
         try:
             return int(user_id) in self.admin_id_set
+        except (TypeError, ValueError):
+            return False
+
+    def is_owner(self, user_id: int | str | None) -> bool:
+        """True when ``user_id`` is *the* owner — the one account behind the
+        backup and restore actions.
+
+        ``OWNER_ID`` is the only key to this, on purpose. With it unset the
+        answer is ``False`` for *everyone*: no admin inherits the privilege by
+        position, and the feature stays dark (hidden buttons, refused actions).
+        Accepted spellings follow :meth:`is_admin` (ids reach us as text, as
+        ``asyncpg`` ints, and from JSON).
+        """
+        if user_id is None or not self.owner_id:
+            return False
+        try:
+            return int(user_id) == self.owner_id
         except (TypeError, ValueError):
             return False
 

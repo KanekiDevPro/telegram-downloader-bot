@@ -30,6 +30,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BotCommand,
     BotCommandScopeChat,
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardMarkup,
     Message,
@@ -44,6 +45,7 @@ from core.i18n import DEFAULT_LANG, LANGS, t
 from core.ui import Screen, edit_quietly
 from core.utils import escape_html
 from handlers.user import _back_to_menu, support_target
+from services import backup as backup_service
 from services import broadcast, cookie_refresh, login_wizard, panel
 from services.cobalt import CobaltService
 from services.cookie_refresh import RefreshOutcome, render_outcome
@@ -151,6 +153,10 @@ class AdminStates(StatesGroup):
     #: One user-facing text being rewritten (which key and language travels in
     #: the FSM data — the next message from this admin is the new value).
     text_edit = State()
+    #: Waiting for the backup file to restore. The confirm step acts on a
+    #: server-side pending restore behind a short nonce — the FSM never holds
+    #: the payload (see services/backup.py).
+    restore = State()
 
 
 def _chunks(text: str, limit: int = CHUNK_LIMIT) -> list[str]:
@@ -549,6 +555,16 @@ _CATEGORY_LABELS: dict[str, str] = {
     "cat_system": "admin.cat_system",
     "cat_diagnostics": "admin.cat_diagnostics",
 }
+#: Backup & restore — the System submenu's owner-only pair. Short payloads on
+#: purpose: Telegram caps callback data at 64 bytes.
+BK_BACKUP = "bk:backup"
+BK_RESTORE = "bk:restore"
+#: The preview's two answers: apply the file that was shown, or walk away. The
+#: confirmation carries ONLY a short random nonce — the restore itself lives
+#: server-side, bound to the owner and expiring (see services/backup.py).
+BK_GO = "bk:go:"
+BK_CANCEL = "bk:cancel"
+
 #: …and what each submenu lists: ``(button label key, destination)``. The two
 #: extractor actions live under Sources (they are the same callbacks the
 #: cookie-jar alert uses — one implementation, one set of tests).
@@ -570,6 +586,8 @@ _CATEGORY_ITEMS: dict[str, tuple[tuple[str, str], ...]] = {
     "cat_system": (
         ("admin.btn_system", "admin:system"),
         ("admin.btn_settings", "admin:settings"),
+        ("admin.btn_backup", BK_BACKUP),
+        ("admin.btn_restore", BK_RESTORE),
     ),
     "cat_diagnostics": (("admin.btn_blocks", "admin:blocks"),),
 }
@@ -623,6 +641,11 @@ def _category_keyboard(lang: str, category: str) -> InlineKeyboardMarkup:
     """One category's items, then Back (to the hub) and Home."""
     builder = InlineKeyboardBuilder()
     for label_key, destination in _CATEGORY_ITEMS[category]:
+        if destination in _OWNER_ACTIONS and not get_settings().owner_id:
+            # No OWNER_ID configured: the feature is off entirely — the button
+            # would only ever answer "owner only" to every admin. Hidden, not
+            # offered (and the handlers refuse anyway).
+            continue
         builder.button(text=t(label_key, lang), callback_data=destination)
     builder.adjust(2)
     _leave(builder, lang, to=PANEL_HOME)
@@ -1065,7 +1088,7 @@ async def on_texts_button(
     await cb.answer(t("admin.stale", lang), show_alert=True)
 
 
-@router.message(AdminStates.text_edit)
+@router.message(AdminStates.text_edit, ~F.text.startswith("/"))
 async def on_text_edit_value(
     message: Message, state: FSMContext, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
 ) -> None:
@@ -1261,7 +1284,7 @@ async def on_users_search(
     )
 
 
-@router.message(AdminStates.user_search)
+@router.message(AdminStates.user_search, ~F.text.startswith("/"))
 async def on_users_search_value(
     message: Message, state: FSMContext, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
 ) -> None:
@@ -1466,7 +1489,9 @@ async def on_broadcast_start(
     )
 
 
-@router.message(AdminStates.broadcast)
+# Not a command: "/cancel" (and every other command) keeps its own handler —
+# this router is consulted first now, and a command must never become draft text.
+@router.message(AdminStates.broadcast, ~F.text.startswith("/"))
 async def on_broadcast_draft(
     message: Message, state: FSMContext, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
 ) -> None:
@@ -1606,7 +1631,7 @@ async def on_support_edit(
     )
 
 
-@router.message(AdminStates.support)
+@router.message(AdminStates.support, ~F.text.startswith("/"))
 async def on_support_value(
     message: Message, state: FSMContext, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
 ) -> None:
@@ -1650,3 +1675,260 @@ async def on_support_clear(
         return
     text, keyboard = await _support_screen(pool, lang)
     await _edit(message, text, reply_markup=keyboard)
+
+
+# ---------------------------------------------------------------------------
+# Backup & restore — the configuration, owner only
+# ---------------------------------------------------------------------------
+
+_OWNER_ACTIONS = frozenset({BK_BACKUP, BK_RESTORE})
+
+
+def _restore_keyboard(nonce: str, lang: str) -> InlineKeyboardMarkup:
+    """The preview's question: apply exactly what was shown, or walk away.
+
+    The buttons carry only the nonce of the server-side pending restore — what
+    is applied is decided here, never by callback data.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("admin.restore_confirm_btn", lang), callback_data=f"{BK_GO}{nonce}")
+    builder.button(
+        text=t("admin.restore_cancel_btn", lang), callback_data=f"{BK_CANCEL}:{nonce}"
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def _restore_cancel_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """The upload prompt's only way out — a flow always has one."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=t("admin.restore_cancel_btn", lang), callback_data=BK_CANCEL)
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def _backup_file(snapshot: dict[str, Any], created_at: str) -> BufferedInputFile:
+    """The backup as a file: readable JSON, named for the moment it was taken."""
+    payload = json.dumps(snapshot, ensure_ascii=False, indent=2).encode("utf-8")
+    stamp = created_at[:16].replace("-", "").replace(":", "").replace("T", "-")
+    return BufferedInputFile(payload, filename=f"bot-backup-{stamp or 'now'}.json")
+
+
+@router.callback_query(F.data == BK_BACKUP)
+async def on_backup_now(
+    cb: CallbackQuery, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
+) -> None:
+    """The configuration, as a file — owner only, and never a secret in it.
+
+    What travels is what an operator edited (see services/backup.py): tokens,
+    credentials and the generated runtime caches are excluded before the file
+    exists, not edited out of it afterwards.
+    """
+    if not get_settings().is_owner(cb.from_user.id):
+        await cb.answer(t("admin.owner_only", lang), show_alert=True)
+        return
+    message = cb.message if isinstance(cb.message, Message) else None
+    if message is None:
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    await cb.answer()
+    snapshot = await backup_service.build_backup(pool)
+    await message.answer_document(
+        _backup_file(snapshot.to_dict(), snapshot.created_at),
+        caption=t("admin.backup_caption", lang),
+    )
+
+
+@router.callback_query(F.data == BK_RESTORE)
+async def on_restore_start(
+    cb: CallbackQuery, state: FSMContext, lang: str = DEFAULT_LANG
+) -> None:
+    """Ask for the file; the next document from this owner is judged, never
+    applied — validation first, then a preview, then one explicit click."""
+    if not get_settings().is_owner(cb.from_user.id):
+        await cb.answer(t("admin.owner_only", lang), show_alert=True)
+        return
+    message = cb.message if isinstance(cb.message, Message) else None
+    if message is None:
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    await cb.answer()
+    await state.set_state(AdminStates.restore)
+    await _edit(
+        message,
+        t("admin.restore_prompt", lang),
+        reply_markup=_restore_cancel_keyboard(lang),
+    )
+
+
+@router.message(AdminStates.restore, F.document)
+async def on_restore_upload(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """The uploaded file, judged before it is trusted: schema version, format,
+    prohibited fields. Only a file that passes is kept for the confirm step —
+    a refused file changes nothing, and says which rule it broke."""
+    user = message.from_user
+    if not get_settings().is_owner(user.id if user else None):
+        await state.clear()
+        await message.answer(t("admin.owner_only", lang))
+        return
+    document = message.document
+    if document is None or (document.file_size or 0) > backup_service.MAX_BACKUP_BYTES:
+        await message.answer(
+            t("admin.restore_invalid", lang, reason="format"),
+            reply_markup=_restore_cancel_keyboard(lang),
+        )
+        return
+    raw = await bot.download(document)
+    try:
+        parsed = backup_service.validate_backup(
+            json.loads(raw.read() if raw is not None else b"")
+        )
+    except backup_service.BackupError as exc:
+        await message.answer(
+            t("admin.restore_invalid", lang, reason=exc.reason),
+            reply_markup=_restore_cancel_keyboard(lang),
+        )
+        return
+    except Exception:
+        logger.warning("could not read the uploaded backup", exc_info=True)
+        await message.answer(
+            t("admin.restore_invalid", lang, reason="format"),
+            reply_markup=_restore_cancel_keyboard(lang),
+        )
+        return
+    # The judged payload stays server-side behind a short nonce — the
+    # confirmation button carries the nonce and nothing else (owner-bound,
+    # expiring; see services/backup.py).
+    nonce = backup_service.remember_pending(parsed, owner=int(user.id if user else 0))
+    await message.answer(
+        t(
+            "admin.restore_preview",
+            lang,
+            texts=len(parsed.texts),
+            settings=len(parsed.state),
+            created=parsed.created_at or "—",
+        ),
+        reply_markup=_restore_keyboard(nonce, lang),
+    )
+
+
+@router.message(AdminStates.restore, ~F.text.startswith("/"))
+async def on_restore_reprompt(message: Message, lang: str = DEFAULT_LANG) -> None:
+    """Not a file, and not a command: ask again — the flow stays open."""
+    await message.answer(
+        t("admin.restore_prompt", lang), reply_markup=_restore_cancel_keyboard(lang)
+    )
+
+
+@router.callback_query(F.data.startswith(BK_CANCEL))
+async def on_restore_cancel(
+    cb: CallbackQuery, state: FSMContext, lang: str = DEFAULT_LANG
+) -> None:
+    """Nothing was applied, and the panel says so."""
+    if not get_settings().is_owner(cb.from_user.id):
+        await cb.answer(t("admin.owner_only", lang), show_alert=True)
+        return
+    nonce = (cb.data or "")[len(BK_CANCEL) :].lstrip(":")
+    if nonce:
+        backup_service.drop_pending(nonce, owner=int(cb.from_user.id))
+    await state.clear()
+    message = cb.message if isinstance(cb.message, Message) else None
+    await cb.answer()
+    if message is not None:
+        await _edit(
+            message,
+            t("admin.restore_cancelled", lang),
+            reply_markup=_done_keyboard(lang),
+        )
+
+
+@router.callback_query(F.data.startswith(BK_GO))
+async def on_restore_go(
+    cb: CallbackQuery,
+    state: FSMContext,
+    pool: asyncpg.Pool,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """Apply the file that was previewed — owner only, undoable, atomic.
+
+    The order is the whole safety story, in this exact sequence: the pending
+    restore is *atomically consumed* first (two concurrent confirmations can
+    never both run), then the emergency backup is built and **sent — awaited —
+    before any database work** (no network call ever happens inside the
+    transaction), a failed send aborts the whole restore with nothing touched,
+    the change is applied inside one strictly scoped transaction (any failure
+    rolls it all back), and only after the commit does the text sync run —
+    whose failure is reported as what it is (a committed restore with a stale
+    cache), never as a rollback that cannot happen.
+    """
+    if not get_settings().is_owner(cb.from_user.id):
+        await cb.answer(t("admin.owner_only", lang), show_alert=True)
+        return
+    message = cb.message if isinstance(cb.message, Message) else None
+    if message is None:
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    # 1) Atomic consumption — before anything else. Exactly one confirmation
+    #    ever wins; a used, expired or foreign nonce finds nothing here.
+    parsed = backup_service.take_pending(
+        (cb.data or "")[len(BK_GO) :], owner=int(cb.from_user.id)
+    )
+    if parsed is None:
+        await cb.answer(t("admin.restore_expired", lang), show_alert=True)
+        return
+    await state.clear()
+    await cb.answer()
+    # 2–3) The emergency backup: built and *sent*, strictly before the
+    #      transaction below. The send is awaited — and if it fails, the
+    #      restore aborts right here with the database untouched.
+    try:
+        emergency = await backup_service.build_backup(pool)
+        await message.answer_document(
+            _backup_file(emergency.to_dict(), emergency.created_at),
+            caption=t("admin.restore_emergency_caption", lang),
+        )
+    except Exception as exc:
+        logger.exception("could not send the emergency backup — restore aborted")
+        await message.answer(
+            t("admin.restore_aborted", lang, detail=escape_html(str(exc)[:200]))
+        )
+        return
+    # 4) One strictly scoped transaction — no network call inside it; a
+    #    failure rolls every section back.
+    try:
+        await backup_service.apply_backup(pool, parsed)
+    except Exception as exc:
+        logger.exception("restore failed and was rolled back")
+        await message.answer(
+            t("admin.restore_failed", lang, detail=escape_html(str(exc)[:200]))
+        )
+        return
+    # 5) Committed. The sync runs *after* the commit: if it fails, the restore
+    #    is not rolled back (it cannot be) — say so plainly instead.
+    try:
+        await text_store.restored(await database.text_overrides(pool))
+    except Exception as exc:
+        logger.exception("restore committed but the text sync failed")
+        await message.answer(
+            t("admin.restore_sync_failed", lang, detail=escape_html(str(exc)[:200]))
+        )
+        return
+    await message.answer(
+        t(
+            "admin.restore_done",
+            lang,
+            texts=len(parsed.texts),
+            settings=len(parsed.state),
+        )
+    )
+    logger.info(
+        "restore applied by owner %s: %d text(s), %d setting(s)",
+        cb.from_user.id,
+        len(parsed.texts),
+        len(parsed.state),
+    )

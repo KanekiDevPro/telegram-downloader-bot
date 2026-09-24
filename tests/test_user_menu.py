@@ -1335,6 +1335,11 @@ class _NoRefusal:
     def youtube_preflight(url: str, cookie_file: Any, **kwargs: Any) -> Any:
         return _Verdict()
 
+    @staticmethod
+    def clear_anonymous_refusal() -> None:
+        """The retry's invalidation call lands here (see ``on_retry``)."""
+        return None
+
 
 class _Verdict:
     refused = False
@@ -1639,7 +1644,11 @@ async def test_a_failed_download_offers_a_retry_only_its_owner_can_press(
     async def no_cache(pool: Any, url: str, *args: Any) -> None:
         return None
 
+    async def no_forget(pool: Any, url: str, *args: Any) -> None:
+        return None
+
     monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
+    monkeypatch.setattr(user_module.cache_service, "forget", no_forget)
     monkeypatch.setattr(user_module, "preflight", _NoRefusal())
 
     # A stranger's tap: refused, and the key is left where it was.

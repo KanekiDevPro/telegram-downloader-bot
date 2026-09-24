@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Optional
@@ -864,9 +865,56 @@ async def reset_text_override(pool: asyncpg.Pool, key: str, lang: str) -> None:
     await pool.execute("DELETE FROM bot_texts WHERE key = $1 AND lang = $2", key, lang)
 
 
+async def replace_text_overrides(
+    pool: asyncpg.Pool | asyncpg.Connection, rows: Sequence[tuple[str, str, str]]
+) -> None:
+    """Make ``bot_texts`` exactly these ``(key, lang, value)`` rows.
+
+    The *caller* owns the transaction (``services.backup.apply_backup``): the
+    delete and the inserts must commit or roll back as one, so this never opens
+    its own.
+    """
+    await pool.execute("DELETE FROM bot_texts")
+    if rows:
+        await pool.executemany(
+            "INSERT INTO bot_texts (key, lang, value, updated_by) VALUES ($1, $2, $3, 0)",
+            list(rows),
+        )
+
+
 async def get_state(pool: asyncpg.Pool, key: str) -> str | None:
     """A remembered value (e.g. when the weekly digest was last sent)."""
     return await pool.fetchval("SELECT value FROM bot_state WHERE key = $1", key)
+
+
+async def all_state(
+    pool: asyncpg.Pool | asyncpg.Connection,
+) -> list[asyncpg.Record]:
+    """Every ``bot_state`` row — what a settings backup reads (and a restore
+    reconciles against). Which rows may travel is ``services.backup``'s call."""
+    return await pool.fetch("SELECT key, value FROM bot_state")
+
+
+async def replace_state_rows(
+    pool: asyncpg.Pool | asyncpg.Connection,
+    rows: Sequence[tuple[str, str]],
+    drop_keys: Sequence[str] = (),
+) -> None:
+    """Restore the settings rows of ``bot_state``: upsert ``rows``, drop the
+    named keys.
+
+    Keys nobody names — the generated runtime state (health stamps, alert
+    times) — are left exactly where they are: a backup is configuration, not
+    the machine it ran on. The caller's transaction covers it all.
+    """
+    if drop_keys:
+        await pool.execute("DELETE FROM bot_state WHERE key = ANY($1::text[])", list(drop_keys))
+    if rows:
+        await pool.executemany(
+            "INSERT INTO bot_state (key, value, updated_at) VALUES ($1, $2, now()) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+            list(rows),
+        )
 
 
 # ---------------------------------------------------------------------------

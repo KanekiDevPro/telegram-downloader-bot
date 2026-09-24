@@ -279,6 +279,12 @@ async def cleared(key: str, lang: str) -> None:
     await _store.cleared(key, lang)
 
 
+async def restored(rows: Iterable[Any]) -> int:
+    """A bulk restore reached the database: take every row live here, tell the
+    peers (see :meth:`OverrideStore.restored`)."""
+    return await _store.restored(rows)
+
+
 def bind_store(
     loader: Callable[[], Awaitable[Iterable[Any]]], channel: Any | None = None
 ) -> None:
@@ -485,6 +491,15 @@ class OverrideStore:
         """A replacement was reset: drop it here, tell the peers."""
         self.clear_override(key, lang)
         await self._publish()
+
+    async def restored(self, rows: Iterable[Any]) -> int:
+        """A restore replaced the table wholesale: take every row live at once,
+        and tell the peers *once* — one bump for one action. This is what makes
+        "after a restore, every process speaks the new texts" true: the peers'
+        next :meth:`sync` sees the counter moved and reloads."""
+        loaded = self.apply_overrides(rows)
+        await self._publish()
+        return loaded
 
     # -- internals ---------------------------------------------------------------
 

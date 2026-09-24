@@ -177,6 +177,14 @@ def _double_tap(user_id: int, request: str, *, now: float | None = None) -> bool
     return False
 
 
+#: Extractions this gateway is running right now, per ``(user, link)``. The
+#: probe's retry button is not single-use, and a lookup that is still running
+#: *is* the retry: a spammed button must never stack parallel extractions of the
+#: same link. Released the moment the lookup answers, so a later tap re-extracts
+#: for real.
+_probes_running: set[tuple[int, str]] = set()
+
+
 def _sized_quality_rows(
     options: Sequence[VideoOption], lang: str
 ) -> list[tuple[str, str]]:
@@ -1482,9 +1490,18 @@ async def on_probe_retry(
         await state.clear()
         return
     await cb.answer()
-    await _ask_about_link(
-        message, state, user, str(url), lang, bot=bot, pool=pool, queue=queue, edit=True
-    )
+    running = (int(user["telegram_id"]), str(url))
+    if running in _probes_running:
+        # The fresh lookup is already in the air — a spammed retry is answered
+        # and dropped, never a second concurrent extraction of the same link.
+        return
+    _probes_running.add(running)
+    try:
+        await _ask_about_link(
+            message, state, user, str(url), lang, bot=bot, pool=pool, queue=queue, edit=True
+        )
+    finally:
+        _probes_running.discard(running)
 
 
 @router.callback_query(DownloadStates.waiting_format, F.data.startswith(FMT_PREFIX))
@@ -1600,8 +1617,12 @@ async def on_retry(
 
     What to re-run lives behind the button's key *server-side* (``core.ui``), and
     only the user whose job it was may press it: a crafted key can name somebody
-    else's failure at most, and it comes back empty-handed. The retry re-enters
-    the ordinary path — cache, quota and preflight all get their say again.
+    else's failure at most, and it comes back empty-handed. A key is spent once,
+    so a spammed button queues nothing — and the double-tap guard inside
+    ``_submit`` drops a second key's press for the same request while the first
+    is still running. The retry re-enters the ordinary path — cache, quota and
+    preflight all get their say again — but only *after* the failed run's stale
+    state has been dropped (see below).
     """
     payload = take_retry((cb.data or "")[len(RETRY_PREFIX) :], owner=user["telegram_id"])
     if payload is None:
@@ -1615,6 +1636,15 @@ async def on_retry(
     if message is None:
         await cb.answer(t("intake.stale", lang), show_alert=True)
         return
+    # A retry is a *fresh* extraction, never a replay of the failure it is
+    # retrying away from. Two stale things must not answer it first: the
+    # request's cache row (a replay would "succeed" without extracting
+    # anything) and the remembered "anonymous requests are refused here"
+    # verdict — exactly the cached failure state this button exists to shake
+    # off. The worker records the verdict again if the refusal is still real
+    # (see services/worker.py).
+    await cache_service.forget(pool, task.url, task.media_format, task.quality)
+    preflight.clear_anonymous_refusal()
     await _submit(
         bot,
         message,

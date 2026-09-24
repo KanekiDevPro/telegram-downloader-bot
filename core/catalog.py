@@ -758,6 +758,115 @@ MESSAGES: Final[Catalog] = {
     },
     "admin.btn_system": {"en": "🖥 System", "fa": "🖥 سیستم"},
     "admin.btn_settings": {"en": "⚙️ Settings", "fa": "⚙️ تنظیمات"},
+    # Backup & restore — the System submenu's owner-only pair. What may travel
+    # in the file is services/backup.py's decision, and says so in the caption.
+    "admin.btn_backup": {"en": "💾 Backup", "fa": "💾 پشتیبان"},
+    "admin.btn_restore": {"en": "📤 Restore", "fa": "📤 بازگردانی"},
+    "admin.owner_only": {
+        "en": "Owner only — this action is for the bot owner.",
+        "fa": "فقط مالک — این کار فقط برای مالک ربات است.",
+    },
+    "admin.backup_caption": {
+        "en": (
+            "💾 Backup — custom texts and settings. Tokens, credentials and "
+            "runtime caches are deliberately not in this file."
+        ),
+        "fa": (
+            "💾 پشتیبان — متن‌های سفارشی و تنظیمات. توکن‌ها، اطلاعات ورود و "
+            "کش‌های اجرایی عمداً در این فایل نیستند."
+        ),
+    },
+    "admin.restore_prompt": {
+        "en": "Send the backup file (JSON, up to 1 MB).",
+        "fa": "فایل پشتیبان را بفرستید (JSON، حداکثر ۱ مگابایت).",
+    },
+    "admin.restore_invalid": {
+        "en": "This file cannot be restored ({reason}). Send another file, or cancel.",
+        "fa": "این فایل بازگردانی نمی‌شود ({reason}). فایل دیگری بفرستید یا لغو کنید.",
+    },
+    "admin.restore_preview": {
+        "en": (
+            "📤 Restore preview\n"
+            "\n"
+            "📝 Custom texts: <b>{texts}</b>\n"
+            "⚙️ Settings: <b>{settings}</b>\n"
+            "🕓 Created: <code>{created}</code>\n"
+            "\n"
+            "Applying replaces the current texts and settings with this "
+            "file's. An emergency backup of the current state is sent first."
+        ),
+        "fa": (
+            "📤 پیش‌نمایش بازگردانی\n"
+            "\n"
+            "📝 متن‌های سفارشی: <b>{texts}</b>\n"
+            "⚙️ تنظیمات: <b>{settings}</b>\n"
+            "🕓 ساخته‌شده: <code>{created}</code>\n"
+            "\n"
+            "با ادامه، متن‌ها و تنظیمات فعلی با محتوای این فایل جایگزین می‌شود. "
+            "پیش از اجرا، یک پشتیبان اضطراری از وضعیت فعلی فرستاده خواهد شد."
+        ),
+    },
+    "admin.restore_confirm_btn": {"en": "✅ Restore now", "fa": "✅ بازگردانی"},
+    "admin.restore_cancel_btn": {"en": "❌ Cancel", "fa": "❌ لغو"},
+    "admin.restore_emergency_caption": {
+        "en": (
+            "⚠️ Emergency backup — the state before the restore. Keep it: "
+            "with it, the restore can be undone."
+        ),
+        "fa": (
+            "⚠️ پشتیبان اضطراری — وضعیت پیش از بازگردانی. نگهش دارید: با آن "
+            "می‌توان بازگردانی را برگرداند."
+        ),
+    },
+    "admin.restore_done": {
+        "en": (
+            "✅ Restored <b>{texts}</b> custom text(s) and <b>{settings}</b> "
+            "setting(s). Every process speaks the new texts now."
+        ),
+        "fa": (
+            "✅ بازگردانی انجام شد: <b>{texts}</b> متن سفارشی و <b>{settings}</b> "
+            "تنظیم. همهٔ فرایندها همین حالا متن‌های جدید را می‌خوانند."
+        ),
+    },
+    "admin.restore_failed": {
+        "en": "The restore failed and was rolled back — nothing changed.\n<code>{detail}</code>",
+        "fa": "بازگردانی ناموفق بود و برگشت داده شد — چیزی تغییر نکرد.\n<code>{detail}</code>",
+    },
+    "admin.restore_aborted": {
+        "en": (
+            "The restore was stopped before applying — nothing changed.\n"
+            "<code>{detail}</code>"
+        ),
+        "fa": (
+            "بازگردانی پیش از اجرا متوقف شد — چیزی تغییر نکرد.\n"
+            "<code>{detail}</code>"
+        ),
+    },
+    "admin.restore_sync_failed": {
+        "en": (
+            "✅ The restore was applied and committed.\n"
+            "⚠️ Refreshing the text cache failed — some processes may show "
+            "old texts until they reload. Nothing was rolled back.\n"
+            "<code>{detail}</code>"
+        ),
+        "fa": (
+            "✅ بازگردانی اعمال و ثبت شد.\n"
+            "⚠️ تازه‌سازی کش متن ناموفق بود — ممکن است بعضی فرایندها تا بارگذاری "
+            "دوباره متن‌های قدیمی را نشان دهند. هیچ چیزی برگشت داده نشد.\n"
+            "<code>{detail}</code>"
+        ),
+    },
+    "admin.restore_expired": {
+        "en": (
+            "This confirmation is no longer valid (used, expired, or not "
+            "yours) — start the restore again."
+        ),
+        "fa": (
+            "این تأیید دیگر معتبر نیست (استفاده‌شده، منقضی یا متعلق به شما نیست) "
+            "— بازگردانی را دوباره آغاز کنید."
+        ),
+    },
+    "admin.restore_cancelled": {"en": "Restore cancelled.", "fa": "بازگردانی لغو شد."},
     # The panel's category submenus — the hub lists these six, one screen deep
     # from each (see handlers/admin.py).
     "admin.cat_users": {"en": "👥 Users and groups", "fa": "👥 کاربران و گروه‌ها"},

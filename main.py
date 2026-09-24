@@ -11,6 +11,7 @@ import logging
 import signal
 from collections.abc import Iterable
 from contextlib import suppress
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import redis.asyncio as aioredis
@@ -27,10 +28,8 @@ from core.config import CLOUD_API_UPLOAD_LIMIT_MB, Settings, get_settings, probe
 from core.database import create_pool, init_db, text_overrides
 from core.logging import setup_logging
 from core.telegram_api import build_session, session_target
+from handlers import ROUTERS
 from handlers.admin import publish_commands
-from handlers.admin import router as admin_router
-from handlers.payment import router as payment_router
-from handlers.user import router as user_router
 from middlewares.user_middleware import UserMiddleware
 from services import cobalt_cookies, delivery, proxy_health
 from services.cobalt import CobaltService
@@ -242,11 +241,15 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
     dp["queue"] = create_queue(settings, redis_client)
     dp["payment_service"] = build_payment_service(pool)
 
+    # ``ROUTERS`` is dispatch order, most specific first (handlers.ROUTERS): an
+    # admin's broadcast draft is a message in an FSM state and must reach the
+    # handler that asked for that state *before* the user router's text wildcard
+    # answers it with the generic "another step is in progress" fallback.
     middleware = UserMiddleware()
-    for r in (user_router, payment_router, admin_router):
+    for r in ROUTERS:
         r.message.middleware(middleware)
         r.callback_query.middleware(middleware)
-    dp.include_routers(user_router, payment_router, admin_router)
+    dp.include_routers(*ROUTERS)
 
     pot_provider = await resolve_pot_provider(settings)
     # Asked here, before the workers exist: the answer decides whether *anything*
@@ -274,6 +277,12 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
     )
     # The admin /doctor command reads the extractor straight from the dispatcher.
     dp["extractor"] = extractor
+    # The intake probe reaches the same extractor the workers use — through the
+    # bot itself, which is what the retry taps consult (``bot.state.extractor``,
+    # the accessor ``handlers.user._probe_meta`` reads). Without it the probe
+    # cannot run at all: "try again" re-shows the same failure instantly without
+    # extracting anything (the cached failure state a retry exists to escape).
+    setattr(bot, "state", SimpleNamespace(extractor=extractor))
 
     # The interactive OAuth2 device flow (``/oauth``): one login at a time, its
     # child process sharing the tunnel the extractor uses so the token exchange
