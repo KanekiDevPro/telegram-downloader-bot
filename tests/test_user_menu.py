@@ -16,6 +16,7 @@ side has its own cases in ``tests/test_i18n.py``.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -40,6 +41,7 @@ from handlers.user import DownloadStates
 from services import content as content_module
 from services import subscription as subscription_module
 from services.extractor import MediaInfo, VideoOption
+from services.queue import MemoryTaskQueue
 
 USER_ID = 4242
 FA = "fa"
@@ -2206,3 +2208,167 @@ async def test_the_full_menu_button_runs_the_real_probe(
     )
 
     assert probe.calls == ["https://youtu.be/abc"], "the re-check really re-extracts"
+
+
+# ---------------------------------------------------------------------------
+# Zero-wait for the auto-best path (solo links)
+# ---------------------------------------------------------------------------
+
+#: A photo post: one possible answer — "send its media" — so the link is never
+#: asked about anything. The auto-best path.
+SOLO_URL = "https://pbs.twimg.com/media/ABC?format=jpg&name=large"
+
+
+async def _solo_link_arrives(bot: RecordingBot, queue: Any) -> None:
+    """One solo link through the real intake path — queue and all."""
+    await user_module._queue_url_flow(
+        _message(SOLO_URL, bot),
+        _fresh_state(),
+        _user(),
+        SOLO_URL,
+        FA,
+        bot=cast(Bot, bot),
+        pool=object(),
+        queue=queue,
+    )
+
+
+def _replay_recorder(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """``send_cached_file`` that records instead of sending."""
+    sent: list[Any] = []
+
+    async def replay(
+        bot: Any, chat_id: int, cached: Any, caption: str | None = None, **kwargs: Any
+    ) -> bool:
+        sent.append(cached)
+        return True
+
+    monkeypatch.setattr(user_module, "send_cached_file", replay)
+    return sent
+
+
+async def no_cached_row(pool: Any, url: str, *args: Any) -> None:
+    return None
+
+
+async def no_cached_rows(pool: Any, url: str) -> list[Any]:
+    return []
+
+
+async def test_a_solo_link_replays_what_it_already_produced_instead_of_downloading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero-wait for the auto-best path: a solo link has no tier to pick, so a
+    stored sibling answers it here and now — no probe, no queue, no wait."""
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cached_row)
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
+    sent = _replay_recorder(monkeypatch)
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    queue = _fake_queue()
+
+    await _solo_link_arrives(bot, queue)
+
+    assert [row["telegram_file_id"] for row in sent] == ["v-1"], "the newest stored row, at once"
+    assert queue.tasks == [], "the heavy queue is never touched"
+
+
+async def test_a_dead_cached_row_is_dropped_and_the_solo_link_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file_id Telegram no longer honours must not strand the request: the dead
+    rows leave the cache and the link downloads for real."""
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cached_row)
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
+    forgotten: list[tuple[str, str]] = []
+
+    async def forget(pool: Any, url: str, media_format: str, quality: object) -> None:
+        forgotten.append((media_format, str(quality)))
+
+    async def dead(
+        bot: Any, chat_id: int, cached: Any, caption: str | None = None, **kwargs: Any
+    ) -> bool:
+        return False
+
+    monkeypatch.setattr(user_module.cache_service, "forget", forget)
+    monkeypatch.setattr(user_module, "send_cached_file", dead)
+    bot = RecordingBot()
+    queue = _fake_queue()
+
+    await _solo_link_arrives(bot, queue)
+
+    assert forgotten == [("video", "720"), ("video", "best")], "every dead row of the family"
+    assert len(queue.tasks) == 1, "and the download runs"
+
+
+# ---------------------------------------------------------------------------
+# Strict single-flight: one request, one download, one delivery
+# ---------------------------------------------------------------------------
+
+
+async def test_the_same_link_while_it_downloads_is_never_queued_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The duplicate-delivery bug, pinned. A link re-sent while its job is still
+    in flight must never start a second job — and the lock lives in the queue,
+    so it survives the job *leaving* it (the worker between dequeue and
+    delivery). Only once the job settles may the request run again."""
+
+    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", no_cached_rows)
+    queue = MemoryTaskQueue()
+    bot = RecordingBot()
+
+    await _solo_link_arrives(bot, queue)
+    assert await queue.depth() == 1, "the first ask queues one job"
+
+    user_module._recent_requests.clear()  # past the double-tap window
+    await _solo_link_arrives(bot, queue)
+    assert await queue.depth() == 1, "the same request is refused while it flies"
+
+    job = await queue.dequeue()
+    assert job is not None
+    user_module._recent_requests.clear()
+    await _solo_link_arrives(bot, queue)
+    assert await queue.depth() == 0, "in flight means in flight — even out of the queue"
+
+    await queue.release(job)
+    user_module._recent_requests.clear()
+    await _solo_link_arrives(bot, queue)
+    assert await queue.depth() == 1, "settled — the request may run again"
+
+
+async def test_rapid_taps_on_a_cached_menu_deliver_the_file_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cached button hammered with taps sends the file once: the taps arrive
+    concurrently and the guard is decided before the first await."""
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
+
+    async def hit(pool: Any, url: str, media_format: str, quality: object) -> Any:
+        return {"telegram_file_id": "v-1", "kind": "video", "quality": "video:720"}
+
+    monkeypatch.setattr(user_module.cache_service, "get_cached", hit)
+    sent = _replay_recorder(monkeypatch)
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    state = _fresh_state()
+    queue = _fake_queue()
+    await user_module.on_text_with_url(
+        _message("https://youtu.be/abc", bot), state, _user(), object(), queue, bot, lang=FA
+    )
+
+    await asyncio.gather(
+        *(
+            user_module.on_format_chosen(
+                _callback(bot, "fmt:video:720"), state, _user(), object(), queue, bot, lang=FA
+            )
+            for _ in range(3)
+        )
+    )
+
+    assert len(sent) == 1, "three taps, one delivery"
+    assert queue.tasks == []

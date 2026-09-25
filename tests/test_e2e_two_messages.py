@@ -203,6 +203,9 @@ class _Queue:
     async def requeue(self, task: DownloadTask) -> None:
         return None
 
+    async def release(self, task: DownloadTask) -> None:
+        return None
+
 
 class _NeverStopping:
     def is_set(self) -> bool:

@@ -23,10 +23,23 @@ from services.queue import (
 
 
 class FakeRedis:
-    """Just enough Redis for the queue: a list with LPUSH/BRPOP/RPUSH/LLEN."""
+    """Just enough Redis for the queue: a list (LPUSH/BRPOP/RPUSH/LLEN) and the
+    key/value pair the single-flight claim rides on (SET NX / DELETE)."""
 
     def __init__(self) -> None:
         self.items: list[str] = []
+        self.kv: dict[str, str] = {}
+
+    async def set(
+        self, name: str, value: str, nx: bool = False, ex: int | None = None
+    ) -> str | None:
+        if nx and name in self.kv:
+            return None
+        self.kv[name] = value
+        return "OK"
+
+    async def delete(self, name: str) -> int:
+        return 1 if self.kv.pop(name, None) is not None else 0
 
     async def lpush(self, _name: str, value: str) -> int:
         self.items.insert(0, value)
@@ -51,7 +64,9 @@ def _task(url: str = "https://youtu.be/abc", media_format: MediaFormat = "video"
         telegram_id=424242,
         chat_id=424242,
         media_format=media_format,
-        url_hash="a" * 64,
+        # A stand-in for the real sha256 cache key — distinct per URL, so two
+        # different links are two different jobs to the single-flight lock.
+        url_hash=f"hash-of:{url}",
     )
 
 
@@ -148,3 +163,53 @@ def test_create_queue_uses_redis_when_available(monkeypatch: pytest.MonkeyPatch)
         assert isinstance(queue, RedisTaskQueue)
     finally:
         get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Single-flight: one job, one task — no matter how often it is asked for
+# ---------------------------------------------------------------------------
+
+
+async def test_one_job_is_one_task_while_it_is_in_flight() -> None:
+    """The duplicate-delivery bug, cut at its root: the same job is refused
+    while it flies and only a *settled* job may run again."""
+    queue = MemoryTaskQueue()
+    task = _task()
+    assert await queue.enqueue(task) == 1
+    assert await queue.enqueue(_task()) == -1, "the same job is already flying"
+    assert await queue.depth() == 1
+    await queue.release(task)
+    assert await queue.enqueue(_task()) == 2, "settled — the request may run again"
+
+
+async def test_other_requests_and_other_users_are_other_jobs() -> None:
+    """Single-flight is per user and per request — it never blocks a different
+    ask, and never blocks another person's copy of the same file."""
+    queue = MemoryTaskQueue()
+    await queue.enqueue(_task())
+    assert await queue.enqueue(_task(media_format="audio")) == 2
+    other_user = DownloadTask(
+        url="https://youtu.be/abc", telegram_id=1, chat_id=1, url_hash="hash-of:other"
+    )
+    assert await queue.enqueue(other_user) == 3
+
+
+async def test_the_claim_is_shared_between_queue_clients() -> None:
+    """The claim is ``SET NX`` — the lock every process sees, so a second gateway
+    (or a second worker) refuses the very same job."""
+    fake = FakeRedis()
+    first, second = RedisTaskQueue(fake, "test:queue"), RedisTaskQueue(fake, "test:queue")
+    task = _task()
+    assert await first.enqueue(task) == 1
+    assert await second.enqueue(_task()) == -1
+    await first.release(task)
+    assert await second.enqueue(_task()) == 2
+
+
+def test_a_claim_nobody_released_expires() -> None:
+    """A worker that died mid-download must not lock the request forever — the
+    TTL is the safety net every claim bottoms out at."""
+    claims = queue_module._JobClaims()
+    assert claims.try_claim("job", ttl=10.0, now=100.0)
+    assert not claims.try_claim("job", ttl=10.0, now=105.0), "held — refused"
+    assert claims.try_claim("job", ttl=10.0, now=110.0), "expired — the net worked"

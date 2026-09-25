@@ -1100,6 +1100,9 @@ async def _queue_url_flow(
             routing.solo.quality,
             lang,
             tap=None,
+            # The auto-best path never asked for a tier, so anything this URL has
+            # already produced answers it — the zero-wait rule for solo links.
+            fallback_any_tier=True,
         )
         return True
     await _ask_about_link(
@@ -1929,6 +1932,7 @@ async def _submit(
     size_hint: tuple[int, bool] | None = None,
     is_live: bool | None = None,
     size_estimate: int | None = None,
+    fallback_any_tier: bool = False,
 ) -> None:
     """Tap → wait → the file: cache → quota → preflight → queue, on one card.
 
@@ -1998,6 +2002,22 @@ async def _submit(
         # dead file_id → drop it and fall through to a real download
         await cache_service.forget(pool, url, media_format, quality)
 
+    # 2b) Zero-wait for the auto-best path (solo links): the request has no tier
+    #     the user chose, so a stored sibling of the same media family answers it
+    #     — "send this post's media" never re-downloads what this URL already
+    #     produced just because the earlier ask named a tier. An explicit tap
+    #     stays tier-honest (step 2's exact key is all it gets); this wider net is
+    #     only for the request where the engine picks and the caption names what
+    #     actually arrived. Dead rows are forgotten and the next one tried.
+    if fallback_any_tier:
+        for row in await _cached_rows(pool, url):
+            row_format, row_tier = _request_parts(str(row["quality"] or ""))
+            if row_format != media_format:
+                continue
+            if await send_cached_file(bot, chat_id, row, caption=replay_caption(row, lang)):
+                return
+            await cache_service.forget(pool, url, row_format, row_tier)
+
     # 3) Soft daily-quota check (the worker claims the slot atomically).
     usage = await database.get_daily_usage(pool, user["telegram_id"])
     used = usage["daily_downloads"] if usage and usage["last_download_date"] == today_local() else 0
@@ -2035,7 +2055,12 @@ async def _submit(
 
     # 5) Push to the queue — and say nothing: the card already did. The file
     #    arrives as its own message; warnings and receipts are the chat's noise.
-    await queue.enqueue(task)
+    #    The queue is single-flight: the same job already in the air (a second
+    #    tap on the same request, the same link sent again mid-download) comes
+    #    back as -1 and this trigger is dropped — one request, one download, one
+    #    delivery, no matter how many times or how concurrently it is asked for.
+    if await queue.enqueue(task) < 0:
+        return
 
 
 def _parse_format(data: str | None) -> tuple[str, str]:

@@ -141,6 +141,9 @@ async def run_worker(
             await _process_with_retry(task, bot, pool, queue, extractor, stop_event, cobalt)
         except Exception:
             logger.exception("worker %s: unexpected failure while processing %s", index, task.url)
+            # The job is dead in the water and will never settle itself — free
+            # its claim now, or the request stays locked until the TTL.
+            await _settle(queue, task)
     logger.info("worker %s stopped", index)
 
 
@@ -151,6 +154,21 @@ async def _sleep_until(stop_event: asyncio.Event, seconds: float) -> bool:
         return True
     except asyncio.TimeoutError:
         return False
+
+
+async def _settle(queue: TaskQueue, task: DownloadTask) -> None:
+    """The job is truly done — hand its single-flight claim back.
+
+    Runs on every settled outcome (delivered, replayed, finally failed) and on
+    none of the requeue paths: a job handed back to the queue is still one job
+    and keeps its claim. Never raises — a settled job must not be re-run because
+    a lock release hiccuped, so a failure here is logged and absorbed (the
+    claim's TTL is the net; see ``services/queue``).
+    """
+    try:
+        await queue.release(task)
+    except Exception:
+        logger.exception("could not settle the job claim for %s", task.url)
 
 
 async def _requeue_for_shutdown(queue: TaskQueue, task: DownloadTask) -> None:
@@ -192,6 +210,7 @@ async def _process_with_retry(
                 # An anonymous YouTube download just worked, so "YouTube refuses
                 # anonymous requests here" is no longer true — stop acting on it.
                 preflight.clear_anonymous_refusal()
+            await _settle(queue, task)
             return
         except ExtractionError as exc:
             # The *user's* text is chosen by code, in their language (see
@@ -245,10 +264,12 @@ async def _process_with_retry(
         await cookie_refresh.auto_refresh_jar(
             settings, extractor, bot, settings.admin_ids, pool=pool
         )
+        await _settle(queue, task)
         return
     await _notify_failure(
         bot, task, last_error or t("work.unexpected", lang), status=status, card=card
     )
+    await _settle(queue, task)
 
 
 async def _notify_failure(

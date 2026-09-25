@@ -57,6 +57,13 @@ def test_the_image_ships_the_downloader_the_options_name() -> None:
     assert "aria2" in dockerfile, "the opts name aria2c; the image must carry it"
 
 
+def test_segmented_sources_fetch_eight_fragments_at_a_time() -> None:
+    """YouTube hands yt-dlp DASH/HLS — fragmented streams that never reach an
+    external downloader. Their speed-up is parallel fragment fetching."""
+    opts = _extractor()._base_opts(extract_only=True)
+    assert opts["concurrent_fragment_downloads"] == 8
+
+
 def test_proxy_is_passed_to_yt_dlp_only_when_set() -> None:
     plain = _extractor()._base_opts(extract_only=True)
     assert "proxy" not in plain

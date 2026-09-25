@@ -1730,10 +1730,12 @@ class ExtractorService:
             "socket_timeout": 15,
             "retries": 3,
             "fragment_retries": 3,
-            # Segmented sources (HLS/DASH) fetch their fragments in parallel —
-            # the one concurrency that is per-source and bounded. Plain files are
-            # unaffected.
-            "concurrent_fragment_downloads": 4,
+            # Segmented sources (HLS/DASH — exactly how YouTube serves video)
+            # fetch their fragments in parallel: eight at once, the one
+            # concurrency that is per-source and bounded. This is the speed-up
+            # that reaches YouTube, which never hands a stream to an external
+            # downloader at all. Plain files are unaffected.
+            "concurrent_fragment_downloads": 8,
             "format": format_selector(media_format, quality),
             "merge_output_format": MERGE_OUTPUT_FORMAT,
             # Resolution first, then HEVC on ties — see :data:`FORMAT_SORT`.

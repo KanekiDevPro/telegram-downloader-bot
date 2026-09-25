@@ -1017,6 +1017,9 @@ class _Queue:
     async def requeue(self, task: DownloadTask) -> None:
         return None
 
+    async def release(self, task: DownloadTask) -> None:
+        return None
+
 
 # ---------------------------------------------------------------------------
 # The pieces the worker relies on
