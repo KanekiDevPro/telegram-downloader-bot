@@ -21,7 +21,15 @@ import asyncpg
 from core import database
 from core.utils import canonical_url, quality_key, sha256_hex
 
-__all__ = ["cache_key", "forget", "get_cached", "memorize", "request_key"]
+__all__ = [
+    "cache_key",
+    "forget",
+    "get_cached",
+    "get_cached_rows",
+    "memorize",
+    "request_key",
+    "url_key",
+]
 
 
 def request_key(media_format: str = "video", quality: object = "") -> str:
@@ -29,9 +37,30 @@ def request_key(media_format: str = "video", quality: object = "") -> str:
     return quality_key(media_format, quality)
 
 
+def url_key(url: str) -> str:
+    """The key that names a *URL* across every request it has ever served.
+
+    The per-request key (:func:`cache_key`) folds the request in and cannot
+    answer "what has this link produced?" — the question the intake asks before
+    spending an extraction on a link the cache already knows.
+    """
+    return sha256_hex(canonical_url(url))
+
+
 def cache_key(url: str, media_format: str = "video", quality: object = "") -> str:
     """Stable cache key for ``url`` + the requested format and quality tier."""
     return sha256_hex(f"{canonical_url(url)}|{request_key(media_format, quality)}")
+
+
+async def get_cached_rows(pool: asyncpg.Pool, url: str) -> list[asyncpg.Record]:
+    """Every request this URL has already produced — the zero-wait menu's material.
+
+    What the *intake* asks before any extraction: a link whose answers are
+    already stored needs no metadata probe to be asked about again. Rows written
+    before the URL key existed are simply not found here, and the ordinary probe
+    path runs instead.
+    """
+    return await database.get_cached_files_for_url(pool, url_key(url))
 
 
 async def get_cached(
@@ -73,6 +102,7 @@ async def memorize(
         kind=kind,
         title=title,
         label=label,
+        url_key=url_key(url),
     )
 
 

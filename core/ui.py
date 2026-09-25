@@ -18,7 +18,9 @@ old or unchanged, and the two refusals deserve different answers: a message that
 cannot be edited at all gets a fresh reply (a menu that fails silently is worse
 than one extra message), while "message is not modified" means the screen the
 user asked for is *already up* — re-sending it would be the duplicate-message
-spam the one-message UI exists to avoid, so nothing is sent.
+spam the one-message UI exists to avoid, so nothing is sent. A media message is
+the same story one step earlier: it can never become a text message, so the edit
+lands on its *caption* and the message — photo and all — stays one message.
 """
 
 from __future__ import annotations
@@ -57,15 +59,43 @@ def callback_message(cb: CallbackQuery) -> Message | None:
     return message if isinstance(message, Message) else None
 
 
+def _is_media(message: Message) -> bool:
+    """A message that carries media — one ``edit_text`` can never rewrite.
+
+    Telegram has no edit that turns a media message into a text message: the
+    only in-place rewrite a photo or a document accepts is its *caption*.
+    """
+    return bool(message.photo or message.document)
+
+
+def _caption_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """What a caption edit may carry — link previews live under text, not captions."""
+    return {
+        key: value
+        for key, value in kwargs.items()
+        if key not in ("link_preview_options", "disable_web_page_preview")
+    }
+
+
+async def _rewrite(message: Message, text: str, **kwargs: Any) -> None:
+    """The one edit: a text message gets ``edit_text``, a media one its caption."""
+    if _is_media(message):
+        await message.edit_caption(caption=text, **_caption_kwargs(kwargs))
+    else:
+        await message.edit_text(text, **kwargs)
+
+
 async def edit_or_reply(message: Message, text: str, **kwargs: Any) -> None:
     """Update a message in place; one that cannot be edited gets a fresh reply.
 
-    Identical content is answered with silence: the requested screen is already
-    on the screen, and a second copy of it is precisely the message pile this
-    module exists to prevent.
+    A media message is rewritten as its *caption*: Telegram cannot turn a photo
+    into a text message, and answering with a second message instead is exactly
+    the pile this module exists to prevent. Identical content is answered with
+    silence: the requested screen is already on the screen, and a second copy of
+    it is precisely the message pile this module exists to prevent.
     """
     try:
-        await message.edit_text(text, **kwargs)
+        await _rewrite(message, text, **kwargs)
     except TelegramBadRequest as exc:
         if "message is not modified" in str(exc):
             return
@@ -88,7 +118,7 @@ async def edit_quietly(message: Message, text: str, **kwargs: Any) -> None:
     anyone over, and a fallback reply here would bury the flow under noise.
     """
     try:
-        await message.edit_text(text, **kwargs)
+        await _rewrite(message, text, **kwargs)
     except TelegramBadRequest:
         pass
 

@@ -292,6 +292,9 @@ MESSAGES: Final[Catalog] = {
         ),
     },
     "intake.probe_retry_btn": {"en": "🔁 Try again", "fa": "🔁 تلاش دوباره"},
+    # The instant menu's one door to the full probed ladder: the rows this link
+    # has already produced lead the screen, and this re-checks the link itself.
+    "intake.full_menu_btn": {"en": "🔎 All qualities", "fa": "🔎 همه کیفیت‌ها"},
     "intake.probe_still": {
         "en": "❌ Still no qualities to show — try again in a moment.",
         "fa": "❌ باز هم کیفیتی برای نمایش پیدا نشد — کمی بعد دوباره تلاش کن.",

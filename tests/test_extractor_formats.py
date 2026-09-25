@@ -40,6 +40,23 @@ def _extractor(**kwargs: object) -> ExtractorService:
     return ExtractorService(BASE_DIR / "downloads", **kwargs)  # type: ignore[arg-type]
 
 
+def test_aria2c_is_the_external_downloader_with_the_measured_args() -> None:
+    """Eight connections per plain-file download, in the one spelling the
+    installed yt-dlp reads: its argument lookup tries the downloader's own key
+    and then ``default`` (``cli_configuration_args``), and a host without the
+    binary is detected and keeps yt-dlp's own downloader (``can_download``)."""
+    opts = _extractor()._base_opts(extract_only=True)
+    assert opts["external_downloader"] == "aria2c"
+    assert opts["external_downloader_args"] == {
+        "default": ["-c", "-j", "8", "-x", "8", "-s", "8", "-k", "1M"],
+    }
+
+
+def test_the_image_ships_the_downloader_the_options_name() -> None:
+    dockerfile = (BASE_DIR / "Dockerfile").read_text(encoding="utf-8")
+    assert "aria2" in dockerfile, "the opts name aria2c; the image must carry it"
+
+
 def test_proxy_is_passed_to_yt_dlp_only_when_set() -> None:
     plain = _extractor()._base_opts(extract_only=True)
     assert "proxy" not in plain

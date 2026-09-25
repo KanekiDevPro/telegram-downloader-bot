@@ -12,7 +12,7 @@ from typing import Any, Optional
 import asyncpg
 
 from core.config import get_settings
-from core.utils import utcnow
+from core.utils import canonical_url, sha256_hex, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,16 @@ ALTER TABLE smart_cache ADD COLUMN IF NOT EXISTS title TEXT;
 -- Nullable like the two above: a row from before this column existed falls back
 -- to describing its request.
 ALTER TABLE smart_cache ADD COLUMN IF NOT EXISTS label TEXT;
+
+-- The key that names a *URL* across every request it has ever served: sha256 of
+-- its canonical form. The intake fast path asks "what has this link already
+-- produced?" by this column — ``url_hash`` folds the request in too, so it
+-- cannot answer that question. Nullable like the columns above: a row written
+-- before it existed simply misses the fast path (and still replays at the tap)
+-- until ``init_db`` backfills it in one pass.
+ALTER TABLE smart_cache ADD COLUMN IF NOT EXISTS url_key CHAR(64);
+
+CREATE INDEX IF NOT EXISTS ix_smart_cache_url_key ON smart_cache (url_key);
 
 -- Every failed download, with the cause we diagnosed. A block has a small set of
 -- meanings (our login, the IP, the site itself, a stale session) and only the
@@ -233,6 +243,24 @@ async def init_db(pool: asyncpg.Pool) -> None:
         await pool.executemany(
             "INSERT INTO subscription_plans (name, duration_days, price) VALUES ($1, $2, $3)",
             [(p["name"], p["duration_days"], p["price"]) for p in SEED_PLANS],
+        )
+    await _backfill_url_keys(pool)
+
+
+async def _backfill_url_keys(pool: asyncpg.Pool) -> None:
+    """Give rows from before ``url_key`` existed their URL key — one pass, once.
+
+    The intake fast path finds a URL's stored requests by that column; rows
+    written before it would otherwise stay invisible until re-downloaded. The
+    value is a pure function of the row's own URL, so recomputing can never hurt
+    a row — and the WHERE makes a second run do nothing at all.
+    """
+    rows = await pool.fetch("SELECT url_hash, original_url FROM smart_cache WHERE url_key IS NULL")
+    for row in rows:
+        await pool.execute(
+            "UPDATE smart_cache SET url_key = $2 WHERE url_hash = $1",
+            row["url_hash"],
+            sha256_hex(canonical_url(row["original_url"])),
         )
 
 
@@ -493,16 +521,18 @@ async def store_cached_file(
     kind: str = "",
     title: str = "",
     label: str = "",
+    url_key: str = "",
 ) -> None:
     """Remember an upload. ``quality`` is the requested format (part of the key);
     ``kind`` is how to send it again (``photo_group``, ``audio``, …); ``title``
     is the media's own name and ``label`` the quality line the fresh caption
-    used, so the replay's card reads like the fresh send."""
+    used, so the replay's card reads like the fresh send. ``url_key`` names the
+    URL across requests — the intake fast path's lookup."""
     await pool.execute(
         """
         INSERT INTO smart_cache
-            (url_hash, original_url, platform, telegram_file_id, quality, kind, title, label)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (url_hash, original_url, platform, telegram_file_id, quality, kind, title, label, url_key)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (url_hash) DO NOTHING
         """,
         url_hash,
@@ -513,6 +543,16 @@ async def store_cached_file(
         kind or None,
         title or None,
         label or None,
+        url_key or None,
+    )
+
+
+async def get_cached_files_for_url(
+    pool: asyncpg.Pool, url_key: str
+) -> list[asyncpg.Record]:
+    """Every stored request for one URL, most recently produced first."""
+    return await pool.fetch(
+        "SELECT * FROM smart_cache WHERE url_key = $1 ORDER BY created_at DESC", url_key
     )
 
 

@@ -1739,6 +1739,20 @@ class ExtractorService:
             # Resolution first, then HEVC on ties — see :data:`FORMAT_SORT`.
             "format_sort": list(FORMAT_SORT),
         }
+        # aria2c fetches a plain file with eight connections at once (-s/-x), in
+        # 1 MB pieces (-k), resuming what is already on disk (-c) — the 600 MB
+        # case, which a single stream crawls through. Measured from the installed
+        # yt-dlp: an external downloader is only consulted where it *supports*
+        # the protocol (plain http/ftp — fragmented streams already parallelise
+        # above), the ``default`` key is the last key its argument lookup tries
+        # (so these args apply to aria2c and nothing else), and a host without
+        # the binary is detected (``ExternalFD.can_download`` → ``available()``)
+        # and quietly keeps yt-dlp's own downloader. The image ships aria2 (see
+        # the Dockerfile); a bare host may, and nothing breaks either way.
+        opts["external_downloader"] = "aria2c"
+        opts["external_downloader_args"] = {
+            "default": ["-c", "-j", "8", "-x", "8", "-s", "8", "-k", "1M"],
+        }
         if self.proxy:
             opts["proxy"] = self.proxy
         if self.js_runtimes:

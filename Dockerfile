@@ -11,8 +11,13 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 # ffmpeg is required for MP3 conversion and for merging video+audio streams.
+# aria2c is the external downloader yt-dlp drives for plain files: eight
+# connections per download instead of one, and `-c` resumes a partial file —
+# the difference between minutes and tens of minutes on a 600 MB fetch. Its
+# absence is never fatal: yt-dlp measures the binary first (ExternalFD.available)
+# and quietly keeps its own downloader where aria2c is not installed.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg aria2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=deno /deno /usr/local/bin/deno

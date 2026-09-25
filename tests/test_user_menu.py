@@ -23,10 +23,11 @@ from typing import Any, cast
 
 import pytest
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage, SendPhoto
+from aiogram.methods import AnswerCallbackQuery, DeleteMessage, EditMessageText, SendMessage, SendPhoto
 from aiogram.types import CallbackQuery, Chat, LinkPreviewOptions, Message, User
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -1923,3 +1924,285 @@ async def test_intake_text_never_grows_a_link_preview() -> None:
         and call.link_preview_options.is_disabled is True
         for call in sent
     ), "no intake text ever grows a preview"
+
+
+# ---------------------------------------------------------------------------
+# The raw link leaves the chat once the bot has answered it
+# ---------------------------------------------------------------------------
+
+
+class _NoDeleteBot(RecordingBot):
+    """A chat where the bot may not delete messages — no delete rights."""
+
+    async def __call__(self, method: Any) -> Any:
+        if isinstance(method, DeleteMessage):
+            raise TelegramBadRequest(method=method, message="Bad Request: not enough rights")
+        return await super().__call__(method)
+
+
+def _deletes(bot: RecordingBot) -> list[Any]:
+    return [call for call in bot.calls if isinstance(call, DeleteMessage)]
+
+
+async def _link_arrives(
+    bot: RecordingBot, monkeypatch: pytest.MonkeyPatch, text: str = "https://youtu.be/abc"
+) -> None:
+    """One link through the real intake handler, probe and all."""
+
+    async def supported(url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(user_module, "_probe_supported", supported)
+    bot.state = SimpleNamespace(extractor=_Probe(_clip(None)))
+
+    await user_module.on_text_with_url(
+        _message(text, bot), _fresh_state(), _user(), object(), _fake_queue(), bot, lang=FA
+    )
+
+
+async def test_the_raw_link_leaves_the_chat_once_the_menu_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Some unofficial clients draw their own download preview under every raw
+    link — clutter beside the menu that now speaks for it. The pasted URL goes
+    the moment the bot has answered it."""
+    bot = RecordingBot()
+
+    await _link_arrives(bot, monkeypatch)
+
+    assert isinstance(bot.calls[-1], DeleteMessage), "deleted only after the menu is out"
+    assert bot.calls[-1].message_id == 1, "the user's message — never the bot's own"
+    assert any(isinstance(call, (SendMessage, SendPhoto)) for call in bot.calls[:-1])
+
+
+async def test_a_chat_that_refuses_the_deletion_still_gets_the_whole_menu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bot without delete rights (a group where it is not an admin) — or a
+    message already gone — must never cost the user the menu. Deleting is a
+    courtesy; the answer is the product."""
+    bot = _NoDeleteBot()
+
+    await _link_arrives(bot, monkeypatch)
+
+    assert len(bot.texts) == 1, "the question arrived all the same"
+    assert bot.keyboards[-1] is not None, "with its menu"
+
+
+async def test_a_message_the_bot_never_answered_stays_in_the_chat() -> None:
+    """No link at all, a link-shaped string that is not a link, or another step
+    in progress: the message is the user's, and deleting it would be vandalism
+    dressed as tidiness."""
+    bot = RecordingBot()
+    busy = _fresh_state()
+    await busy.set_state("payment:waiting")
+
+    await user_module.on_text_with_url(
+        _message("hello there", bot), _fresh_state(), _user(), object(), _fake_queue(), bot, lang=FA
+    )
+    await user_module.on_text_with_url(
+        _message("https://?x=1", bot), _fresh_state(), _user(), object(), _fake_queue(), bot, lang=FA
+    )
+    await user_module.on_text_with_url(
+        _message("https://youtu.be/abc", bot), busy, _user(), object(), _fake_queue(), bot, lang=FA
+    )
+
+    assert _deletes(bot) == [], "nothing the bot did not answer is ever touched"
+    assert bot.texts == [
+        t("intake.no_link_found", FA),
+        t("intake.invalid_link", FA),
+        t("intake.step_in_progress", FA),
+    ]
+
+
+async def test_a_link_sent_through_download_goes_the_same_way(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/download <link>` carries the same raw link in a command's clothes — and
+    a `/download` with no link at all deletes nothing."""
+
+    async def supported(url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(user_module, "_probe_supported", supported)
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_Probe(_clip(None)))
+
+    await user_module.cmd_download(
+        _message("/download https://youtu.be/abc", bot),
+        cast(Any, SimpleNamespace(args="https://youtu.be/abc")),
+        _fresh_state(),
+        _user(),
+        object(),
+        _fake_queue(),
+        bot,
+        lang=FA,
+    )
+    assert isinstance(bot.calls[-1], DeleteMessage)
+
+    spare = RecordingBot()
+    await user_module.cmd_download(
+        _message("/download", spare),
+        cast(Any, SimpleNamespace(args="")),
+        _fresh_state(),
+        _user(),
+        object(),
+        _fake_queue(),
+        spare,
+        lang=FA,
+    )
+    assert _deletes(spare) == [], "no link, nothing to clean"
+
+
+# ---------------------------------------------------------------------------
+# Zero-wait intake: a cached link is asked about without extraction
+# ---------------------------------------------------------------------------
+
+
+class _RecordingProbe:
+    """A probe that records — used to prove whether extraction ran at all."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def extract(self, url: str) -> MediaInfo:
+        self.calls.append(url)
+        return _clip(None)
+
+
+def _stored_rows() -> list[dict[str, Any]]:
+    """What one link has already produced — the instant menu's whole material."""
+    return [
+        {
+            "quality": "video:720",
+            "label": "720p",
+            "title": "A Clip",
+            "kind": "video",
+            "telegram_file_id": "v-1",
+        },
+        {
+            "quality": "audio:mp3.best",
+            "label": "MP3 · 320 kbps",
+            "title": "A Clip",
+            "kind": "audio",
+            "telegram_file_id": "a-1",
+        },
+        {
+            "quality": "video",
+            "label": "1080p",
+            "title": "A Clip",
+            "kind": "video",
+            "telegram_file_id": "v-2",
+        },
+    ]
+
+
+async def _cached_rows_for(pool: Any, url: str) -> list[dict[str, Any]]:
+    return _stored_rows()
+
+
+async def test_a_cached_link_shows_the_instant_menu_without_extracting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero-wait intake: the rows this link already produced *are* the menu —
+    the extractor never runs, and every button is a request that replays at once."""
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
+    probe = _RecordingProbe()
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=probe)
+    state = _fresh_state()
+
+    await user_module.on_text_with_url(
+        _message("https://youtu.be/abc", bot), state, _user(), object(), _fake_queue(), bot, lang=FA
+    )
+
+    assert probe.calls == [], "the heavy extractor is never touched"
+    assert len(bot.texts) == 1, "one question — asked instantly"
+    assert dict(_buttons(bot.keyboards[-1])) == {
+        "720p": "fmt:video:720",
+        "MP3 · 320 kbps": "fmt:audio:mp3.best",
+        "1080p": "fmt:video:best",
+        t("intake.full_menu_btn", FA): user_module.PROBE_CALLBACK,
+        t("menu.back", FA): "menu:download",
+    }, "the rows' own requests, in the ordinary tap vocabulary"
+    data = await state.get_data()
+    assert data["offered"] == ["720", "best"]
+    assert data["audio_offered"] == ["mp3"], "a tap is judged by what the menu drew"
+
+
+def test_the_cached_menu_taps_speak_the_cache_key_language() -> None:
+    """A cached menu's button is the very request its row was stored under: the
+    tap folds back into exactly the cache key that will answer it."""
+    for request in (
+        "video",
+        "video:720",
+        "audio",
+        "audio:mp3.best",
+        "audio:wav",
+        "audio:m4a.high",
+    ):
+        media_format, tier = user_module._request_parts(request)
+        assert user_module._fmt_callback(media_format, tier) == f"fmt:{media_format}:{tier}"
+        assert user_module.cache_service.request_key(media_format, tier) == request
+
+
+async def test_a_tap_on_the_cached_menu_replays_instead_of_downloading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole zero-wait chain: instant menu → tap → the stored file, and the
+    heavy job never even reaches the queue."""
+    user_module._recent_requests.clear()
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
+
+    async def get_cached(pool: Any, url: str, media_format: str, quality: object) -> Any:
+        return {"telegram_file_id": "v-1", "kind": "video", "quality": "video:720"}
+
+    sent: list[Any] = []
+
+    async def replay(
+        bot: Any, chat_id: int, cached: Any, caption: str | None = None, **kwargs: Any
+    ) -> bool:
+        sent.append(cached)
+        return True
+
+    monkeypatch.setattr(user_module.cache_service, "get_cached", get_cached)
+    monkeypatch.setattr(user_module, "send_cached_file", replay)
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    state = _fresh_state()
+    queue = _fake_queue()
+    await user_module.on_text_with_url(
+        _message("https://youtu.be/abc", bot), state, _user(), object(), queue, bot, lang=FA
+    )
+
+    await user_module.on_format_chosen(
+        _callback(bot, "fmt:video:720"), state, _user(), object(), queue, bot, lang=FA
+    )
+
+    assert sent and sent[0]["telegram_file_id"] == "v-1", "the stored file is replayed"
+    assert queue.tasks == [], "and the heavy job never runs"
+
+
+async def test_the_full_menu_button_runs_the_real_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The instant menu's escape hatch: «All qualities» re-checks the link
+    itself — the full ladder wants extraction, and asks for it deliberately."""
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
+    probe = _RecordingProbe()
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=probe)
+    state = _fresh_state()
+    await state.update_data(url="https://youtu.be/abc")
+
+    await user_module.on_probe_retry(
+        _callback(bot, user_module.PROBE_CALLBACK),
+        state,
+        _user(),
+        object(),
+        _fake_queue(),
+        bot,
+        lang=FA,
+    )
+
+    assert probe.calls == ["https://youtu.be/abc"], "the re-check really re-extracts"

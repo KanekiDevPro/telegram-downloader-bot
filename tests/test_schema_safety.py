@@ -194,6 +194,9 @@ async def test_repeated_boot_seeds_the_plans_once() -> None:
         async def fetchval(self, sql: str, *args: Any) -> int:
             return self.plans
 
+        async def fetch(self, sql: str, *args: Any) -> list[Any]:
+            return []  # no legacy cache rows to backfill
+
         async def executemany(self, sql: str, rows: list[Any]) -> None:
             self.plans += len(rows)
 

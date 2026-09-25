@@ -30,6 +30,7 @@ import aiohttp
 import asyncpg
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatAction
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -49,6 +50,7 @@ from core.i18n import (
 from core.ui import RETRY_PREFIX, callback_message, remember_retry, retry_keyboard, take_retry
 from core.ui import edit_or_reply as _edit_or_reply
 from core.utils import (
+    default_quality,
     escape_html,
     extract_url,
     format_size,
@@ -62,6 +64,7 @@ from services.delivery import (
     ActionPulse,
     format_duration,
     group_add_link,
+    label_for_request,
     media_card,
     quality_label,
     replay_caption,
@@ -977,7 +980,8 @@ async def on_text_with_url(
         # through the same intake path (so a photo post still downloads itself).
         url = extract_url(message.text or "")
         if url and validate_url(url):
-            await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
+            if await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue):
+                await _delete_raw_link(message)
         else:
             await message.answer(
                 t("intake.invalid_link", lang), link_preview_options=_NO_PREVIEW
@@ -991,7 +995,8 @@ async def on_text_with_url(
     if not url:
         await message.answer(t("intake.no_link_found", lang), link_preview_options=_NO_PREVIEW)
         return
-    await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
+    if await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue):
+        await _delete_raw_link(message)
 
 
 @router.message(Command("download"))
@@ -1013,7 +1018,23 @@ async def cmd_download(
     if not url:
         await message.answer(t("intake.download_usage", lang), link_preview_options=_NO_PREVIEW)
         return
-    await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
+    if await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue):
+        await _delete_raw_link(message)
+
+
+async def _delete_raw_link(message: Message) -> None:
+    """Take the raw link out of the chat once the bot has answered it.
+
+    Some unofficial clients draw their own download preview under every link a
+    chat receives, and the pasted URL is noise beside the menu that now speaks
+    for it. Deleting is a courtesy, never a requirement: a bot without delete
+    rights (a group where it is not an admin) — or a message already gone —
+    simply leaves the message where it is.
+    """
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
 
 
 async def _queue_url_flow(
@@ -1026,7 +1047,7 @@ async def _queue_url_flow(
     bot: Bot,
     pool: asyncpg.Pool,
     queue: TaskQueue,
-) -> None:
+) -> bool:
     """A link arrives: check it, then ask — or just start.
 
     No acknowledgement message. The *question* is the first thing the user sees —
@@ -1039,10 +1060,14 @@ async def _queue_url_flow(
     keyboard would be a single button that cannot be wrong — a menu that looks
     broken. It is queued straight away; ``services/delivery.py`` already knows how
     to send whatever comes back.
+
+    ``True`` means the link was real and has been answered — the caller may then
+    take the raw link out of the chat (``_delete_raw_link``). ``False`` means the
+    text never carried a valid link, and what the user wrote stays where it is.
     """
     if not validate_url(url):
         await message.answer(t("intake.invalid_link", lang), link_preview_options=_NO_PREVIEW)
-        return
+        return False
     # Share/short links and media *viewer* wrappers name their content somewhere
     # else: resolve them once, here — routing, the engines and the direct-download
     # path all see the real thing afterwards (see _canonical_url).
@@ -1056,7 +1081,9 @@ async def _queue_url_flow(
     # good photo link ends in "this site is not supported".
     if routing.kind not in _SELF_SERVED_KINDS and not await _probe_supported(url):
         await message.answer(t("intake.unsupported", lang), link_preview_options=_NO_PREVIEW)
-        return
+        # A *valid* link, answered — even though the answer is «no». What the
+        # user pasted has served its purpose and may leave the chat.
+        return True
     if routing.solo is not None:
         await state.clear()
         status = await message.answer(
@@ -1074,10 +1101,11 @@ async def _queue_url_flow(
             lang,
             tap=None,
         )
-        return
+        return True
     await _ask_about_link(
         message, state, user, url, lang, bot=bot, pool=pool, queue=queue
     )
+    return True
 
 
 async def _ask_about_link(
@@ -1091,6 +1119,7 @@ async def _ask_about_link(
     pool: asyncpg.Pool,
     queue: TaskQueue,
     edit: bool = False,
+    force_probe: bool = False,
 ) -> None:
     """Probe what this link really has, then ask — or say why there is no menu.
 
@@ -1102,8 +1131,20 @@ async def _ask_about_link(
     retry that re-extracts — never a silent substitution of the default format
     for a capability lookup that failed. ``edit`` rewrites the message being
     watched (the retry case) instead of opening a new one.
+
+    A link the cache already knows skips the probe entirely (``_ask_from_cache``):
+    its stored requests *are* a menu, and their taps replay instantly. ``force_probe``
+    is the deliberate re-check — the full ladder wants extraction, and says so.
     """
     routing = content.routing_for(url)
+    if not force_probe:
+        # The zero-wait path: what this link has already produced is a menu whose
+        # every tap replays at once (the tap's own cache check) — so the extractor
+        # never runs and the question is drawn from the rows instead.
+        rows = await _cached_rows(pool, url)
+        if rows:
+            await _ask_from_cache(message, state, url, lang, rows, edit=edit)
+            return
     info: MediaInfo | None = None
     duration = 0.0
     prompt: str | None = None
@@ -1244,6 +1285,104 @@ def _probe_retry_keyboard(lang: str, *, auto_best: bool = False) -> InlineKeyboa
     builder.button(text=t("menu.back", lang), callback_data="menu:download")
     builder.adjust(1)
     return builder.as_markup()
+
+
+def _request_parts(request: str) -> tuple[str, str]:
+    """A stored request key back into the tap vocabulary.
+
+    ``"audio:mp3.best"`` → ``("audio", "mp3.best")``; a request with no tier
+    names its format's default — the exact spelling ``request_key`` folds it
+    back to, so a cached menu's tap is the very request the row remembers.
+    """
+    media_format, _, tier = (request or "").partition(":")
+    return media_format, tier or default_quality(media_format)
+
+
+async def _cached_rows(pool: asyncpg.Pool, url: str) -> list[Any]:
+    """The rows this URL already produced — or none.
+
+    The fast path is a courtesy and must never cost the question anything: a
+    lookup that raises is a miss (the ordinary probe runs instead), and a row
+    that speaks no request language is not menu material.
+    """
+    try:
+        rows = await cache_service.get_cached_rows(pool, url)
+    except Exception:  # the cache is never worth an error screen
+        logger.debug("cache lookup gave nothing for %.80s — probing as usual", url, exc_info=True)
+        return []
+    return [row for row in rows if str(row["quality"] or "").partition(":")[0]]
+
+
+def _cached_question_keyboard(rows: Sequence[Any], lang: str) -> InlineKeyboardMarkup:
+    """One button per stored request — the same ``fmt:`` vocabulary as any menu.
+
+    Each label is the one the fresh caption used, so the screen looks like the
+    menu it stands in for. The full probed ladder is one button away — a quality
+    nobody has taken yet is a re-check, never a dead end — and the way out leads
+    to the Download screen, like every question.
+    """
+    builder = InlineKeyboardBuilder()
+    for row in rows:
+        request = str(row["quality"] or "")
+        media_format, tier = _request_parts(request)
+        builder.button(
+            text=str(row["label"] or "") or label_for_request(request, lang),
+            callback_data=_fmt_callback(media_format, tier),
+        )
+    builder.button(text=t("intake.full_menu_btn", lang), callback_data=PROBE_CALLBACK)
+    builder.button(text=t("menu.back", lang), callback_data="menu:download")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+async def _ask_from_cache(
+    message: Message,
+    state: FSMContext,
+    url: str,
+    lang: str,
+    rows: Sequence[Any],
+    *,
+    edit: bool,
+) -> None:
+    """The question built from what the link already produced — no probe, no wait.
+
+    Each row is a request that has been served once and stored, so its button is
+    the same tap a fresh menu would draw and its press replays the file instantly
+    instead of downloading again. What the rows know (the title) is shown; what
+    they do not is simply not there. The FSM carries the offered vocabulary a tap
+    is judged by, so this menu speaks exactly the language ``on_format_chosen``
+    validates — and a crafted tap on a button that was never drawn buys nothing.
+    """
+    title = str(rows[0]["title"] or "").strip()
+    if title == url.strip():
+        title = ""
+    offered: list[str] = []
+    audio_offered: list[str] = []
+    for row in rows:
+        media_format, tier = _request_parts(str(row["quality"] or ""))
+        if media_format == "video":
+            offered.append(tier)
+        elif media_format == "audio":
+            codec = tier.split(".", 1)[0]
+            if codec not in audio_offered:
+                audio_offered.append(codec)
+    text = _question_text(url, lang, title=title)
+    keyboard = _cached_question_keyboard(rows, lang)
+    await state.set_state(DownloadStates.waiting_format)
+    await state.update_data(
+        url=url,
+        title=title,
+        duration=0.0,
+        options=[],
+        offered=offered,
+        audio_offered=audio_offered,
+    )
+    if edit:
+        await _edit_or_reply(
+            message, text, reply_markup=keyboard, link_preview_options=_NO_PREVIEW
+        )
+    else:
+        await message.answer(text, reply_markup=keyboard, link_preview_options=_NO_PREVIEW)
 
 
 def _question_body(url: str, lang: str, *, prompt: str | None = None) -> str:
@@ -1574,7 +1713,16 @@ async def on_probe_retry(
     _probes_running.add(running)
     try:
         await _ask_about_link(
-            message, state, user, str(url), lang, bot=bot, pool=pool, queue=queue, edit=True
+            message,
+            state,
+            user,
+            str(url),
+            lang,
+            bot=bot,
+            pool=pool,
+            queue=queue,
+            edit=True,
+            force_probe=True,
         )
     finally:
         _probes_running.discard(running)
