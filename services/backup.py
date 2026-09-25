@@ -63,7 +63,7 @@ SCHEMA_VERSION = 1
 
 #: How large an uploaded backup may be. A configuration file is small; anything
 #: bigger is not one, and must not be read into memory to find that out.
-MAX_BACKUP_BYTES = 1024 * 1024
+MAX_BACKUP_BYTES = 10 * 1024 * 1024
 
 #: Secret words, matched as whole *segments* of a key (segments are split on
 #: ``_ : . -``): ``bot_token``, ``webhook_secret`` and ``session_id`` are

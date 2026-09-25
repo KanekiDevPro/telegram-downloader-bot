@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -25,8 +26,8 @@ from aiogram import Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
-from aiogram.types import CallbackQuery, Chat, Message, User
+from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage, SendPhoto
+from aiogram.types import CallbackQuery, Chat, LinkPreviewOptions, Message, User
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from core.config import Settings
@@ -49,6 +50,8 @@ class RecordingBot:
 
     def __init__(self) -> None:
         self.calls: list[Any] = []
+        #: The extraction pipeline the probe reads (``bot.state.extractor``).
+        self.state: Any = None
 
     async def __call__(self, method: Any) -> Any:
         self.calls.append(method)
@@ -1404,7 +1407,7 @@ def _probed_bot(
     from types import SimpleNamespace
 
     bot = RecordingBot()
-    bot.state = SimpleNamespace(  # type: ignore[attr-defined]
+    bot.state = SimpleNamespace(
         extractor=_FakeExtractor(
             MediaInfo(
                 source_url="https://youtu.be/abc",
@@ -1763,3 +1766,160 @@ async def test_entering_a_screen_replaces_the_whole_keyboard() -> None:
         "⬅️ بازگشت": "menu:home",
     }
     assert bot.texts == [], "the same message, edited"
+
+
+# ---------------------------------------------------------------------------
+# The question arrives as the link's own picture — when it has one
+# ---------------------------------------------------------------------------
+
+
+class _Probe:
+    """A metadata probe that answers with one canned :class:`MediaInfo`."""
+
+    def __init__(self, info: MediaInfo) -> None:
+        self.info = info
+
+    async def extract(self, url: str) -> MediaInfo:
+        return self.info
+
+
+class _RefusingPhotoBot(RecordingBot):
+    """A Telegram that will not carry the thumbnail — the fallback's case."""
+
+    async def __call__(self, method: Any) -> Any:
+        if isinstance(method, SendPhoto):
+            raise RuntimeError("photo refused")
+        return await super().__call__(method)
+
+
+def _clip(thumbnail: str | None) -> MediaInfo:
+    return MediaInfo(
+        source_url="https://youtu.be/abc",
+        title="A Clip",
+        platform="youtube",
+        webpage_url="https://youtu.be/abc",
+        extension="mp4",
+        thumbnail=thumbnail,
+        duration=3725,
+        filesize_approx=1,
+        is_live=False,
+        video_options=(VideoOption(720, 8 * 1024 * 1024, True),),
+    )
+
+
+async def _ask_with_probe(
+    bot: RecordingBot, monkeypatch: pytest.MonkeyPatch, thumbnail: str | None
+) -> None:
+    """Drive one full question through the intake path, probe and all."""
+
+    async def supported(url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(user_module, "_probe_supported", supported)
+    bot.state = SimpleNamespace(extractor=_Probe(_clip(thumbnail)))
+
+    await user_module._queue_url_flow(
+        _message("https://youtu.be/abc", bot),
+        _fresh_state(),
+        _user(),
+        "https://youtu.be/abc",
+        FA,
+        bot=cast(Bot, bot),
+        pool=object(),
+        queue=_fake_queue(),
+    )
+
+
+async def test_the_question_arrives_as_a_photo_with_a_bold_caption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The premium look: the link's own thumbnail leads the question, and the
+    caption says what it is and how long — in bold — before it asks."""
+    bot = RecordingBot()
+
+    await _ask_with_probe(bot, monkeypatch, "https://i.ytimg.com/vi/abc/hq.jpg")
+
+    photos = [call for call in bot.calls if isinstance(call, SendPhoto)]
+    assert len(photos) == 1, "the question is one photo — not a photo and a text"
+    photo = photos[0]
+    assert photo.photo == "https://i.ytimg.com/vi/abc/hq.jpg"
+    caption = photo.caption or ""
+    assert "<b>A Clip</b>" in caption, "the title is named, in bold"
+    assert "<b>1:02:05</b>" in caption, "3725 seconds read the way a player says it"
+    assert caption.endswith(user_module._question_body("https://youtu.be/abc", FA)), (
+        "and the one question is asked underneath"
+    )
+    assert bot.texts == [] and bot.edits == [], "no plain-text twin"
+    rows = _buttons(photo.reply_markup)
+    assert any(data == "fmt:video:720" for _, data in rows), (
+        "the same capability-driven menu rides the photo"
+    )
+
+
+async def test_a_refused_thumbnail_falls_back_to_the_text_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A picture Telegram will not carry must not eat the question: the photo is
+    best-effort, and the fallback is the text screen — previews off."""
+    bot = _RefusingPhotoBot()
+
+    await _ask_with_probe(bot, monkeypatch, "https://i.ytimg.com/vi/abc/hq.jpg")
+
+    assert len(bot.texts) == 1, "one question — the refused photo leaves no echo"
+    assert bot.texts[0].startswith("🎬"), "the card names the title again, on the text side"
+    assert "🔗 https://youtu.be/abc" in bot.texts[0]
+    sent = [call for call in bot.calls if isinstance(call, SendMessage)][0]
+    assert isinstance(sent.link_preview_options, LinkPreviewOptions)
+    assert sent.link_preview_options.is_disabled is True
+    assert bot.keyboards[-1] is not None, "and the menu still arrives"
+
+
+async def test_a_question_without_a_thumbnail_stays_a_text_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A link that reports no picture is not force-fitted into one — the plain
+    question is a whole screen on its own."""
+    bot = RecordingBot()
+
+    await _ask_with_probe(bot, monkeypatch, None)
+
+    assert bot.calls and all(not isinstance(call, SendPhoto) for call in bot.calls)
+    assert len(bot.texts) == 1
+    assert bot.texts[0].startswith("🎬")
+
+
+async def test_intake_text_never_grows_a_link_preview() -> None:
+    """Every plain-text intake answer says its piece on purpose; a link preview
+    under it would be a second, uncontrolled message in the same breath."""
+    bot = RecordingBot()
+
+    await user_module.on_text_with_url(
+        _message("hello there", bot),
+        _fresh_state(),
+        _user(),
+        object(),
+        _fake_queue(),
+        bot,
+        lang=FA,
+    )
+    await user_module.cmd_download(
+        _message("/download", bot),
+        cast(Any, SimpleNamespace(args="")),
+        _fresh_state(),
+        _user(),
+        object(),
+        _fake_queue(),
+        bot,
+        lang=FA,
+    )
+
+    sent = [call for call in bot.calls if isinstance(call, SendMessage)]
+    assert [call.text for call in sent] == [
+        t("intake.no_link_found", FA),
+        t("intake.download_usage", FA),
+    ]
+    assert all(
+        isinstance(call.link_preview_options, LinkPreviewOptions)
+        and call.link_preview_options.is_disabled is True
+        for call in sent
+    ), "no intake text ever grows a preview"

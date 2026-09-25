@@ -991,6 +991,60 @@ async def test_an_untrusted_file_is_refused_before_it_can_change_anything() -> N
     assert not bot.documents
 
 
+def test_the_ceiling_is_ten_megabytes_and_the_prompt_says_so() -> None:
+    # The gate and its wording are one fact: the prompt used to promise 1 MB
+    # whatever the constant said, and an operator reading it would upload to the
+    # wrong limit.
+    assert backup_service.MAX_BACKUP_BYTES == 10 * 1024 * 1024
+    assert "10 MB" in t("admin.restore_prompt", "en")
+    assert "۱۰ مگابایت" in t("admin.restore_prompt", FA)
+    assert "1 MB" not in t("admin.restore_prompt", "en")
+
+
+async def test_a_file_bigger_than_the_ceiling_is_refused_before_it_is_read() -> None:
+    bot = RecordingBot(download=json.dumps(SAMPLE.to_dict()).encode("utf-8"))
+    state = _fsm()
+    before = dict(backup_service._pending)
+    await admin_module.on_restore_start(
+        _callback(bot, admin_module.BK_RESTORE), state, lang=FA
+    )
+
+    await admin_module.on_restore_upload(
+        _message("file", bot, document=_document(size=backup_service.MAX_BACKUP_BYTES + 1)),
+        state,
+        cast(Bot, bot),
+        lang=FA,
+    )
+
+    assert t("admin.restore_invalid", FA, reason="format") in bot.screens
+    assert all(
+        not data.startswith(admin_module.BK_GO) for _, data in _buttons(bot.keyboards[-1])
+    ), "and there is no confirm button to press"
+    assert dict(backup_service._pending) == before, (
+        "nothing is judged and nothing is kept — the size is refused first"
+    )
+
+
+async def test_a_file_at_the_ceiling_is_still_welcome() -> None:
+    # The boundary itself: the ceiling is inclusive — a 10 MB file is judged by
+    # its content, not waved away by its size.
+    bot = RecordingBot(download=json.dumps(SAMPLE.to_dict()).encode("utf-8"))
+    state = _fsm()
+    await admin_module.on_restore_start(
+        _callback(bot, admin_module.BK_RESTORE), state, lang=FA
+    )
+
+    await admin_module.on_restore_upload(
+        _message("file", bot, document=_document(size=backup_service.MAX_BACKUP_BYTES)),
+        state,
+        cast(Bot, bot),
+        lang=FA,
+    )
+
+    assert t("admin.restore_invalid", FA, reason="format") not in bot.screens
+    backup_service.drop_pending(_nonce_from(bot.keyboards[-1]), owner=OWNER_ID)
+
+
 async def test_cancel_drops_the_pending_restore() -> None:
     bot = RecordingBot()
     state = _fsm()

@@ -33,7 +33,7 @@ from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, LinkPreviewOptions, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from core import database
@@ -60,6 +60,7 @@ from services import cache as cache_service
 from services import content, preflight, spotify
 from services.delivery import (
     ActionPulse,
+    format_duration,
     group_add_link,
     media_card,
     quality_label,
@@ -94,6 +95,10 @@ AUDF_PREFIX = "audf:"
 #: server-side state (the FSM), so a crafted callback can at most name it.
 PROBE_CALLBACK = "probe:retry"
 LANG_PREFIX = "lang:"
+
+#: No link previews under intake text: the card already names the link, and a
+#: preview would grow a second, uncontrolled page under a question.
+_NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 
 class DownloadStates(StatesGroup):
@@ -974,15 +979,17 @@ async def on_text_with_url(
         if url and validate_url(url):
             await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
         else:
-            await message.answer(t("intake.invalid_link", lang))
+            await message.answer(
+                t("intake.invalid_link", lang), link_preview_options=_NO_PREVIEW
+            )
         return
     if current is not None:
-        await message.answer(t("intake.step_in_progress", lang))
+        await message.answer(t("intake.step_in_progress", lang), link_preview_options=_NO_PREVIEW)
         return
 
     url = extract_url(message.text or "")
     if not url:
-        await message.answer(t("intake.no_link_found", lang))
+        await message.answer(t("intake.no_link_found", lang), link_preview_options=_NO_PREVIEW)
         return
     await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
 
@@ -1004,7 +1011,7 @@ async def cmd_download(
             message.reply_to_message.text or message.reply_to_message.caption or ""
         )
     if not url:
-        await message.answer(t("intake.download_usage", lang))
+        await message.answer(t("intake.download_usage", lang), link_preview_options=_NO_PREVIEW)
         return
     await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
 
@@ -1034,7 +1041,7 @@ async def _queue_url_flow(
     to send whatever comes back.
     """
     if not validate_url(url):
-        await message.answer(t("intake.invalid_link", lang))
+        await message.answer(t("intake.invalid_link", lang), link_preview_options=_NO_PREVIEW)
         return
     # Share/short links and media *viewer* wrappers name their content somewhere
     # else: resolve them once, here — routing, the engines and the direct-download
@@ -1048,11 +1055,13 @@ async def _queue_url_flow(
     # directly and the fallback covers the rest. Asking anyway is how a perfectly
     # good photo link ends in "this site is not supported".
     if routing.kind not in _SELF_SERVED_KINDS and not await _probe_supported(url):
-        await message.answer(t("intake.unsupported", lang))
+        await message.answer(t("intake.unsupported", lang), link_preview_options=_NO_PREVIEW)
         return
     if routing.solo is not None:
         await state.clear()
-        status = await message.answer(media_card(url=url, lang=lang))
+        status = await message.answer(
+            media_card(url=url, lang=lang), link_preview_options=_NO_PREVIEW
+        )
         await _submit(
             bot,
             status,
@@ -1172,9 +1181,19 @@ async def _ask_about_link(
     text = _question_text(url, lang, title=title, prompt=prompt)
     keyboard = _question_keyboard(url, lang, options=options, capability=capability)
     if edit:
-        await _edit_or_reply(message, text, reply_markup=keyboard)
+        await _edit_or_reply(
+            message, text, reply_markup=keyboard, link_preview_options=_NO_PREVIEW
+        )
     else:
-        await message.answer(text, reply_markup=keyboard)
+        await _send_question(
+            message,
+            text,
+            keyboard,
+            thumbnail=(info.thumbnail if info is not None else None),
+            caption=_photo_caption(
+                url, lang, title=title, duration=format_duration(duration), prompt=prompt
+            ),
+        )
 
 
 async def _ask_again(
@@ -1206,9 +1225,11 @@ async def _ask_again(
     text = _question_text(url, lang, title=title, prompt=prompt)
     keyboard = _probe_retry_keyboard(lang, auto_best=auto_best)
     if edit:
-        await _edit_or_reply(message, text, reply_markup=keyboard)
+        await _edit_or_reply(
+            message, text, reply_markup=keyboard, link_preview_options=_NO_PREVIEW
+        )
     else:
-        await message.answer(text, reply_markup=keyboard)
+        await message.answer(text, reply_markup=keyboard, link_preview_options=_NO_PREVIEW)
 
 
 def _probe_retry_keyboard(lang: str, *, auto_best: bool = False) -> InlineKeyboardMarkup:
@@ -1225,6 +1246,11 @@ def _probe_retry_keyboard(lang: str, *, auto_best: bool = False) -> InlineKeyboa
     return builder.as_markup()
 
 
+def _question_body(url: str, lang: str, *, prompt: str | None = None) -> str:
+    """The one line asking — what every question screen ends with."""
+    return prompt if prompt is not None else t(content.routing_for(url).header_key, lang)
+
+
 def _question_text(
     url: str, lang: str, *, title: str = "", prompt: str | None = None
 ) -> str:
@@ -1234,8 +1260,56 @@ def _question_text(
     It appears the moment a choice is made, naming it.
     """
     card = media_card(title=title, url=url, lang=lang)
-    text = prompt if prompt is not None else t(content.routing_for(url).header_key, lang)
+    text = _question_body(url, lang, prompt=prompt)
     return f"{card}\n\n{text}" if card else text
+
+
+def _photo_caption(
+    url: str, lang: str, *, title: str, duration: str, prompt: str | None = None
+) -> str:
+    """The question as a photo's caption: what this is, how long, then the ask.
+
+    The picture answers «what is this» better than any card can, so the caption
+    does not repeat the link — it names the title and the length (bold, and each
+    omitted when the site reported none) and asks its one question underneath.
+    """
+    facts = [
+        line
+        for line in (
+            t("media.line_title", lang, title=f"<b>{escape_html(title.strip())}</b>")
+            if title.strip()
+            else "",
+            t("media.line_duration", lang, duration=f"<b>{escape_html(duration.strip())}</b>")
+            if duration.strip()
+            else "",
+        )
+        if line
+    ]
+    body = _question_body(url, lang, prompt=prompt)
+    return "\n\n".join(["\n".join(facts), body] if facts else [body])
+
+
+async def _send_question(
+    message: Message,
+    text: str,
+    keyboard: InlineKeyboardMarkup,
+    *,
+    thumbnail: str | None,
+    caption: str,
+) -> None:
+    """Ask with the link's own picture — never at the cost of the question.
+
+    A thumbnail Telegram will not carry (a dead URL, a picture it refuses) must
+    not eat the menu: the photo attempt is best-effort, and the fallback is the
+    same text screen this has always been.
+    """
+    if thumbnail:
+        try:
+            await message.answer_photo(photo=thumbnail, caption=caption, reply_markup=keyboard)
+            return
+        except Exception:  # a refused picture is the fallback's cue, never an error
+            logger.warning("thumbnail %.80s would not send — asking as text", thumbnail)
+    await message.answer(text, reply_markup=keyboard, link_preview_options=_NO_PREVIEW)
 
 
 def _clean_title(info: MediaInfo | None, url: str) -> str:
@@ -1428,6 +1502,7 @@ async def on_audio_format(
             message,
             _question_text(url, lang, title=title),
             reply_markup=_question_keyboard(url, lang, capability=capability),
+            link_preview_options=_NO_PREVIEW,
         )
         return
     # Deliberately strict (same rule as find_choice): the codec must have been a
@@ -1459,6 +1534,7 @@ async def on_audio_format(
             copy_ok=(capability.copy_ok if capability is not None else True),
             upload_limit_bytes=get_settings().upload_limit_bytes,
         ),
+        link_preview_options=_NO_PREVIEW,
     )
 
 
@@ -1739,7 +1815,10 @@ async def _submit(
         lang=lang,
     )
     await _edit_or_reply(
-        message, card, reply_markup=InlineKeyboardMarkup(inline_keyboard=[])
+        message,
+        card,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+        link_preview_options=_NO_PREVIEW,
     )
     if tap is not None:
         await tap.answer()  # silent: the screen change *is* the acknowledgement
@@ -1780,6 +1859,7 @@ async def _submit(
             message,
             f"{card}\n\n{t('intake.quota_exhausted', lang, used=used, limit=limit)}",
             reply_markup=_back_to_menu(lang, to="menu:download"),
+            link_preview_options=_NO_PREVIEW,
         )
         return
 
@@ -1801,6 +1881,7 @@ async def _submit(
             message,
             f"{card}\n\n{verdict.message}",
             reply_markup=retry_keyboard(key, lang),
+            link_preview_options=_NO_PREVIEW,
         )
         return
 
@@ -1824,4 +1905,4 @@ def _parse_format(data: str | None) -> tuple[str, str]:
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext, lang: str = DEFAULT_LANG) -> None:
     await state.clear()
-    await message.answer(t("intake.cancelled", lang))
+    await message.answer(t("intake.cancelled", lang), link_preview_options=_NO_PREVIEW)

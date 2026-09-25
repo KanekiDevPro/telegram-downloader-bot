@@ -777,8 +777,8 @@ MESSAGES: Final[Catalog] = {
         ),
     },
     "admin.restore_prompt": {
-        "en": "Send the backup file (JSON, up to 1 MB).",
-        "fa": "فایل پشتیبان را بفرستید (JSON، حداکثر ۱ مگابایت).",
+        "en": "Send the backup file (JSON, up to 10 MB).",
+        "fa": "فایل پشتیبان را بفرستید (JSON، حداکثر ۱۰ مگابایت).",
     },
     "admin.restore_invalid": {
         "en": "This file cannot be restored ({reason}). Send another file, or cancel.",
