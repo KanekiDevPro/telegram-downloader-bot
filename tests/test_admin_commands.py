@@ -18,7 +18,8 @@ from aiogram import Bot
 from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
 from aiogram.types import CallbackQuery, Chat, Message, User
 
-from core.config import Settings
+from core import database
+from core.config import Settings, get_settings
 from handlers import admin as admin_module
 from services.cookie_refresh import RefreshOutcome
 from services.cookie_watch import DOCTOR_CALLBACK, REFRESH_CALLBACK
@@ -395,6 +396,63 @@ async def test_fixlogin_explains_the_jar_and_the_steps(
     assert "HttpOnly" in text, "and the trap that keeps this failing"
 
 
+# ---------------------------------------------------------------------------
+# /sweepcache
+# ---------------------------------------------------------------------------
+
+
+async def test_sweepcache_is_admin_only() -> None:
+    bot = RecordingBot()
+    message = _message("/sweepcache", bot, user_id=9)
+
+    await admin_module.cmd_sweepcache(message, object(), lang="fa")
+
+    assert bot.texts == ["⛔️ فقط ادمین می‌تونه."]
+
+
+async def test_sweepcache_reports_what_it_swept(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_sweep(pool: Any, keep_days: int) -> int:
+        assert keep_days == get_settings().smart_cache_ttl_days
+        return 7
+
+    monkeypatch.setattr(admin_module.database, "prune_stale_cache", fake_sweep)
+    bot = RecordingBot()
+    message = _message("/sweepcache", bot)
+
+    await admin_module.cmd_sweepcache(message, object(), lang="fa")
+
+    text = bot.texts[0]
+    assert "7" in text and str(get_settings().smart_cache_ttl_days) in text, (
+        "the count and the window, in the admin's language"
+    )
+
+
+async def test_the_sweep_deletes_only_rows_past_the_window() -> None:
+    """The command's SQL: rows older than the window, and the count reported is
+    the count the database actually deleted."""
+
+    class _Pool:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+        async def execute(self, sql: str, *args: Any) -> str:
+            self.calls.append((sql, args))
+            return "DELETE 3"
+
+    pool = _Pool()
+    assert await database.prune_stale_cache(cast(Any, pool), 30) == 3
+    sql, args = pool.calls[0]
+    assert "smart_cache" in sql and "make_interval" in sql, "stale rows only, by age"
+    assert args == (30,)
+
+
 def test_every_admin_command_is_registered() -> None:
     names = {handler.callback.__name__ for handler in admin_module.router.message.handlers}
-    assert {"cmd_doctor", "cmd_blocks", "cmd_refresh", "cmd_trend", "cmd_fixlogin"} <= names
+    assert {
+        "cmd_doctor",
+        "cmd_blocks",
+        "cmd_refresh",
+        "cmd_trend",
+        "cmd_fixlogin",
+        "cmd_sweepcache",
+    } <= names

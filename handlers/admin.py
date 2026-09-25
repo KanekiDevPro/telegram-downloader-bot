@@ -97,6 +97,7 @@ ADMIN_COMMANDS: tuple[tuple[str, str], ...] = (
     ("doctor", "cmd.doctor"),
     ("blocks", "cmd.blocks"),
     ("trend", "cmd.trend"),
+    ("sweepcache", "cmd.sweepcache"),
     ("refresh", "cmd.refresh"),
     ("fixlogin", "cmd.fixlogin"),
     ("oauth", "cmd.oauth"),
@@ -303,6 +304,29 @@ async def cmd_blocks(
         await message.answer(t("admin.only", lang))
         return
     await message.answer(await _failure_report(pool, cobalt, lang))
+
+
+@router.message(Command("sweepcache"))
+async def cmd_sweepcache(
+    message: Message,
+    pool: asyncpg.Pool,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """``/sweepcache`` — sweep the cache rows past their retention, right now.
+
+    The maintenance loop prunes hourly (``smart_cache_ttl_days``); this is the
+    operator's way to run the same line *now* — after a big test run, or just to
+    see the number the window would take.
+    """
+    settings = get_settings()
+    user = message.from_user
+    if not settings.is_admin(user.id if user else None):
+        await message.answer(t("admin.only", lang))
+        return
+    swept = await database.prune_stale_cache(pool, settings.smart_cache_ttl_days)
+    await message.answer(
+        t("admin.sweep_done", lang, count=swept, days=settings.smart_cache_ttl_days)
+    )
 
 
 def refresh_usage() -> str:

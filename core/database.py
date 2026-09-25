@@ -560,6 +560,21 @@ async def delete_cached_file(pool: asyncpg.Pool, url_hash: str) -> None:
     await pool.execute("DELETE FROM smart_cache WHERE url_hash = $1", url_hash)
 
 
+async def prune_stale_cache(pool: asyncpg.Pool, keep_days: int = 30) -> int:
+    """Drop cached files older than the window anyone would still tap them in.
+
+    Every row is a replay shortcut and nothing else — the media itself lives on
+    Telegram's side, so forgetting a row nobody has used in a month loses no
+    file, only the chance to skip a re-download. The count comes back for the
+    admin sweep that runs this by hand.
+    """
+    status = await pool.execute(
+        "DELETE FROM smart_cache WHERE created_at < now() - make_interval(days => $1)",
+        keep_days,
+    )
+    return int(status.rsplit(" ", 1)[-1])  # "DELETE 12"
+
+
 # ---------------------------------------------------------------------------
 # group analytics
 # ---------------------------------------------------------------------------

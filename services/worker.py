@@ -1109,7 +1109,8 @@ async def run_maintenance(
     bot: Bot | None = None,
     admin_ids: Iterable[int] = (),
 ) -> None:
-    """Hourly sweep: expire premium, purge stale jobs, prune telemetry, report weekly."""
+    """Hourly sweep: expire premium, purge stale jobs, prune telemetry and stale
+    cache, report weekly."""
     logger.info("maintenance loop started")
     while not stop_event.is_set():
         try:
@@ -1123,6 +1124,12 @@ async def run_maintenance(
                 # Weekly, and silent when nothing failed *and* no helper was down
                 # (see maybe_send_digest).
                 await telemetry.maybe_send_digest(pool, bot, admin_ids)
+            # Last on purpose: the sweep is the least important thing here and
+            # must never keep the digest from going out. ``/sweepcache`` runs the
+            # same line by hand.
+            swept = await database.prune_stale_cache(pool, get_settings().smart_cache_ttl_days)
+            if swept:
+                logger.info("swept %s stale cache row(s)", swept)
         except Exception:
             logger.exception("maintenance cycle failed")
         try:

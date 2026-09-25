@@ -30,6 +30,7 @@ from core.logging import setup_logging
 from core.telegram_api import build_session, session_target
 from handlers import ROUTERS
 from handlers.admin import publish_commands
+from handlers.user import drain_pending_deletes
 from middlewares.user_middleware import UserMiddleware
 from services import cobalt_cookies, delivery, proxy_health
 from services.cobalt import CobaltService
@@ -548,6 +549,12 @@ async def shutdown(app: dict[str, Any]) -> None:
         # No login child may outlive the bot that started it — an orphaned
         # yt-dlp process would keep polling Google with nobody watching.
         await oauth.cancel()
+    # The one moment fire-and-forget bites: a link deletion still in flight here
+    # is a raw link left in the chat forever. Bounded — a hung Telegram call may
+    # not postpone the exit — and before the bot session below is closed.
+    drained = await drain_pending_deletes()
+    if drained:
+        logger.info("drained %s pending link deletion(s) before shutdown", drained)
     tasks = app["workers"]
     if tasks:
         # Workers notice the stop event at the next queue read (BLOCK_TIMEOUT_S),

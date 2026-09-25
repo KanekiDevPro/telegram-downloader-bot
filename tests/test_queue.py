@@ -213,3 +213,14 @@ def test_a_claim_nobody_released_expires() -> None:
     assert claims.try_claim("job", ttl=10.0, now=100.0)
     assert not claims.try_claim("job", ttl=10.0, now=105.0), "held — refused"
     assert claims.try_claim("job", ttl=10.0, now=110.0), "expired — the net worked"
+
+
+def test_the_claim_ttl_comes_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The TTL is deployment policy, not a constant: the queue reads the setting
+    at claim time (the two-hour default lives in Settings)."""
+    monkeypatch.setenv("JOB_LOCK_TTL_S", "120")
+    get_settings.cache_clear()
+    try:
+        assert queue_module.claim_ttl() == 120
+    finally:
+        get_settings.cache_clear()

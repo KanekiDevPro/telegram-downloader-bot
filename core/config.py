@@ -355,6 +355,16 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
     queue_backend: Literal["redis", "memory"] = Field(default="redis", alias="QUEUE_BACKEND")
     queue_name: str = Field(default="dl:tasks", alias="QUEUE_NAME")
+    #: How long a queued download's single-flight claim outlives it before a
+    #: crashed worker stops blocking the same request (see services/queue).
+    #: Generous by default — a slow 600 MB fetch on a thin link is not a
+    #: deadlock — and bounded, so no claim can live forever.
+    job_lock_ttl_s: int = Field(default=7200, ge=60, alias="JOB_LOCK_TTL_S")
+    #: Cached files older than this are swept by the hourly maintenance loop (and
+    #: by the admin's ``/sweepcache``). The media lives on Telegram's side — a row
+    #: is only the replay shortcut, so forgetting old ones costs nothing but the
+    #: database growth it prevents.
+    smart_cache_ttl_days: int = Field(default=30, ge=1, alias="SMART_CACHE_TTL_DAYS")
 
     # --- Downloader ---------------------------------------------------------
     download_dir: Path = Field(default=BASE_DIR / "downloads", alias="DOWNLOAD_DIR")

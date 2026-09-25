@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 import redis.asyncio as aioredis
 
-from core.config import Settings
+from core.config import Settings, get_settings
 from core.utils import MediaFormat
 
 logger = logging.getLogger(__name__)
@@ -33,13 +33,15 @@ BLOCK_TIMEOUT_S = 5
 #: than the block timeout — see ``create_redis_client``.
 REDIS_SOCKET_TIMEOUT_S = BLOCK_TIMEOUT_S + 10
 
-#: How long a single-flight claim outlives its job before a crashed worker stops
-#: blocking the same request. Every job releases its claim the moment it settles
-#: (delivered or finally failed); this TTL is only the safety net for a worker
-#: that died mid-download and never reported back. Generous on purpose — a slow
-#: 600 MB fetch on a thin link is not a deadlock — and bounded so no claim can
-#: live forever.
-JOB_LOCK_TTL_S = 2 * 60 * 60
+def claim_ttl() -> int:
+    """How long a claim outlives its job — ``job_lock_ttl_s`` in Settings.
+
+    Every job releases its claim the moment it settles (delivered or finally
+    failed), so this TTL is only the safety net for a worker that died
+    mid-download and never reported back. The two-hour default lives in Settings:
+    the right ceiling is a property of the deployment, not of this file.
+    """
+    return get_settings().job_lock_ttl_s
 
 
 def job_key(task: "DownloadTask") -> str:
@@ -190,7 +192,7 @@ class RedisTaskQueue(TaskQueue):
         return f"{self.name}:job:{job_key(task)}"
 
     async def enqueue(self, task: DownloadTask) -> int:
-        fresh = await self.redis.set(self._claim_name(task), "1", nx=True, ex=JOB_LOCK_TTL_S)
+        fresh = await self.redis.set(self._claim_name(task), "1", nx=True, ex=claim_ttl())
         if not fresh:
             return -1
         try:
@@ -231,7 +233,7 @@ class MemoryTaskQueue(TaskQueue):
         self._claims = _JobClaims()
 
     async def enqueue(self, task: DownloadTask) -> int:
-        if not self._claims.try_claim(job_key(task), JOB_LOCK_TTL_S, time.monotonic()):
+        if not self._claims.try_claim(job_key(task), claim_ttl(), time.monotonic()):
             return -1
         await self._items.put(task)
         return self._items.qsize()

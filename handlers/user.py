@@ -1052,6 +1052,26 @@ async def _delete_raw_link(message: Message) -> None:
         pass
 
 
+async def drain_pending_deletes(timeout: float = 5.0) -> int:
+    """Let the fire-and-forget deletions finish before the process goes away.
+
+    Shutdown is the one moment "forget" bites: a delete still in flight when the
+    bot stops is a raw link left in the chat forever. Bounded by ``timeout`` — a
+    hung Telegram call may not postpone the exit — and silent about individual
+    failures (``return_exceptions``): a courtesy that could not complete stays a
+    courtesy, never a crash. Returns how many deletions actually landed.
+    """
+    pending = [task for task in _pending_deletes if not task.done()]
+    if not pending:
+        return 0
+    done, still_flying = await asyncio.wait(pending, timeout=timeout)
+    for task in still_flying:
+        task.cancel()
+    if still_flying:
+        await asyncio.gather(*still_flying, return_exceptions=True)
+    return sum(1 for task in done if not task.cancelled() and task.exception() is None)
+
+
 async def _queue_url_flow(
     message: Message,
     state: FSMContext,
@@ -1063,7 +1083,7 @@ async def _queue_url_flow(
     pool: asyncpg.Pool,
     queue: TaskQueue,
 ) -> None:
-    """A link arrives: check it, then ask — or just start.
+    """A link arrives: check it, then ask — or just start. Timed, too.
 
     No acknowledgement message. The *question* is the first thing the user sees —
     one message carrying the media card and the choice — and it is the message
@@ -1081,6 +1101,26 @@ async def _queue_url_flow(
     (``_forget_raw_link``). An invalid link is not "answered" into deletion: what
     the user wrote — no link, or a link-shaped typo — stays where it is.
     """
+    started = time.monotonic()
+    await _intake_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
+    # Observability: this path's budget is "as fast as the menu can appear" —
+    # this number is what says when it drifts (a slow resolve or a slow probe
+    # lands here first). The URL is truncated: a log line is not a link archive.
+    logger.info("intake flow for %.80s completed in %.2fs", url, time.monotonic() - started)
+
+
+async def _intake_flow(
+    message: Message,
+    state: FSMContext,
+    user: asyncpg.Record,
+    url: str,
+    lang: str,
+    *,
+    bot: Bot,
+    pool: asyncpg.Pool,
+    queue: TaskQueue,
+) -> None:
+    """The intake flow itself — timed and narrated by ``_queue_url_flow``."""
     if not validate_url(url):
         await message.answer(t("intake.invalid_link", lang), link_preview_options=_NO_PREVIEW)
         return

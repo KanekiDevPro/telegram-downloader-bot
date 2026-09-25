@@ -2124,6 +2124,42 @@ async def test_a_link_sent_through_download_goes_the_same_way(
     assert _deletes(spare) == [], "no link, nothing to clean"
 
 
+async def test_the_shutdown_drain_finishes_the_pending_deletions() -> None:
+    """Fire-and-forget at runtime — but never lost at shutdown: the drain is the
+    one moment the service owes the chat an answer, so the pending deletes are
+    awaited (bounded) before the process goes away."""
+
+    class _SlowDeleteBot(RecordingBot):
+        async def __call__(self, method: Any) -> Any:
+            if isinstance(method, DeleteMessage):
+                await asyncio.sleep(0.01)
+            return await super().__call__(method)
+
+    bot = _SlowDeleteBot()
+    user_module._forget_raw_link(_message("https://youtu.be/abc", bot))
+
+    assert await user_module.drain_pending_deletes(timeout=1.0) == 1
+    assert [call.message_id for call in _deletes(bot)] == [1], "and the link is gone"
+    assert user_module._pending_deletes == set()
+
+
+async def test_a_hung_deletion_cannot_postpone_the_shutdown() -> None:
+    """The drain is bounded: a Telegram call that never answers is cancelled at
+    the deadline instead of holding the exit."""
+
+    class _HungBot(RecordingBot):
+        async def __call__(self, method: Any) -> Any:
+            if isinstance(method, DeleteMessage):
+                await asyncio.Event().wait()
+            return await super().__call__(method)
+
+    bot = _HungBot()
+    user_module._forget_raw_link(_message("https://youtu.be/abc", bot))
+
+    assert await user_module.drain_pending_deletes(timeout=0.01) == 0
+    assert _deletes(bot) == []
+
+
 # ---------------------------------------------------------------------------
 # Zero-wait intake: a cached link is asked about without extraction
 # ---------------------------------------------------------------------------
@@ -2440,3 +2476,40 @@ async def test_rapid_taps_on_a_cached_menu_deliver_the_file_once(
 
     assert len(sent) == 1, "three taps, one delivery"
     assert queue.tasks == []
+
+
+# ---------------------------------------------------------------------------
+# Observability: the intake's latency
+# ---------------------------------------------------------------------------
+
+
+async def test_the_intake_flow_logs_how_long_it_took(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """This path's UX budget is "as fast as the menu can appear" — the logged
+    number is what says when the flow drifts from it."""
+
+    async def supported(url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(user_module, "_probe_supported", supported)
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", no_cached_rows)
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+
+    with caplog.at_level("INFO", logger="handlers.user"):
+        await user_module.on_text_with_url(
+            _message("https://youtu.be/abc", bot),
+            _fresh_state(),
+            _user(),
+            object(),
+            _fake_queue(),
+            bot,
+            lang=FA,
+        )
+    await _let_the_delete_land()
+
+    assert any(
+        "intake flow for https://youtu.be/abc completed in" in record.getMessage()
+        for record in caplog.records
+    ), "link arrival → menu, measured and logged"

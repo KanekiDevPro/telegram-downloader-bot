@@ -69,6 +69,7 @@ MESSAGES: Final[Catalog] = {
     "cmd.doctor": {"en": "Diagnose YouTube", "fa": "عیب‌یابی یوتیوب"},
     "cmd.oauth": {"en": "YouTube TV login (OAuth)", "fa": "لاگین یوتیوب با TV"},
     "cmd.blocks": {"en": "Block digest", "fa": "گزارش بلاک‌ها"},
+    "cmd.sweepcache": {"en": "Sweep old cache rows", "fa": "پاک‌سازی ردیف‌های قدیمی کش"},
     "cmd.trend": {"en": "Failures per day", "fa": "روند خطاها"},
     "cmd.refresh": {"en": "Re-export the cookie jar", "fa": "ساخت دوبارهٔ کوکی"},
     "cmd.fixlogin": {"en": "Fix the YouTube login", "fa": "رفع ورود یوتیوب"},
@@ -1028,6 +1029,10 @@ MESSAGES: Final[Catalog] = {
     "admin.blocks_headline": {
         "en": "Failure digest — last {days} days",
         "fa": "گزارش {days} روزهٔ شکست‌ها",
+    },
+    "admin.sweep_done": {
+        "en": "🧹 Swept {count} cache rows older than {days} days.",
+        "fa": "🧹 {count} ردیف کش قدیمی‌تر از {days} روز پاک شد.",
     },
     "admin.title": {"en": "🛠 <b>Admin panel</b>", "fa": "🛠 <b>پنل مدیریت</b>"},
     "admin.subtitle": {
