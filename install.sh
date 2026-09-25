@@ -79,11 +79,26 @@ ASK_REPLY=""
 #: The service an action names (the log picker sets it; default: bot).
 SERVICE_PICK=""
 
+#: gum (charmbracelet/gum) draws the interactive dashboard's boxes, menus and
+#: prompts. It is an optional, TTY-only rendering layer: every call site checks
+#: HAS_GUM and falls back to the plain-bash rendering when it is 0.
+HAS_GUM=0
+GUM_ALLOWED=0
+GUM_NOTE_DONE=0
+GUM_VERSION="2.0.2"
+
 #: Prompt, with an optional default. The answer lands in ASK_REPLY.
 ask() {
     local prompt="$1" default="${2:-}" answer=""
     ASK_REPLY="$default"
     [ -z "$TTY_IN" ] && return 0
+    if [ "$HAS_GUM" = 1 ]; then
+        # </dev/null keeps gum away from the script's own stdin — `curl | bash`
+        # feeds the script through a pipe gum would happily read answers from.
+        answer="$(gum input --placeholder "$prompt" --value "$default" </dev/null)" || answer=""
+        [ -n "$answer" ] && ASK_REPLY="$answer"
+        return 0
+    fi
     printf '%b ' "${CYAN}${prompt}${RESET}" >&2
     IFS= read -r answer <"$TTY_IN" || answer=""
     answer="${answer%$'\r'}"   # a terminal that sends CRLF
@@ -97,6 +112,12 @@ ask_secret() {
     local prompt="$1" answer=""
     ASK_REPLY=""
     [ -z "$TTY_IN" ] && return 0
+    if [ "$HAS_GUM" = 1 ]; then
+        # --password masks every character — at least as hidden as `read -rs`.
+        answer="$(gum input --password --placeholder "$prompt" </dev/null)" || answer=""
+        [ -n "$answer" ] && ASK_REPLY="$answer"
+        return 0
+    fi
     printf '%b ' "${CYAN}${prompt}${RESET}" >&2
     IFS= read -rs answer <"$TTY_IN" || answer=""
     printf '\n' >&2
@@ -106,6 +127,13 @@ ask_secret() {
 
 #: Yes/no, defaulting to *no*: the answers here include deleting volumes.
 confirm() {
+    if [ "$HAS_GUM" = 1 ]; then
+        # Without --default gum preselects the negative answer (checked against
+        # the pinned release's source), so this keeps the default-to-NO
+        # semantics of the plain [y/N] prompt; an abort counts as "no" too.
+        gum confirm "$1" </dev/null
+        return $?
+    fi
     ask "$1 [y/N]" ""
     case "$(printf '%s' "$ASK_REPLY" | tr '[:upper:]' '[:lower:]')" in
     y | yes) return 0 ;;
@@ -117,6 +145,138 @@ pause() {
     [ -z "$TTY_IN" ] && return 0
     ask "Press ENTER to return to the dashboard" ""
 }
+
+# ---------------------------------------------------------------------------
+# gum — the TTY-only rendering layer
+# ---------------------------------------------------------------------------
+#
+# gum (charmbracelet/gum) draws the dashboard's boxes, menus and prompts. It is
+# pure rendering: none of the install/update/stop/... logic below knows about
+# it, and every call site falls back to the plain-bash code path when HAS_GUM
+# is 0 — a run without gum, or without a terminal, behaves exactly as it always
+# has. Output stays English for the usual SSH font/locale reasons.
+#
+# init_gum is the ONE place that decides "gum or plain bash". gum decorates the
+# no-argument dashboard flow only: the install/update/start/stop/status/
+# diagnostics/uninstall subcommands are scripted entry points and keep their
+# plain, byte-stable output even on a terminal.
+
+#: Download a file with whichever fetcher exists; fails quietly.
+gum_fetch() {
+    local url="$1" dest="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 10 --max-time 120 -o "$dest" "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 120 -O "$dest" "$url"
+    else
+        return 1
+    fi
+}
+
+#: Put gum on PATH, downloading a pinned release once and caching it.
+#:
+#: The binary lands in $PROJECT_DIR/.bin — except before a fresh clone, where
+#: that directory would make `git clone` refuse a non-empty target; a cache
+#: under $HOME serves until the project exists, and later runs cache it in
+#: .bin without downloading again. Any failure (no network to GitHub, an
+#: unsupported OS/arch, a bad archive) just means "no gum": init_gum then
+#: keeps the plain rendering, silently.
+bootstrap_gum() {
+    local os="" arch="" ext="tar.gz" bin_name="gum" target_dir="" target=""
+    local archive="" tmpdir="" grabbed=""
+    case "$(uname -s 2>/dev/null)" in
+    Linux) os="Linux" ;;
+    Darwin) os="Darwin" ;;
+    MINGW* | MSYS* | CYGWIN*)
+        os="Windows"
+        ext="zip"
+        bin_name="gum.exe"
+        ;;
+    *) return 1 ;;
+    esac
+    case "$(uname -m 2>/dev/null)" in
+    x86_64 | amd64) arch="x86_64" ;;
+    aarch64 | arm64) arch="arm64" ;;
+    i386 | i486 | i586 | i686) arch="i386" ;;
+    *) return 1 ;;
+    esac
+    if [ -e "$PROJECT_DIR" ]; then
+        target_dir="$PROJECT_DIR/.bin"
+    else
+        target_dir="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/telegram-downloader-bot/bin"
+    fi
+    target="$target_dir/$bin_name"
+    if [ ! -f "$target" ]; then
+        tmpdir="$(mktemp -d 2>/dev/null)" || return 1
+        archive="$tmpdir/gum.$ext"
+        gum_fetch \
+            "https://github.com/charmbracelet/gum/releases/download/v$GUM_VERSION/gum_${GUM_VERSION}_${os}_${arch}.$ext" \
+            "$archive" || {
+            rm -rf "$tmpdir"
+            return 1
+        }
+        if [ "$ext" = "zip" ]; then
+            command -v unzip >/dev/null 2>&1 || {
+                rm -rf "$tmpdir"
+                return 1
+            }
+            unzip -o -j -d "$tmpdir" "$archive" '*/gum.exe' >/dev/null 2>&1
+            grabbed="$(find "$tmpdir" -maxdepth 1 -type f -name 'gum.exe' 2>/dev/null | head -n 1)"
+        else
+            tar -xzf "$archive" -C "$tmpdir" 2>/dev/null || {
+                rm -rf "$tmpdir"
+                return 1
+            }
+            grabbed="$(find "$tmpdir" -type f -name gum 2>/dev/null | head -n 1)"
+        fi
+        if [ -z "$grabbed" ] || [ ! -f "$grabbed" ]; then
+            rm -rf "$tmpdir"
+            return 1
+        fi
+        mkdir -p "$target_dir" 2>/dev/null || {
+            rm -rf "$tmpdir"
+            return 1
+        }
+        mv "$grabbed" "$target" 2>/dev/null || {
+            rm -rf "$tmpdir"
+            return 1
+        }
+        rm -rf "$tmpdir"
+    fi
+    # -f (not -x) says "already cached": some filesystems and emulation layers
+    # drop the exec bit, so it is simply re-applied on every run.
+    chmod +x "$target" 2>/dev/null || true
+    PATH="$target_dir:$PATH"
+    export PATH
+}
+
+#: The ONE decision point. HAS_GUM=1 only when the dashboard flow is running on
+#: a real terminal and gum answers — system-wide or self-bootstrapped. The
+#: subcommands (GUM_ALLOWED=0) return before so much as looking for gum.
+init_gum() {
+    HAS_GUM=0
+    [ "${GUM_ALLOWED:-0}" = 1 ] || return 0
+    [ -n "$TTY_IN" ] || return 0
+    [ -t 1 ] || return 0
+    if ! command -v gum >/dev/null 2>&1; then
+        bootstrap_gum || return 0
+    fi
+    gum --version >/dev/null 2>&1 || return 0
+    HAS_GUM=1
+}
+
+#: The dashboard menu as gum choose options — the labels keep their numbers so
+#: the plain menu's muscle memory still works.
+GUM_MENU_CHOICES=(
+    "[1] 🚀 Install Bot (already installed — updates instead)"
+    "[2] 🔄 Update Bot (git pull + rebuild)"
+    "[3] ▶️  Start / Restart Services"
+    "[4] 🛑 Stop Services"
+    "[5] 📊 View Status & Logs"
+    "[6] 🩺 Run Diagnostics"
+    "[7] 🗑️  Uninstall"
+    "[0] ❌ Exit"
+)
 
 # ---------------------------------------------------------------------------
 # Docker, and where the project lives
@@ -238,7 +398,7 @@ write_env() {
     local token="${BOT_TOKEN:-}" admins="${ADMIN_IDS:-}" card="" lang=""
     # Read silently, like a password prompt: the token is typed once and must
     # not end up in the terminal's scrollback.
-    [ -z "$token" ] && ask_secret "Bot token from @BotFather (BOT_TOKEN, input hidden):" ""
+    [ -z "$token" ] && ask_secret "Bot token from @BotFather (BOT_TOKEN, input hidden):"
     [ -z "$token" ] && token="$ASK_REPLY"
     ask "Admin Telegram IDs, comma separated (e.g. 1234,5678):" "${ADMIN_IDS:-}"
     admins="$ASK_REPLY"
@@ -278,8 +438,14 @@ cookie_jar_step() {
         say "${DIM}Skipped. Drop a cookies.txt here later — the bot picks it up live.${RESET}"
         return 0
     }
-    say "Paste it, then press ENTER and CTRL+D."
-    cat >cookies.txt <"$TTY_IN"
+    if [ "$HAS_GUM" = 1 ]; then
+        # The pinned gum's editor submits on ENTER (Ctrl+J inserts a newline) —
+        # checked against its keymap, where the old Ctrl+D hint would lie.
+        gum write --placeholder "Paste cookies.txt, then press ENTER to save" --height 20 </dev/null >cookies.txt
+    else
+        say "Paste it, then press ENTER and CTRL+D."
+        cat >cookies.txt <"$TTY_IN"
+    fi
     [ -s cookies.txt ] && ok "Wrote cookies.txt." || warn "cookies.txt is empty — ignored."
 }
 
@@ -333,6 +499,16 @@ preflight_resources() {
 build_and_log() {
     local log_file="$1"
     say "${DIM}Build log: $log_file${RESET}"
+    if [ "$HAS_GUM" = 1 ]; then
+        # A spinner over the build. The build still tees every line into the log
+        # inside the wrapped shell, and gum spin exits with the wrapped command's
+        # own status (checked against the pinned binary), so what comes back is
+        # the build's real exit code — not tee's, not gum's.
+        export -f compose fail
+        gum spin --show-error --title "Building and starting the containers..." -- \
+            bash -c 'compose up -d --build 2>&1 | tee "$1"; exit "${PIPESTATUS[0]}"' _ "$log_file" </dev/null
+        return $?
+    fi
     compose up -d --build 2>&1 | tee "$log_file"
     return "${PIPESTATUS[0]}"
 }
@@ -545,7 +721,13 @@ do_status() {
 #: Ask which service to act on; the answer lands in SERVICE_PICK (default: bot).
 #: The choices are the SERVICES list — the same one the dashboard shows.
 pick_service() {
-    local service index=1
+    local service index=1 n=0 picked=""
+    SERVICE_PICK="bot"
+    if [ "$HAS_GUM" = 1 ]; then
+        picked="$(gum choose --header "Tail which service's logs?" "${SERVICES[@]}" </dev/null)" || picked=""
+        [ -n "$picked" ] && SERVICE_PICK="$picked"
+        return 0
+    fi
     say "Tail which service's logs?"
     for service in "${SERVICES[@]}"; do
         printf '   %b[%d]%b %s\n' "$BOLD" "$index" "$RESET" "$service"
@@ -562,8 +744,14 @@ pick_service() {
         [ "$SERVICE_PICK" = "bot" ] && warn "No such service: $ASK_REPLY — using bot."
         ;;
     *)
-        if [ "$ASK_REPLY" -ge 1 ] && [ "$ASK_REPLY" -le "${#SERVICES[@]}" ]; then
-            SERVICE_PICK="${SERVICES[$((ASK_REPLY - 1))]}"
+        # 10# forces base ten: "08" is eight here. The bare arithmetic used to
+        # parse it as octal and die with "value too great for base" mid-menu;
+        # the length guard keeps an absurd digit run from wrapping around.
+        if [ "${#ASK_REPLY}" -le 9 ]; then
+            n=$((10#$ASK_REPLY))
+        fi
+        if [ "$n" -ge 1 ] && [ "$n" -le "${#SERVICES[@]}" ]; then
+            SERVICE_PICK="${SERVICES[$((n - 1))]}"
         else
             warn "Out of range: $ASK_REPLY — using bot."
         fi
@@ -642,19 +830,34 @@ do_uninstall() {
 
 show_dashboard() {
     clear 2>/dev/null || true
-    # A few lines of ASCII above the box — the name in a form that renders even
-    # on a terminal with no emoji font at all (unlike the menu below).
-    printf '%b\n' "${BOLD}${CYAN}  .-----------------------------.${RESET}"
-    printf '%b\n' "${BOLD}${CYAN}  |   TELEGRAM DOWNLOADER BOT   |${RESET}"
-    printf '%b\n' "${BOLD}${CYAN}  '-----------------------------'${RESET}"
-    rule
-    printf '%b\n' "${BOLD}${BLUE}   Telegram Downloader Bot — control center${RESET}"
-    rule
+    if [ "$HAS_GUM" = 1 ]; then
+        gum style --border rounded --padding "0 2" --border-foreground "39" --bold \
+            "Telegram Downloader Bot — control center"
+    else
+        # One calm note, once per run, the first time the plain menu renders on
+        # a real terminal — not a warning: the plain menu is first-class here.
+        if [ -t 1 ] && [ "$GUM_NOTE_DONE" = 0 ]; then
+            GUM_NOTE_DONE=1
+            say "${DIM}gum not available — using the plain menu.${RESET}"
+            say ""
+        fi
+        # A few lines of ASCII above the box — the name in a form that renders even
+        # on a terminal with no emoji font at all (unlike the menu below).
+        printf '%b\n' "${BOLD}${CYAN}  .-----------------------------.${RESET}"
+        printf '%b\n' "${BOLD}${CYAN}  |   TELEGRAM DOWNLOADER BOT   |${RESET}"
+        printf '%b\n' "${BOLD}${CYAN}  '-----------------------------'${RESET}"
+        rule
+        printf '%b\n' "${BOLD}${BLUE}   Telegram Downloader Bot — control center${RESET}"
+        rule
+    fi
     printf '%b\n' "   ${DIM}project:${RESET} $PROJECT_DIR"
     printf '%b\n' "   ${DIM}version:${RESET} $(project_version)"
     service_status
     rule
     say ""
+    if [ "$HAS_GUM" = 1 ]; then
+        return 0 # gum choose draws the menu itself
+    fi
     printf '%b\n' "   ${BOLD}[1]${RESET} 🚀 Install Bot ${DIM}(already installed — updates instead)${RESET}"
     printf '%b\n' "   ${BOLD}[2]${RESET} 🔄 Update Bot ${DIM}(git pull + rebuild)${RESET}"
     printf '%b\n' "   ${BOLD}[3]${RESET} ▶️  Start / Restart Services"
@@ -668,21 +871,42 @@ show_dashboard() {
 }
 
 menu_loop() {
+    local choice=""
     while true; do
         show_dashboard
-        ask "Choose an option [0-7]:" "0"
+        if [ "$HAS_GUM" = 1 ]; then
+            # An aborted choose (Esc, Ctrl+C) leaves the answer empty, handled
+            # below exactly like [0]: say goodbye and leave.
+            choice="$(gum choose --header "Choose an option [0-7]:" "${GUM_MENU_CHOICES[@]}" </dev/null)" || choice=""
+        else
+            ask "Choose an option [0-7]:" "0"
+            choice="$ASK_REPLY"
+        fi
         say ""
-        case "$ASK_REPLY" in
-        1) do_install ;;
-        2) do_update ;;
-        3) do_start ;;
-        4) do_stop ;;
-        5) do_status ;;
-        6) do_diagnostics ;;
-        7) do_uninstall ;;
-        0 | q | quit | exit) ok "Bye."; exit 0 ;;
-        *) warn "Unknown option: $ASK_REPLY" ;;
-        esac
+        if [ "$HAS_GUM" = 1 ]; then
+            case "${choice:0:3}" in
+            "[1]") do_install ;;
+            "[2]") do_update ;;
+            "[3]") do_start ;;
+            "[4]") do_stop ;;
+            "[5]") do_status ;;
+            "[6]") do_diagnostics ;;
+            "[7]") do_uninstall ;;
+            *) ok "Bye."; exit 0 ;; # [0] Exit, or an aborted choose
+            esac
+        else
+            case "$choice" in
+            1) do_install ;;
+            2) do_update ;;
+            3) do_start ;;
+            4) do_stop ;;
+            5) do_status ;;
+            6) do_diagnostics ;;
+            7) do_uninstall ;;
+            0 | q | quit | exit) ok "Bye."; exit 0 ;;
+            *) warn "Unknown option: $choice" ;;
+            esac
+        fi
         # An uninstall that removed the directory cannot keep walking a menu that
         # belongs to it.
         installed || exit 0
@@ -713,6 +937,14 @@ EOF
 
 main() {
     detect_layout
+
+    # gum decorates the no-argument dashboard flow only; the subcommands below
+    # are scripted entry points and keep their plain, byte-stable output even
+    # on a terminal.
+    case "${1:-}" in
+    "") GUM_ALLOWED=1 ;;
+    esac
+    init_gum
 
     case "${1:-}" in
     -h | --help)
