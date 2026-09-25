@@ -47,7 +47,26 @@ else
     TTY_IN=""
 fi
 
-rule() { printf '%b\n' "${BLUE}────────────────────────────────────────────────${RESET}"; }
+#: The divider's width: the terminal's own when it can be measured (a fixed-width
+#: rule wraps and garbles the box on a narrow SSH client — a phone), the classic
+#: fixed width when it cannot (no tty, or no tput to ask).
+rule_width() {
+    local cols=""
+    [ -n "$TTY_IN" ] || { printf '%s' 48; return 0; }
+    command -v tput >/dev/null 2>&1 || { printf '%s' 48; return 0; }
+    cols="$(tput cols 2>/dev/null)" || cols=""
+    case "$cols" in
+    '' | *[!0-9]*) printf '%s' 48 ;;
+    *) printf '%s' "$cols" ;;
+    esac
+}
+
+rule() {
+    local width line
+    width="$(rule_width)"
+    printf -v line '%*s' "$width" ''
+    printf '%b\n' "${BLUE}${line// /─}${RESET}"
+}
 say() { printf '%b\n' "$*"; }
 ok() { printf '%b\n' "${GREEN}$*${RESET}"; }
 warn() { printf '%b\n' "${YELLOW}$*${RESET}"; }
@@ -57,6 +76,9 @@ fail() { printf '%b\n' "${RED}$*${RESET}"; }
 #: read even when every prompt was skipped, as in the non-interactive install).
 ASK_REPLY=""
 
+#: The service an action names (the log picker sets it; default: bot).
+SERVICE_PICK=""
+
 #: Prompt, with an optional default. The answer lands in ASK_REPLY.
 ask() {
     local prompt="$1" default="${2:-}" answer=""
@@ -65,6 +87,20 @@ ask() {
     printf '%b ' "${CYAN}${prompt}${RESET}" >&2
     IFS= read -r answer <"$TTY_IN" || answer=""
     answer="${answer%$'\r'}"   # a terminal that sends CRLF
+    [ -n "$answer" ] && ASK_REPLY="$answer"
+}
+
+#: Prompt for a secret without echo — the answer lands in ASK_REPLY. A bot token
+#: is a credential: it must never sit in the terminal scrollback, where a shared
+#: screen or a recording hands it to everyone.
+ask_secret() {
+    local prompt="$1" answer=""
+    ASK_REPLY=""
+    [ -z "$TTY_IN" ] && return 0
+    printf '%b ' "${CYAN}${prompt}${RESET}" >&2
+    IFS= read -rs answer <"$TTY_IN" || answer=""
+    printf '\n' >&2
+    answer="${answer%$'\r'}"
     [ -n "$answer" ] && ASK_REPLY="$answer"
 }
 
@@ -127,6 +163,46 @@ running_services() {
     printf '%s' "${count:-0}"
 }
 
+#: The nine services this stack runs — docker-compose.yml is the source of truth.
+#: The dashboard's status list and the log picker read this one list, so "the
+#: service" can never mean two different things on two screens.
+SERVICES=(postgres redis warp yt-session-generator telegram-api pot-provider cobalt cobalt-warp bot)
+
+#: Per-service status: the "X/9 running" summary first, then one colored ●/○ per
+#: service. One stopped service is a *partial* failure and must never read as
+#: healthy — the old single aggregate line happily showed "8 running" in green.
+service_status() {
+    local running_list="" service mark color running=0 total="${#SERVICES[@]}" rows=()
+    running_list="$(compose ps --status running --services 2>/dev/null)" || running_list=""
+    for service in "${SERVICES[@]}"; do
+        if printf '%s\n' "$running_list" | grep -qx "$service"; then
+            mark="${GREEN}●"
+            running=$((running + 1))
+        else
+            mark="${DIM}○"
+        fi
+        rows+=("     ${mark} ${service}${RESET}")
+    done
+    if [ "$running" -ge "$total" ]; then
+        color="$GREEN"
+    else
+        color="$YELLOW"   # partial (or total) failure — exactly what this line shows
+    fi
+    printf '   %bstatus:%b  %b● %d/%d running%b\n' "$DIM" "$RESET" "$color" "$running" "$total" "$RESET"
+    printf '%b\n' "${rows[@]}"
+}
+
+#: The revision this install runs — what "the installed version" means here.
+#: .git is gone in some deployments (a copied tree, a release archive), and
+#: "unknown" is the honest answer there, never a crash.
+project_version() {
+    local sha=""
+    if [ -d "$PROJECT_DIR/.git" ] && command -v git >/dev/null 2>&1; then
+        sha="$(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null)" || sha=""
+    fi
+    printf '%s' "${sha:-unknown}"
+}
+
 #: Decide where the project is before touching anything.
 #:
 #: Two ways in, and they need different answers: a piped `curl … | bash` has no
@@ -160,7 +236,9 @@ write_env() {
         return 0
     fi
     local token="${BOT_TOKEN:-}" admins="${ADMIN_IDS:-}" card="" lang=""
-    [ -z "$token" ] && ask "Bot token from @BotFather (BOT_TOKEN):" ""
+    # Read silently, like a password prompt: the token is typed once and must
+    # not end up in the terminal's scrollback.
+    [ -z "$token" ] && ask_secret "Bot token from @BotFather (BOT_TOKEN, input hidden):" ""
     [ -z "$token" ] && token="$ASK_REPLY"
     ask "Admin Telegram IDs, comma separated (e.g. 1234,5678):" "${ADMIN_IDS:-}"
     admins="$ASK_REPLY"
@@ -218,6 +296,47 @@ cobalt_dir_step() {
     return 0
 }
 
+#: A soft pre-flight for the build: nine containers and a compile want room.
+#: Advisory only — a thin box is warned about and then *still* installed on; the
+#: numbers are shown so the operator knows what to upgrade, never to block.
+preflight_resources() {
+    local mem_kb="" disk_kb=""
+    [ -r /proc/meminfo ] && mem_kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)"
+    if [ -z "$mem_kb" ] && command -v sysctl >/dev/null 2>&1; then
+        mem_kb="$(sysctl -n hw.memsize 2>/dev/null | awk '{print int($1 / 1024)}')"
+    fi
+    disk_kb="$(df -Pk . 2>/dev/null | awk 'NR==2 {print $4}')"
+    case "$mem_kb" in
+    '' | *[!0-9]*) ;; # nothing measured here — silence beats a made-up number
+    *)
+        if [ "$mem_kb" -lt $((2 * 1024 * 1024)) ]; then
+            warn "Only $((mem_kb / 1024)) MB of RAM on this machine — 2 GB or more keeps"
+            warn "this nine-container stack comfortable. Continuing anyway."
+        fi
+        ;;
+    esac
+    case "$disk_kb" in
+    '' | *[!0-9]*) ;;
+    *)
+        if [ "$disk_kb" -lt $((5 * 1024 * 1024)) ]; then
+            warn "Only $(awk -v k="$disk_kb" 'BEGIN { printf "%.1f", k / 1024 / 1024 }') GB of free disk here — images,"
+            warn "builds and downloads want 5 GB or more. Continuing anyway."
+        fi
+        ;;
+    esac
+}
+
+#: Build the stack with every line also written to a timestamped log in the
+#: project dir — a failed build scrolls its evidence off the screen, and the
+#: operator needs a file to inspect (or paste into an issue). `tee` is last in
+#: the pipe, so the build's own exit code comes back via PIPESTATUS.
+build_and_log() {
+    local log_file="$1"
+    say "${DIM}Build log: $log_file${RESET}"
+    compose up -d --build 2>&1 | tee "$log_file"
+    return "${PIPESTATUS[0]}"
+}
+
 do_install() {
     rule
     say "${BOLD}🚀 Install${RESET}"
@@ -254,12 +373,15 @@ do_install() {
     cobalt_dir_step
 
     say ""
+    preflight_resources
     say "${GREEN}Building and starting the containers...${RESET}"
     say "${DIM}(bot, PostgreSQL, Redis, local Bot API, Cobalt fallback, PO-token"
     say "provider, YouTube session server, WARP tunnel — the first build takes a while)${RESET}"
-    compose up -d --build || {
+    local log_file="install-$(date +%Y%m%d-%H%M%S).log"
+    build_and_log "$log_file" || {
         fail "docker compose failed to bring the stack up."
         say "The build log above names the service — then:  docker compose logs <service>"
+        say "Everything the build printed is kept in:  $PROJECT_DIR/$log_file"
         return 1
     }
     print_next_steps
@@ -296,6 +418,8 @@ do_update() {
     }
     cd "$PROJECT_DIR" || return 1
     if [ -d .git ]; then
+        local old_head="" new_head="" changes="" count=0
+        old_head="$(git rev-parse --short HEAD 2>/dev/null)" || old_head=""
         say "${GREEN}Pulling the latest code...${RESET}"
         if ! git pull --ff-only; then
             fail "git pull failed (local changes, or a diverged branch)."
@@ -303,12 +427,26 @@ do_update() {
             say "  git status   /   git stash   /   git pull --ff-only"
             return 1
         fi
+        new_head="$(git rev-parse --short HEAD 2>/dev/null)" || new_head=""
+        # "Updated." alone says nothing about *what* arrived — the commits
+        # between the two heads are the honest answer, capped so one huge pull
+        # cannot bury the menu.
+        changes="$(git log --oneline "$old_head..HEAD" 2>/dev/null)" || changes=""
+        count="$(printf '%s\n' "$changes" | grep -c .)"
+        if [ -n "$old_head" ] && [ "$old_head" != "$new_head" ] && [ "${count:-0}" -gt 0 ]; then
+            say ""
+            say "${BOLD}What changed ($count commit(s), $old_head → $new_head):${RESET}"
+            printf '%s\n' "$changes" | sed -n '1,10p' | sed 's/^/  • /'
+            [ "$count" -gt 10 ] && say "  ${DIM}...and $((count - 10)) more — 'git log' has the rest${RESET}"
+        fi
     else
         warn "No .git here — skipping the code update, rebuilding what is present."
     fi
     say "${GREEN}Rebuilding and restarting...${RESET}"
-    compose up -d --build || {
+    local log_file="update-$(date +%Y%m%d-%H%M%S).log"
+    build_and_log "$log_file" || {
         fail "docker compose failed. The stack is still running the previous build."
+        say "Everything the build printed is kept in:  $PROJECT_DIR/$log_file"
         return 1
     }
     ok "Updated. A rebuilt image replaces the containers; data lives in volumes."
@@ -384,26 +522,86 @@ do_status() {
         return 1
     fi
     say ""
-    say "Running: $(running_services) service(s)"
+    service_status
     [ -f .env ] || warn "No .env here — the bot will refuse to start without BOT_TOKEN."
     if [ -z "$TTY_IN" ]; then
         compose logs --tail=50 bot
         return 0
     fi
     say ""
-    if ! confirm "Follow the bot's log now? (Ctrl+C comes back to this menu)"; then
-        compose logs --tail=20 bot || true
+    pick_service
+    say ""
+    if ! confirm "Follow $SERVICE_PICK's log now? (Ctrl+C comes back to this menu)"; then
+        compose logs --tail=20 "$SERVICE_PICK" || true
         return 0
     fi
     # A trap, so Ctrl+C stops `docker compose logs` and returns here instead of
     # closing the whole script on the operator who only wanted to stop reading.
     trap 'printf "\n"; warn "Log view stopped."' INT
-    compose logs --tail=50 -f bot
+    compose logs --tail=50 -f "$SERVICE_PICK"
     trap - INT
 }
 
+#: Ask which service to act on; the answer lands in SERVICE_PICK (default: bot).
+#: The choices are the SERVICES list — the same one the dashboard shows.
+pick_service() {
+    local service index=1
+    say "Tail which service's logs?"
+    for service in "${SERVICES[@]}"; do
+        printf '   %b[%d]%b %s\n' "$BOLD" "$index" "$RESET" "$service"
+        index=$((index + 1))
+    done
+    ask "Service [1-${#SERVICES[@]} or a name] (Enter = bot):" "bot"
+    SERVICE_PICK="bot"
+    case "$ASK_REPLY" in
+    '' | bot) ;;
+    *[!0-9]*)
+        for service in "${SERVICES[@]}"; do
+            [ "$ASK_REPLY" = "$service" ] && SERVICE_PICK="$service"
+        done
+        [ "$SERVICE_PICK" = "bot" ] && warn "No such service: $ASK_REPLY — using bot."
+        ;;
+    *)
+        if [ "$ASK_REPLY" -ge 1 ] && [ "$ASK_REPLY" -le "${#SERVICES[@]}" ]; then
+            SERVICE_PICK="${SERVICES[$((ASK_REPLY - 1))]}"
+        else
+            warn "Out of range: $ASK_REPLY — using bot."
+        fi
+        ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
-# 6. Uninstall
+# 6. Run diagnostics
+# ---------------------------------------------------------------------------
+
+do_diagnostics() {
+    rule
+    say "${BOLD}🩺 Run Diagnostics${RESET}"
+    rule
+    installed || {
+        warn "Nothing installed at $PROJECT_DIR yet."
+        return 0
+    }
+    cd "$PROJECT_DIR" || return 1
+    say "The bot's own boot checks, inside the bot container:"
+    say "${DIM}scripts/boot_check.py — images, cookies, fonts, versions, mounts${RESET}"
+    say ""
+    if [ -n "$TTY_IN" ]; then
+        compose exec bot python scripts/boot_check.py
+    else
+        # No terminal to allocate when this runs piped (`exec` fails on the
+        # missing TTY before a single check gets to run).
+        compose exec -T bot python scripts/boot_check.py
+    fi || {
+        fail "Diagnostics could not run — is the stack up? [3] Start / Restart Services."
+        return 1
+    }
+    ok "Diagnostics finished."
+}
+
+# ---------------------------------------------------------------------------
+# 7. Uninstall
 # ---------------------------------------------------------------------------
 
 do_uninstall() {
@@ -443,18 +641,18 @@ do_uninstall() {
 # ---------------------------------------------------------------------------
 
 show_dashboard() {
-    local running
-    running="$(running_services)"
     clear 2>/dev/null || true
+    # A few lines of ASCII above the box — the name in a form that renders even
+    # on a terminal with no emoji font at all (unlike the menu below).
+    printf '%b\n' "${BOLD}${CYAN}  .-----------------------------.${RESET}"
+    printf '%b\n' "${BOLD}${CYAN}  |   TELEGRAM DOWNLOADER BOT   |${RESET}"
+    printf '%b\n' "${BOLD}${CYAN}  '-----------------------------'${RESET}"
     rule
     printf '%b\n' "${BOLD}${BLUE}   Telegram Downloader Bot — control center${RESET}"
     rule
     printf '%b\n' "   ${DIM}project:${RESET} $PROJECT_DIR"
-    if [ "${running:-0}" -gt 0 ]; then
-        printf '%b\n' "   ${DIM}status:${RESET}  ${GREEN}● ${running} service(s) running${RESET}"
-    else
-        printf '%b\n' "   ${DIM}status:${RESET}  ${YELLOW}● stopped${RESET}"
-    fi
+    printf '%b\n' "   ${DIM}version:${RESET} $(project_version)"
+    service_status
     rule
     say ""
     printf '%b\n' "   ${BOLD}[1]${RESET} 🚀 Install Bot ${DIM}(already installed — updates instead)${RESET}"
@@ -462,8 +660,9 @@ show_dashboard() {
     printf '%b\n' "   ${BOLD}[3]${RESET} ▶️  Start / Restart Services"
     printf '%b\n' "   ${BOLD}[4]${RESET} 🛑 Stop Services"
     printf '%b\n' "   ${BOLD}[5]${RESET} 📊 View Status & Logs"
-    printf '%b\n' "   ${BOLD}[6]${RESET} 🗑️  Uninstall"
-    printf '%b\n' "   ${BOLD}[0]${RESET} ❌ Exit"
+    printf '%b\n' "   ${BOLD}[6]${RESET} 🩺 Run Diagnostics"
+    printf '%b\n' "   ${BOLD}[7]${RESET} 🗑️  Uninstall"
+    printf '%b\n' "   ${BOLD}[0]${RESET} ❌ Exit ${DIM}(or q)${RESET}"
     say ""
     rule
 }
@@ -471,7 +670,7 @@ show_dashboard() {
 menu_loop() {
     while true; do
         show_dashboard
-        ask "Choose an option [0-6]:" "0"
+        ask "Choose an option [0-7]:" "0"
         say ""
         case "$ASK_REPLY" in
         1) do_install ;;
@@ -479,7 +678,8 @@ menu_loop() {
         3) do_start ;;
         4) do_stop ;;
         5) do_status ;;
-        6) do_uninstall ;;
+        6) do_diagnostics ;;
+        7) do_uninstall ;;
         0 | q | quit | exit) ok "Bye."; exit 0 ;;
         *) warn "Unknown option: $ASK_REPLY" ;;
         esac
@@ -501,7 +701,11 @@ Telegram Downloader Bot — installer and control center.
   ./install.sh start        start / restart the stack
   ./install.sh stop         stop the stack
   ./install.sh status       containers and the last log lines
+  ./install.sh diagnostics  run the bot's boot checks in the container
   ./install.sh uninstall    stop, delete volumes, optionally delete the directory
+
+  ./install.sh --version    print the revision this installer belongs to
+  ./install.sh --help       this text
 
   curl -fsSL <raw-url>/install.sh | bash     install a fresh server
 EOF
@@ -515,7 +719,11 @@ main() {
         usage
         exit 0
         ;;
-    install | update | start | stop | status | uninstall)
+    -v | --version)
+        say "Telegram Downloader Bot — installer and control center (revision $(project_version))"
+        exit 0
+        ;;
+    install | update | start | stop | status | diagnostics | uninstall)
         local action="$1"
         if [ "$action" = "install" ] || installed; then
             "do_$action"
