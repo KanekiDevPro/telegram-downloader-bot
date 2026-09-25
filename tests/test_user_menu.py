@@ -1929,7 +1929,7 @@ async def test_intake_text_never_grows_a_link_preview() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The raw link leaves the chat once the bot has answered it
+# The raw link leaves the chat the moment the link is recognized
 # ---------------------------------------------------------------------------
 
 
@@ -1962,19 +1962,86 @@ async def _link_arrives(
     )
 
 
-async def test_the_raw_link_leaves_the_chat_once_the_menu_answers(
+class _SlowProbe:
+    """A probe that will not answer until released — the seconds-long wait the
+    real extractor takes, frozen so a test can look inside it."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def extract(self, url: str) -> MediaInfo:
+        self.started.set()
+        await self.release.wait()
+        return _clip(None)
+
+
+async def _let_the_delete_land() -> None:
+    """The deletion is fire-and-forget — wait it out when a test wants to look."""
+    for task in list(user_module._pending_deletes):
+        await task
+
+
+async def test_the_raw_link_leaves_while_the_probe_is_still_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Some unofficial clients draw their own download preview under every raw
-    link — clutter beside the menu that now speaks for it. The pasted URL goes
-    the moment the bot has answered it."""
+    link — clutter beside the menu that now speaks for it. The pasted URL must
+    not sit there for the whole metadata probe: the delete is fired the moment
+    the link is recognized and runs *alongside* the flow, not behind it."""
+
+    async def supported(url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(user_module, "_probe_supported", supported)
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", no_cached_rows)
+    probe = _SlowProbe()
     bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=probe)
+
+    answering = asyncio.create_task(
+        user_module.on_text_with_url(
+            _message("https://youtu.be/abc", bot),
+            _fresh_state(),
+            _user(),
+            object(),
+            _fake_queue(),
+            bot,
+            lang=FA,
+        )
+    )
+    await probe.started.wait()  # the heavy probe is now in flight and stuck
+    await _let_the_delete_land()
+    assert [call.message_id for call in _deletes(bot)] == [1], (
+        "gone while extraction still runs — the user's message, never the bot's own"
+    )
+
+    probe.release.set()
+    await answering
+    assert any(isinstance(call, (SendMessage, SendPhoto)) for call in bot.calls), (
+        "and the menu still arrives afterwards"
+    )
+
+
+async def test_a_delete_that_blows_up_never_touches_the_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fire-and-forget means fire-and-forget: even a delete that dies on
+    something nobody predicted (a network error say) may not leak into the
+    handler — the courtesy is silent in every outcome."""
+
+    class _ExplodingBot(RecordingBot):
+        async def __call__(self, method: Any) -> Any:
+            if isinstance(method, DeleteMessage):
+                raise RuntimeError("the network ate it")
+            return await super().__call__(method)
+
+    bot = _ExplodingBot()
 
     await _link_arrives(bot, monkeypatch)
+    await _let_the_delete_land()
 
-    assert isinstance(bot.calls[-1], DeleteMessage), "deleted only after the menu is out"
-    assert bot.calls[-1].message_id == 1, "the user's message — never the bot's own"
-    assert any(isinstance(call, (SendMessage, SendPhoto)) for call in bot.calls[:-1])
+    assert len(bot.texts) == 1 and bot.keyboards[-1] is not None, "the menu is untouched"
 
 
 async def test_a_chat_that_refuses_the_deletion_still_gets_the_whole_menu(
@@ -2040,7 +2107,8 @@ async def test_a_link_sent_through_download_goes_the_same_way(
         bot,
         lang=FA,
     )
-    assert isinstance(bot.calls[-1], DeleteMessage)
+    await _let_the_delete_land()
+    assert [call.message_id for call in _deletes(bot)] == [1], "the pasted link leaves"
 
     spare = RecordingBot()
     await user_module.cmd_download(

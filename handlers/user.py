@@ -30,7 +30,6 @@ import aiohttp
 import asyncpg
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatAction
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -980,8 +979,7 @@ async def on_text_with_url(
         # through the same intake path (so a photo post still downloads itself).
         url = extract_url(message.text or "")
         if url and validate_url(url):
-            if await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue):
-                await _delete_raw_link(message)
+            await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
         else:
             await message.answer(
                 t("intake.invalid_link", lang), link_preview_options=_NO_PREVIEW
@@ -995,8 +993,7 @@ async def on_text_with_url(
     if not url:
         await message.answer(t("intake.no_link_found", lang), link_preview_options=_NO_PREVIEW)
         return
-    if await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue):
-        await _delete_raw_link(message)
+    await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
 
 
 @router.message(Command("download"))
@@ -1018,22 +1015,40 @@ async def cmd_download(
     if not url:
         await message.answer(t("intake.download_usage", lang), link_preview_options=_NO_PREVIEW)
         return
-    if await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue):
-        await _delete_raw_link(message)
+    await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
+
+
+#: The delete tasks in the air. A fire-and-forget task nothing references can be
+#: garbage-collected mid-flight (the loop keeps only a weak grip on it), so this
+#: set is the grip — and the one place a test can wait for the deletion.
+_pending_deletes: set[asyncio.Task[None]] = set()
+
+
+def _forget_raw_link(message: Message) -> None:
+    """Take the raw link out of the chat *now* — and make nothing wait for it.
+
+    The old order — delete once the bot had answered — made the courtesy cost
+    seconds: the menu is only drawn after the metadata probe, so the pasted URL
+    (and the preview some unofficial clients draw under it) sat in the chat for
+    the whole extraction. The link is known-good before any of that starts, so
+    the delete leaves immediately and runs *alongside* the flow.
+    """
+    task = asyncio.create_task(_delete_raw_link(message))
+    _pending_deletes.add(task)
+    task.add_done_callback(_pending_deletes.discard)
 
 
 async def _delete_raw_link(message: Message) -> None:
-    """Take the raw link out of the chat once the bot has answered it.
+    """The deletion itself — silent in every outcome.
 
-    Some unofficial clients draw their own download preview under every link a
-    chat receives, and the pasted URL is noise beside the menu that now speaks
-    for it. Deleting is a courtesy, never a requirement: a bot without delete
-    rights (a group where it is not an admin) — or a message already gone —
-    simply leaves the message where it is.
+    Deleting is a courtesy, never a requirement: a bot without delete rights
+    (a group where it is not an admin), a message already gone, or a network
+    hiccup must all leave the message where it is — and must never surface in a
+    handler or crash the fire-and-forget task above.
     """
     try:
         await message.delete()
-    except TelegramBadRequest:
+    except Exception:
         pass
 
 
@@ -1047,7 +1062,7 @@ async def _queue_url_flow(
     bot: Bot,
     pool: asyncpg.Pool,
     queue: TaskQueue,
-) -> bool:
+) -> None:
     """A link arrives: check it, then ask — or just start.
 
     No acknowledgement message. The *question* is the first thing the user sees —
@@ -1061,13 +1076,15 @@ async def _queue_url_flow(
     broken. It is queued straight away; ``services/delivery.py`` already knows how
     to send whatever comes back.
 
-    ``True`` means the link was real and has been answered — the caller may then
-    take the raw link out of the chat (``_delete_raw_link``). ``False`` means the
-    text never carried a valid link, and what the user wrote stays where it is.
+    A real link is answered whatever happens next, so its raw copy leaves right
+    here — fired off before the work below and running alongside it
+    (``_forget_raw_link``). An invalid link is not "answered" into deletion: what
+    the user wrote — no link, or a link-shaped typo — stays where it is.
     """
     if not validate_url(url):
         await message.answer(t("intake.invalid_link", lang), link_preview_options=_NO_PREVIEW)
-        return False
+        return
+    _forget_raw_link(message)
     # Share/short links and media *viewer* wrappers name their content somewhere
     # else: resolve them once, here — routing, the engines and the direct-download
     # path all see the real thing afterwards (see _canonical_url).
@@ -1081,9 +1098,9 @@ async def _queue_url_flow(
     # good photo link ends in "this site is not supported".
     if routing.kind not in _SELF_SERVED_KINDS and not await _probe_supported(url):
         await message.answer(t("intake.unsupported", lang), link_preview_options=_NO_PREVIEW)
-        # A *valid* link, answered — even though the answer is «no». What the
-        # user pasted has served its purpose and may leave the chat.
-        return True
+        # A *valid* link, answered — even though the answer is «no». Its raw
+        # copy left the chat the moment it was recognized.
+        return
     if routing.solo is not None:
         await state.clear()
         status = await message.answer(
@@ -1104,11 +1121,10 @@ async def _queue_url_flow(
             # already produced answers it — the zero-wait rule for solo links.
             fallback_any_tier=True,
         )
-        return True
+        return
     await _ask_about_link(
         message, state, user, url, lang, bot=bot, pool=pool, queue=queue
     )
-    return True
 
 
 async def _ask_about_link(
