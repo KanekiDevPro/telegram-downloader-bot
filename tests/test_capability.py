@@ -12,6 +12,7 @@ row. A button may only exist when the execution path can finish what it says.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -354,6 +355,34 @@ async def test_an_unresolvable_share_link_keeps_itself_and_still_runs(
     monkeypatch.setattr(user_module.aiohttp, "ClientSession", _Broken)
     url = "https://www.reddit.com/r/Aitoolsubs/s/d8L1HedJIy"
     assert await user_module._canonical_url(url) == url
+
+
+async def test_the_catalogue_probe_runs_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`is_url_supported` reads yt-dlp's whole site catalogue (its first call
+    imports every handler) — so it runs in a thread, like every other yt-dlp
+    touch. On the loop it freezes the whole intake behind it, the
+    fire-and-forget link delete included."""
+    loop_thread = threading.get_ident()
+    probe_threads: list[int] = []
+
+    def slow_probe(url: str) -> bool:
+        probe_threads.append(threading.get_ident())
+        return True
+
+    monkeypatch.setattr(
+        user_module.ExtractorService, "is_url_supported", staticmethod(slow_probe)
+    )
+    monkeypatch.setattr(content, "claims_platform", lambda url: True)
+    monkeypatch.setattr(content, "unwrap_media_url", lambda url: url)
+
+    resolved = await user_module._canonical_url("https://share.example/s/abc")
+
+    assert resolved == "https://share.example/s/abc"
+    assert probe_threads and probe_threads[0] != loop_thread, (
+        "the catalogue is read on a worker thread, never on the loop"
+    )
 
 
 # ---------------------------------------------------------------------------

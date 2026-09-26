@@ -2058,6 +2058,46 @@ async def test_a_chat_that_refuses_the_deletion_still_gets_the_whole_menu(
     assert bot.keyboards[-1] is not None, "with its menu"
 
 
+async def test_the_delete_reaches_telegram_before_the_pipeline_moves_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One explicit yield after firing the delete is what makes "the link leaves
+    *now*" true: the deletion is a task, and a task runs only when the loop gets
+    control back — while everything below it (resolving, probing, routing) is
+    eager work that would otherwise run first. Pinned by counting the deletes
+    from *inside* the next stage."""
+
+    async def supported(url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(user_module, "_probe_supported", supported)
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", no_cached_rows)
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    deletes_at_routing: list[int] = []
+
+    async def canonical(url: str) -> str:
+        deletes_at_routing.append(len(_deletes(bot)))
+        return url
+
+    monkeypatch.setattr(user_module, "_canonical_url", canonical)
+
+    await user_module.on_text_with_url(
+        _message("https://youtu.be/abc", bot),
+        _fresh_state(),
+        _user(),
+        object(),
+        _fake_queue(),
+        bot,
+        lang=FA,
+    )
+    await _let_the_delete_land()
+
+    assert deletes_at_routing == [1], (
+        "the delete reached Telegram before the routing pipeline was entered"
+    )
+
+
 async def test_a_message_the_bot_never_answered_stays_in_the_chat() -> None:
     """No link at all, a link-shaped string that is not a link, or another step
     in progress: the message is the user's, and deleting it would be vandalism
@@ -2289,6 +2329,75 @@ async def test_a_tap_on_the_cached_menu_replays_instead_of_downloading(
     assert queue.tasks == [], "and the heavy job never runs"
 
 
+async def test_the_tapped_menu_leaves_once_the_cached_file_lands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nuke the scaffolding on the instant path too: a menu answered by a cache
+    replay deletes itself the moment the file lands — the chat keeps the file,
+    not the screen that asked for it."""
+    user_module._recent_requests.clear()
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
+
+    async def get_cached(pool: Any, url: str, media_format: str, quality: object) -> Any:
+        return {"telegram_file_id": "v-1", "kind": "video", "quality": "video:720"}
+
+    sent: list[Any] = []
+
+    async def replay(
+        bot: Any, chat_id: int, cached: Any, caption: str | None = None, **kwargs: Any
+    ) -> bool:
+        sent.append(cached)
+        return True
+
+    monkeypatch.setattr(user_module.cache_service, "get_cached", get_cached)
+    monkeypatch.setattr(user_module, "send_cached_file", replay)
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    state = _fresh_state()
+    queue = _fake_queue()
+    await user_module.on_text_with_url(
+        _message("https://youtu.be/abc", bot), state, _user(), object(), queue, bot, lang=FA
+    )
+    assert len(_deletes(bot)) == 1, "the raw link left at intake"
+
+    await user_module.on_format_chosen(
+        _callback(bot, "fmt:video:720"), state, _user(), object(), queue, bot, lang=FA
+    )
+
+    assert sent, "the stored file was replayed"
+    assert len(_deletes(bot)) == 2, "and the tapped menu goes the moment its file lands"
+
+
+async def test_a_menu_the_chat_refuses_to_delete_still_delivers_its_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deleting the tapped menu is a courtesy; the replay that just arrived is
+    the product. No delete rights may never turn a delivered file into an
+    error."""
+    user_module._recent_requests.clear()
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
+
+    async def get_cached(pool: Any, url: str, media_format: str, quality: object) -> Any:
+        return {"telegram_file_id": "v-1", "kind": "video", "quality": "video:720"}
+
+    sent = _replay_recorder(monkeypatch)
+    monkeypatch.setattr(user_module.cache_service, "get_cached", get_cached)
+    bot = _NoDeleteBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    state = _fresh_state()
+    queue = _fake_queue()
+    await user_module.on_text_with_url(
+        _message("https://youtu.be/abc", bot), state, _user(), object(), queue, bot, lang=FA
+    )
+
+    await user_module.on_format_chosen(
+        _callback(bot, "fmt:video:720"), state, _user(), object(), queue, bot, lang=FA
+    )
+
+    assert sent, "the file arrived all the same"
+    assert queue.tasks == [], "and nothing about the refusal re-queued the job"
+
+
 async def test_the_full_menu_button_runs_the_real_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2375,6 +2484,24 @@ async def test_a_solo_link_replays_what_it_already_produced_instead_of_downloadi
 
     assert [row["telegram_file_id"] for row in sent] == ["v-1"], "the newest stored row, at once"
     assert queue.tasks == [], "the heavy queue is never touched"
+
+
+async def test_a_solo_replay_takes_the_status_card_down_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The auto-best path's card is scaffolding the same way: once the stored
+    file lands, the raw link *and* the card are gone — the file is the chat."""
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cached_row)
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
+    sent = _replay_recorder(monkeypatch)
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    queue = _fake_queue()
+
+    await _solo_link_arrives(bot, queue)
+
+    assert sent, "the stored sibling answered at once"
+    assert len(_deletes(bot)) == 2, "the raw link and the card — only the file remains"
 
 
 async def test_a_dead_cached_row_is_dropped_and_the_solo_link_downloads(

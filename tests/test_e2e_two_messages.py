@@ -1,11 +1,12 @@
-"""The end-to-end message-count contract: one download, two messages.
+"""The end-to-end message-count contract: one download, one message left.
 
 MESSAGE #1 is the media card (the state message everything narrates in) and
-MESSAGE #2 is the delivered media. Nothing else may reach the chat — no
-"please wait", no "queued", no "uploading", ever. Chat actions, callback
-acknowledgements, edits of the card and log lines are not messages and do not
-count; this test drives the real worker orchestration and counts what Telegram
-would show.
+MESSAGE #2 is the delivered media — and #1 is scaffolding: it is deleted the
+moment #2 lands, so the chat is left holding exactly the file and nothing
+standing next to it. Nothing else may reach the chat — no "please wait", no
+"queued", no "uploading", ever. Chat actions, callback acknowledgements, edits
+of the card and log lines are not messages and do not count; this test drives
+the real worker orchestration and counts what Telegram would show.
 """
 from __future__ import annotations
 
@@ -41,15 +42,20 @@ FORBIDDEN = (
 
 
 class Status:
-    """The one message the job narrates in."""
+    """The one message the job narrates in — and takes back down at the end."""
 
     message_id = 7
 
-    def __init__(self) -> None:
+    def __init__(self, bot: "FakeBot | None" = None) -> None:
         self.edits: list[str] = []
+        self.bot = bot
 
     async def edit_text(self, text: str, **kwargs: Any) -> None:
         self.edits.append(text)
+
+    async def delete(self) -> None:
+        if self.bot is not None:
+            self.bot.deleted.append("card")
 
 
 class FakeBot:
@@ -60,10 +66,11 @@ class FakeBot:
         self.edits: list[str] = []  # rewrites of an existing message
         self.uploads: list[str] = []  # delivered media
         self.actions: list[Any] = []  # chat actions — NOT messages
+        self.deleted: list[str] = []  # messages taken back down (the card, post-file)
 
     async def send_message(self, chat_id: int, text: str, **kwargs: Any) -> Status:
         self.messages.append(text)
-        return Status()
+        return Status(self)
 
     async def edit_message_text(self, text: str = "", **kwargs: Any) -> None:
         self.edits.append(text)
@@ -76,7 +83,10 @@ class FakeBot:
             return None
         if "send" in name:
             self.messages.append(str(getattr(method, "text", "")))
-            return Status()
+            return Status(self)
+        if "delete" in name:
+            self.deleted.append("card")
+            return True
         return None
 
     async def send_video(self, chat_id: int, video: Any = None, **kwargs: Any) -> Any:
@@ -260,13 +270,13 @@ def _assert_clean(bot: FakeBot) -> None:
             assert word not in lowered, f"«{word}» reached the chat: {text!r}"
 
 
-async def test_a_private_download_is_exactly_two_messages(
+async def test_a_private_download_leaves_exactly_one_message(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     bot = await _run(monkeypatch, tmp_path, _task())
     assert len(bot.messages) == 1, f"MESSAGE #1 is the card: {bot.messages!r}"
     assert bot.uploads == ["video"], "MESSAGE #2 is the media file"
-    assert len(bot.messages) + len(bot.uploads) == 2
+    assert bot.deleted == ["card"], "and MESSAGE #1 is scaffolding: it goes when #2 lands"
 
 
 async def test_the_gateway_card_is_edited_not_replaced(
@@ -277,6 +287,7 @@ async def test_the_gateway_card_is_edited_not_replaced(
     assert bot.messages == [], "the card already exists; the worker sends nothing new"
     assert bot.uploads == ["video"], "the media is the one message this job adds"
     assert bot.edits, "the state (⏳) lives on the existing card"
+    assert bot.deleted == ["card"], "and the card is taken down once the media lands"
 
 
 async def test_a_task_that_carries_its_extraction_is_not_re_extracted(
@@ -328,6 +339,7 @@ async def test_a_group_download_adds_no_group_chatter(
     _assert_clean(bot)
     assert len(bot.messages) == 1
     assert bot.uploads == ["video"]
+    assert bot.deleted == ["card"], "the group chat is left with the file alone"
     # …and the outcome went to the group analytics, quietly.
     recorded = [args for query, args in pool.rows if "group_downloads" in query]
     assert recorded, "a group download must be recorded for the panel"

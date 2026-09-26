@@ -65,13 +65,18 @@ INFO = MediaInfo(
 
 
 class Status:
-    """The editable status message the worker keeps updating."""
+    """The editable status message the worker keeps updating — and deletes
+    again once the file has landed."""
 
     def __init__(self) -> None:
         self.edits: list[str] = []
+        self.deleted = False
 
     async def edit_text(self, text: str, **kwargs: Any) -> None:
         self.edits.append(text)
+
+    async def delete(self) -> None:
+        self.deleted = True
 
     @property
     def last(self) -> str:
@@ -353,10 +358,9 @@ async def test_a_blocked_extraction_is_served_by_the_fallback(
     assert "Big Buck Bunny" in env.bot.uploads[0]["caption"]  # title from cobalt's filename
     assert env.bot.uploads[0]["caption"].startswith("🎬 "), "the card is the caption"
     assert "🌐" not in env.bot.uploads[0]["caption"], "the card names no platform"
-    # The status ends at rest: the card, no state line, no "done" — the file that
-    # arrived is the confirmation.
-    assert env.bot.status.last.startswith("🔗")
-    assert "⏳" not in env.bot.status.last and "🛠" not in env.bot.status.last
+    # The scaffolding goes with the file: the status message is deleted the
+    # moment the media lands — the file that arrived is the whole message.
+    assert env.bot.status.deleted
     assert "مسیر جایگزین" in " ".join(env.bot.status.edits)
     # ...and it is cached like any other download (with the *kind*, so a replay
     # knows which Telegram method to use).
@@ -392,6 +396,41 @@ async def test_a_drm_refusal_is_served_by_the_fallback(
     assert "مسیر جایگزین" in " ".join(env.bot.status.edits)
     # Still written down as a degraded primary engine — the digest's "site" bucket.
     assert env.blocks == [("DRM_PROTECTED", "site")]
+
+
+async def test_the_status_message_leaves_the_chat_once_the_file_lands(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Nuke the scaffolding: the status message (the tapped menu, then the ⏳
+    card) is deleted right after the fresh file is uploaded. What stays in the
+    chat is the media — nothing standing next to it."""
+    env = _install(monkeypatch, download_dir=tmp_path)
+
+    await _run(env)
+
+    assert [upload["kind"] for upload in env.bot.uploads] == ["video"], "the file was sent"
+    assert env.bot.status.deleted, "and the status message went with it"
+
+
+async def test_a_chat_that_refuses_the_delete_keeps_the_card_at_rest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Deleting is a courtesy, never a requirement: no delete rights (or a
+    message already gone) may not fail a job whose file has already landed —
+    the old ending survives instead, the card at rest, and nothing raises."""
+
+    class _NoDeleteStatus(Status):
+        async def delete(self) -> None:
+            raise TelegramBadRequest(method=None, message="Bad Request: not enough rights")  # type: ignore[arg-type]
+
+    env = _install(monkeypatch, download_dir=tmp_path)
+    env.bot.status = _NoDeleteStatus()
+
+    await _run(env)
+
+    assert [upload["kind"] for upload in env.bot.uploads] == ["video"], "the file arrived all the same"
+    assert env.bot.status.last.startswith("🔗"), "the card is left at rest"
+    assert "⏳" not in env.bot.status.last and "🛠" not in env.bot.status.last, "no state line left"
 
 
 # ---------------------------------------------------------------------------

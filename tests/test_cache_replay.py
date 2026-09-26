@@ -26,6 +26,7 @@ from typing import Any, cast
 import pytest
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import DeleteMessage
 from aiogram.types import Chat, Message, User
 
 from core import database
@@ -191,6 +192,9 @@ async def test_a_cached_row_replays_on_the_tap_without_queueing_a_download() -> 
 
     assert bot.sends == [("video", CACHED_ID)], "send_video with the stored id, nothing fetched"
     assert queue.tasks == [], "a hit never queues: there is nothing to extract or download"
+    assert [m for m in bot.methods if isinstance(m, DeleteMessage)], (
+        "and the tapped menu is deleted — only the file stays in the chat"
+    )
 
 
 async def test_a_tap_without_a_cached_row_queues_the_fresh_cycle() -> None:
@@ -227,6 +231,7 @@ class WorkerBot:
         self.uploads: list[tuple[str, Any]] = []
         self.dead_ids = set(dead_ids)
         self.messages: list[str] = []
+        self.deleted = 0  # status messages taken back down after a delivery
 
     def _send(self, kind: str, payload: Any) -> Any:
         if payload in self.dead_ids:
@@ -236,10 +241,13 @@ class WorkerBot:
 
     async def send_message(self, chat_id: int, text: str, **kwargs: Any) -> Any:
         self.messages.append(text)
-        return SimpleNamespace(edit_text=self._edit)
+        return SimpleNamespace(edit_text=self._edit, delete=self._delete)
 
     async def _edit(self, text: str = "", **kwargs: Any) -> None:
         return None
+
+    async def _delete(self) -> None:
+        self.deleted += 1
 
     async def send_chat_action(self, *args: Any, **kwargs: Any) -> None:
         return None
@@ -375,6 +383,7 @@ async def test_the_worker_replays_a_cached_row_without_extracting(
     assert log == [], "the extractor is never touched — that is the whole point"
     assert bot.uploads == [("video", CACHED_ID)], "the stored id is re-sent as-is"
     assert not pool.writes("INSERT INTO smart_cache"), "a replay has nothing new to remember"
+    assert bot.deleted == 1, "the status message goes down once the file has landed"
 
 
 async def test_a_miss_downloads_and_remembers_the_id_telegram_accepted(
@@ -385,6 +394,7 @@ async def test_a_miss_downloads_and_remembers_the_id_telegram_accepted(
 
     assert log == [URL], "a miss runs the full extraction"
     assert bot.uploads and bot.uploads[0][0] == "video", "and uploads the fresh file"
+    assert bot.deleted == 1, "the status message goes down once the file has landed"
     stored = pool.writes("INSERT INTO smart_cache")
     assert stored, "the successful upload is remembered"
     _, args = stored[0]

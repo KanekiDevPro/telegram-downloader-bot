@@ -423,6 +423,9 @@ async def process_download_task(
         if await send_cached_file(
             bot, task.chat_id, cached, caption=replay_caption(cached, lang)
         ):
+            # A replay is a delivery too: the file landed, so the status message
+            # goes with it (the same rule as the fresh upload below).
+            await _retire_status(status, card=card)
             return
         await cache_service.forget(pool, task.url, task.media_format, task.quality)
 
@@ -665,8 +668,11 @@ async def _finish_upload(
                 ),
             )
         await _note_group_download(pool, task, ok=True)
-        if card:
-            await _edit(status, card)  # the card at rest: no state line left
+        # The scaffolding goes the moment the file lands: the status message (the
+        # tapped menu, then the ⏳ card) would only sit next to the delivered
+        # media as clutter. "Right after the upload" is deliberate — the user
+        # sees the file first, and the card leaves silently behind it.
+        await _retire_status(status, card=card)
         return time.monotonic() - upload_started
     finally:
         shutil.rmtree(result.file_path.parent, ignore_errors=True)  # per-job dir
@@ -1062,6 +1068,22 @@ async def _edit(status: Any, text: str, *, reply_markup: Any = None) -> None:
         )
     except (TelegramBadRequest, TelegramRetryAfter):
         pass
+
+
+async def _retire_status(status: Any, *, card: str = "") -> None:
+    """Take the status message down now that the file has landed.
+
+    The card was scaffolding — the tapped menu, then the ⏳ state — and the file
+    arriving is the whole message; leaving the card next to it is exactly the
+    clutter this removes. Deleting is still a courtesy: no delete rights or a
+    message already gone may never fail a delivered job, so the failure lands on
+    the old ending instead (the card at rest, no state line).
+    """
+    try:
+        await status.delete()
+    except (TelegramBadRequest, TelegramRetryAfter):
+        if card:
+            await _edit(status, card)  # the card at rest: no state line left
 
 
 class _ProgressEditor:

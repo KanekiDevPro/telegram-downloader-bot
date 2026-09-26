@@ -30,6 +30,7 @@ import aiohttp
 import asyncpg
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatAction
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -1052,6 +1053,20 @@ async def _delete_raw_link(message: Message) -> None:
         pass
 
 
+async def _forget_menu(message: Message) -> None:
+    """The tapped menu leaves the chat the moment its file has landed.
+
+    The replay arriving *is* the answer; a card still standing next to it is
+    scaffolding nobody asked for. A courtesy like the raw-link delete: no delete
+    rights or an already-gone message never cost the user the file that just
+    arrived.
+    """
+    try:
+        await message.delete()
+    except (TelegramBadRequest, TelegramRetryAfter):
+        pass
+
+
 async def drain_pending_deletes(timeout: float = 5.0) -> int:
     """Let the fire-and-forget deletions finish before the process goes away.
 
@@ -1125,6 +1140,11 @@ async def _intake_flow(
         await message.answer(t("intake.invalid_link", lang), link_preview_options=_NO_PREVIEW)
         return
     _forget_raw_link(message)
+    # One explicit yield before anything else: the delete is a task, and a task
+    # only runs when the loop gets control back. Everything below is eager work
+    # (resolving, probing, routing) that would otherwise keep the loop to itself
+    # while the user's link is still sitting in the chat.
+    await asyncio.sleep(0)
     # Share/short links and media *viewer* wrappers name their content somewhere
     # else: resolve them once, here — routing, the engines and the direct-download
     # path all see the real thing afterwards (see _canonical_url).
@@ -1582,7 +1602,10 @@ async def _canonical_url(url: str) -> str:
     unwrapped = content.unwrap_media_url(url)
     if unwrapped != url or not content.claims_platform(url):
         return unwrapped
-    if ExtractorService.is_url_supported(url):
+    # The catalogue probe is yt-dlp's own (``gen_extractors`` — its first call
+    # imports every site handler), so it runs in a thread like every other yt-dlp
+    # touch: on the loop it would stall the intake, the delete above included.
+    if await asyncio.to_thread(ExtractorService.is_url_supported, url):
         return url
     try:
         timeout = aiohttp.ClientTimeout(total=_CANONICAL_RESOLVE_S)
@@ -1595,7 +1618,9 @@ async def _canonical_url(url: str) -> str:
         logger.info("share link %.80s did not resolve — keeping it as-is", url)
         return url
     canonical = content.unwrap_media_url(resolved)
-    if canonical != resolved or ExtractorService.is_url_supported(canonical):
+    if canonical != resolved or await asyncio.to_thread(
+        ExtractorService.is_url_supported, canonical
+    ):
         # Worth adopting when the redirect *revealed* something: a media file
         # hiding behind a viewer wrapper, or a page the engines can claim. A
         # cosmetic hop between page forms (youtu.be → watch?v=) changes nothing
@@ -1992,10 +2017,12 @@ async def _submit(
 ) -> None:
     """Tap → wait → the file: cache → quota → preflight → queue, on one card.
 
-    ``message`` is the card message, and it stays the job's whole story: the
+    ``message`` is the card message, and it carries the job's whole story: the
     keyboard goes the moment the choice is made (a screen that answers is a
     screen with no buttons left), the wait is silent — the ⏳ state, never a
-    sentence — and the media that arrives is the confirmation. Shared by every
+    sentence — and the media that arrives is the confirmation. A confirmation
+    that lands *here* (a cache replay) takes the card with it again: the file is
+    the whole message, and only the file stays. Shared by every
     way a download starts (a button, a photo post, a retry), so the cache, the
     quota and the preflight cannot drift apart between them. ``tap`` is the
     button waiting to be acknowledged, when there is one.
@@ -2054,6 +2081,7 @@ async def _submit(
     cached = await cache_service.get_cached(pool, url, media_format, quality)
     if cached is not None:
         if await send_cached_file(bot, chat_id, cached, caption=replay_caption(cached, lang)):
+            await _forget_menu(message)  # the file landed; the tapped menu goes
             return
         # dead file_id → drop it and fall through to a real download
         await cache_service.forget(pool, url, media_format, quality)
@@ -2071,6 +2099,7 @@ async def _submit(
             if row_format != media_format:
                 continue
             if await send_cached_file(bot, chat_id, row, caption=replay_caption(row, lang)):
+                await _forget_menu(message)  # the file landed; the tapped menu goes
                 return
             await cache_service.forget(pool, url, row_format, row_tier)
 
