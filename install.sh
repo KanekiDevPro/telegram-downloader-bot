@@ -822,16 +822,24 @@ do_diagnostics() {
     say "The bot's own boot checks, inside the bot container:"
     say "${DIM}scripts/boot_check.py — images, cookies, fonts, versions, mounts${RESET}"
     say ""
+    if ! compose ps --status running --services 2>/dev/null | grep -qx bot; then
+        fail "Diagnostics could not run — is the stack up? [3] Start / Restart Services."
+        return 1
+    fi
+    local rc=0
     if [ -n "$TTY_IN" ]; then
-        compose exec bot python scripts/boot_check.py
+        compose exec bot python scripts/boot_check.py || rc=$?
     else
         # No terminal to allocate when this runs piped (`exec` fails on the
         # missing TTY before a single check gets to run).
-        compose exec -T bot python scripts/boot_check.py
-    fi || {
-        fail "Diagnostics could not run — is the stack up? [3] Start / Restart Services."
+        compose exec -T bot python scripts/boot_check.py || rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then
+        # boot_check ran its whole report and exited on its own findings — the
+        # checks above name each one. A non-zero here is never "could not run".
+        fail "Diagnostics finished with findings — the report above names each one."
         return 1
-    }
+    fi
     ok "Diagnostics finished."
 }
 

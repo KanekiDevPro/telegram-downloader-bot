@@ -12,7 +12,13 @@ cookies.txt
 .mypy_cache/
 .ruff_cache/
 tests/
-scripts/
+scripts/*
+# The one script that belongs in the image: `install.sh diagnostics` runs
+# `python scripts/boot_check.py` inside the bot container. The rest of
+# scripts/ stays out — those tools run on the host (they read the checkout
+# and the operator's browser). A bang cannot re-include a child of an
+# excluded directory, so scripts/ is excluded per child, not wholesale.
+!scripts/boot_check.py
 deploy/
 *.md
 # The generated cobalt cookie file is a mounted volume, never an image layer

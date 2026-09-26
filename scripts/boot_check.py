@@ -359,7 +359,14 @@ async def main() -> int:
             f"callback {REFRESH_CALLBACK}",
         )
 
+        # One task per consumer — plus one that is not a consumer at all: the
+        # boot warm-up (extractor-warmup) pays yt-dlp's cold extractor import
+        # once and finishes. It lives in `workers` for the same reason the rest
+        # do (referenced until done, drained at shutdown), so it is counted here
+        # and exempt from the "still running" checks below — finishing is its
+        # healthy end state.
         expected_workers = settings.worker_count + 1  # + always-on maintenance
+        expected_workers += 1  # + the extractor catalogue warm-up
         watcher = app["cookie_watch"]
         watching = watcher.enabled and bool(settings.admin_ids)
         if watching:
@@ -370,7 +377,12 @@ async def main() -> int:
         workers = app["workers"]
         check(
             f"workers running ({settings.worker_count} download + maintenance)",
-            len(workers) == expected_workers and all(not task.done() for task in workers),
+            len(workers) == expected_workers
+            and all(
+                not task.done()
+                for task in workers
+                if task.get_name() != "extractor-warmup"
+            ),
             f"count={len(workers)}",
         )
 
@@ -973,7 +985,13 @@ async def main() -> int:
         idle_seconds = BLOCK_TIMEOUT_S + 1
         print(f"  ..    idling {idle_seconds}s to prove idle queue reads are harmless")
         await asyncio.sleep(idle_seconds)
-        dead = [task for task in workers if task.done()]
+        # Only the long-lived tasks are asked to survive the idle window; the
+        # warm-up is done the moment its import is paid.
+        dead = [
+            task
+            for task in workers
+            if task.done() and task.get_name() != "extractor-warmup"
+        ]
         check(
             f"workers survive {idle_seconds}s of idle polling",
             not dead,
