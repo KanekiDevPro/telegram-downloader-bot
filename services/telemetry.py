@@ -9,6 +9,7 @@ what this keeps, in a table the operator can also query by hand.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -235,12 +236,16 @@ async def record_block(
     failed insert is not worth losing the user's error message over.
     """
     try:
+        # ``classify_block`` parses the cookie jar from disk, and this runs on
+        # the worker's event loop — so the parse happens in a thread, like every
+        # other jar read on the worker's path.
+        cause = await asyncio.to_thread(classify_block, error, task.url, cookie_file)
         await database.record_block_event(
             pool,
             telegram_id=task.telegram_id,
             url_host=url_host(task.url),
             code=error.code,
-            cause=classify_block(error, task.url, cookie_file),
+            cause=cause,
         )
     except Exception:
         logger.exception("could not record the %s failure for %s", error.code, task.url)

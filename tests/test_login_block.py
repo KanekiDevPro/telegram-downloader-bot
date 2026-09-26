@@ -9,6 +9,7 @@ that keeps a broken jar from paging the admins on every link.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -257,6 +258,29 @@ async def test_an_unreachable_admin_does_not_stop_the_user_message(tmp_path: Pat
     await worker_module._notify_login_block(bot, object(), _task(chat_id=42), jar)  # type: ignore[arg-type]
 
     assert len(bot.texts_for(42)) == 1
+
+
+async def test_the_cause_hint_reads_the_jar_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``youtube_login_hint`` parses the cookie jar from disk. The admin alert
+    runs between two Telegram sends on the loop every chat shares — so the parse
+    happens in a thread, once per alert, not once per admin."""
+    loop_thread = threading.get_ident()
+    reads: list[int] = []
+
+    def hint(cookie_file: Any) -> str | None:
+        reads.append(threading.get_ident())
+        return "LOGIN_INFO missing"
+
+    monkeypatch.setattr(worker_module, "youtube_login_hint", hint)
+    bot = FakeBot()
+    jar = _logged_out_jar(tmp_path / "cookies.txt")
+
+    await worker_module._notify_login_block(bot, object(), _task(), jar)  # type: ignore[arg-type]
+
+    assert len(reads) == 1, "one parse per alert — not one per admin"
+    assert reads[0] != loop_thread, "the jar is parsed on a worker thread, never on the loop"
 
 
 def test_the_window_is_bounded_and_named() -> None:

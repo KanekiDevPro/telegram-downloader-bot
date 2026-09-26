@@ -224,6 +224,64 @@ async def on_unhandled_error(event: ErrorEvent, lang: str = DEFAULT_LANG) -> boo
     return True
 
 
+#: The stop tasks in flight. ``_request_stop`` is called from a signal handler
+#: and has nowhere to return its task to — and the loop's grip on tasks is weak
+#: (the ``create_task`` docs' warning about garbage collection).
+_stop_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _log_task_failure(task: asyncio.Task[Any]) -> None:
+    """A fire-and-forget task's failure lands here — retrieved, logged, never fatal.
+
+    The ``asyncio.create_task`` warning cuts both ways: a task nobody
+    references may be collected before it runs, and an exception nobody
+    retrieves surfaces only at garbage collection ("Task exception was never
+    retrieved"), detached from what it broke. Callers hold the reference
+    (``build_app``'s ``workers``, ``_stop_tasks``); this callback is the
+    retrieval. Same contract as ``services.worker._log_task_failure``.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("background task %s failed: %s", task.get_name(), exc, exc_info=exc)
+
+
+def _request_stop(stop_event: asyncio.Event, dp: Dispatcher) -> asyncio.Task[Any]:
+    """Signal-handler entry: start the shutdown, then stop the polling loop.
+
+    Runs from a signal handler, so it may not await — ``dp.stop_polling()`` is
+    spawned fire-and-forget. The held reference and the done-callback are what
+    make that safe: without them a ``stop_polling`` that dies leaves
+    ``run_polling`` waiting on ``start_polling`` (its ``finally`` never runs),
+    and the failure is visible to nobody.
+    """
+    stop_event.set()
+    task = asyncio.create_task(dp.stop_polling(), name="stop-polling")
+    _stop_tasks.add(task)
+    task.add_done_callback(_stop_tasks.discard)
+    task.add_done_callback(_log_task_failure)
+    return task
+
+
+#: The warm-up's probe URL. The answer is discarded — what the warm-up buys is
+#: the import behind the call, not a verdict about this URL.
+_WARMUP_PROBE_URL = "https://www.youtube.com/watch?v=warmup"
+
+
+async def warm_extractor_catalogue() -> None:
+    """Pay yt-dlp's cold extractor import now, off the loop — not on the first link.
+
+    yt-dlp builds its site catalogue by importing every extractor module the
+    first time one is asked for (``gen_extractors``): a multi-second import
+    charged to whichever call came first. Warming it on a worker thread while
+    boot continues makes every link — the first included — a warm call, and the
+    loop never freezes behind the import (see
+    ``ExtractorService.is_url_supported``).
+    """
+    await asyncio.to_thread(ExtractorService.is_url_supported, _WARMUP_PROBE_URL)
+
+
 async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict[str, Any]:
     """Create every component and wire them together.
 
@@ -233,6 +291,12 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
     report (and from stamping its window) on a live database.
     """
     settings = get_settings()
+
+    # Started before anything that can block: the extractor catalogue's cold
+    # import (see warm_extractor_catalogue) overlaps the whole boot below —
+    # database, tunnel, clients — instead of the first user's first link.
+    warmup = asyncio.create_task(warm_extractor_catalogue(), name="extractor-warmup")
+    warmup.add_done_callback(_log_task_failure)
 
     pool = await create_pool()
     await init_db(pool)  # automated schema setup + plan seeding
@@ -463,7 +527,11 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         )
 
     stop_event = asyncio.Event()
-    workers = [
+    # The warm-up is not a consumer, but it is this app's task all the same:
+    # held here until done (the create_task GC hazard) and drained at shutdown
+    # like the rest. It serves the *first* request; the workers serve the rest.
+    workers = [warmup]
+    workers += [
         asyncio.create_task(
             run_worker(i, stop_event, bot, pool, dp["queue"], extractor, cobalt),
             name=f"worker-{i}",
@@ -629,13 +697,9 @@ async def run_polling(app: dict[str, Any]) -> None:
     dp: Dispatcher = app["dp"]
     loop = asyncio.get_running_loop()
 
-    def _request_stop() -> None:
-        app["stop_event"].set()
-        asyncio.create_task(dp.stop_polling())
-
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, _request_stop)
+            loop.add_signal_handler(sig, _request_stop, app["stop_event"], dp)
         except (NotImplementedError, RuntimeError, ValueError):
             pass  # Windows / non-main-thread fallbacks rely on KeyboardInterrupt
 

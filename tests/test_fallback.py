@@ -12,6 +12,7 @@ with something about engines the user never asked for.
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -1077,6 +1078,47 @@ async def test_both_engines_are_not_re_run_three_times(
 
     assert attempts == 1
     assert recorded == [("EXTRACTOR_BLOCKED", TASK.url)]
+
+
+async def test_the_login_verdict_reads_the_jar_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``login_looking_block`` parses the cookie jar from disk. The retry path
+    runs on the loop every other chat shares — a jar parse there freezes them
+    all behind one failed link, so the verdict is read in a thread."""
+    loop_thread = threading.get_ident()
+    verdict_threads: list[int] = []
+
+    def verdict(error: ExtractionError, url: str, cookie_file: Any) -> bool:
+        verdict_threads.append(threading.get_ident())
+        return False
+
+    async def failing_process(*args: Any, **kwargs: Any) -> None:
+        raise fallback.mark_fallback_attempted(
+            ExtractionError("EXTRACTOR_BLOCKED", "blocked")
+        )
+
+    async def record_block(pool: Any, task: DownloadTask, error: ExtractionError, jar: Any) -> None:
+        return None
+
+    monkeypatch.setattr(worker, "process_download_task", failing_process)
+    monkeypatch.setattr(worker, "login_looking_block", verdict)
+    monkeypatch.setattr(worker.telemetry, "record_block", record_block)
+    monkeypatch.setattr(worker.telemetry, "maybe_send_early_alert", lambda *a, **k: _done())
+
+    bot = FakeBot()
+    await worker._process_with_retry(
+        TASK,
+        bot,  # type: ignore[arg-type]
+        object(),
+        _Queue(),  # type: ignore[arg-type]  # only ``release`` is ever called
+        FakeExtractor(download_dir=tmp_path),  # type: ignore[arg-type]
+        _NeverStopping(),  # type: ignore[arg-type]  # only ``is_set`` is ever read
+    )
+
+    assert verdict_threads and verdict_threads[0] != loop_thread, (
+        "the jar is parsed on a worker thread, never on the loop"
+    )
 
 
 async def _done() -> None:

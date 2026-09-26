@@ -8,6 +8,7 @@ that the weekly gate cannot fire twice (or stay quiet about a broken week).
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -83,6 +84,39 @@ def test_everything_else_is_the_site_or_the_link(tmp_path: Path, code: str) -> N
     """Counting a private video (or a DRM site) as a block would bury the failures
     we can fix — and a DRM verdict is the site's own nature, not our address."""
     assert classify_block(_error(code), "https://youtu.be/abc", None) == "site"
+
+
+async def test_the_record_classifies_the_failure_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``classify_block`` parses the cookie jar from disk. The record step runs
+    on the worker's event loop — the parse must not stall every other chat
+    behind one failed link."""
+    loop_thread = threading.get_ident()
+    reads: list[int] = []
+
+    def classify(error: ExtractionError, url: str, cookie_file: Any) -> str:
+        reads.append(threading.get_ident())
+        return "login"
+
+    async def record_event(pool: Any, **fields: Any) -> None:
+        return None
+
+    monkeypatch.setattr(telemetry, "classify_block", classify)
+    monkeypatch.setattr(telemetry.database, "record_block_event", record_event)
+
+    task = DownloadTask(
+        chat_id=5,
+        telegram_id=5,
+        url="https://youtu.be/abc",
+        media_format="video",
+        lang="fa",
+    )
+    await telemetry.record_block(object(), task, _error(), None)
+
+    assert reads and reads[0] != loop_thread, (
+        "the jar is parsed on a worker thread, never on the loop"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -11,8 +11,10 @@ the teardown of every resource the builder created.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from aiogram import Router
@@ -93,6 +95,15 @@ def _offline_wiring(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(app_module, "notify_admins", notify_admins)
     monkeypatch.setattr(app_module, "OAuthService", _RecordingOAuth)
     monkeypatch.setattr(app_module, "build_payment_service", lambda pool: None)
+
+    def no_catalogue_probe(url: str) -> bool:
+        return True  # the real probe imports yt-dlp's whole extractor catalogue
+
+    monkeypatch.setattr(
+        app_module.ExtractorService,
+        "is_url_supported",
+        staticmethod(no_catalogue_probe),
+    )
     monkeypatch.setattr(
         app_module.cobalt_cookies,
         "ensure_cookie_dir",
@@ -130,3 +141,54 @@ async def test_the_app_exposes_what_shutdown_tears_down() -> None:
     assert app.get("oauth") is _RecordingOAuth.instances[-1]
     dp = app["dp"]
     assert dp.error.handlers, "centralized error handling is registered"
+
+
+# ---------------------------------------------------------------------------
+# Stopping: the signal handler's fire-and-forget task
+# ---------------------------------------------------------------------------
+
+
+async def test_a_stop_request_that_cannot_stop_polling_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``_request_stop`` runs in a signal handler — it may not await, so
+    ``dp.stop_polling()`` is spawned fire-and-forget. A failure inside a task
+    nobody awaits is a failure nobody sees, and the shutdown it was meant to
+    trigger would stall behind polling forever. The done-callback is the
+    somebody: it retrieves the failure and logs it."""
+
+    class _StuckDispatcher:
+        async def stop_polling(self) -> None:
+            raise RuntimeError("polling refused to stop")
+
+    stop_event = asyncio.Event()
+
+    task = app_module._request_stop(stop_event, cast(Any, _StuckDispatcher()))
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)  # done-callbacks land after the task is done
+
+    assert stop_event.is_set(), "one failed stop attempt may not strand the shutdown"
+    assert "polling refused to stop" in caplog.text, (
+        "the failure is retrieved and logged, never lost to garbage collection"
+    )
+
+
+async def test_a_stop_request_stops_polling_quietly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The other side of the contract: a stop that works sets the event, stops
+    the polling loop, and leaves no error behind."""
+    stopped: list[bool] = []
+
+    class _Dispatcher:
+        async def stop_polling(self) -> None:
+            stopped.append(True)
+
+    stop_event = asyncio.Event()
+
+    task = app_module._request_stop(stop_event, cast(Any, _Dispatcher()))
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert stopped and stop_event.is_set()
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]

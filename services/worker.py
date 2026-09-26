@@ -248,8 +248,10 @@ async def _process_with_retry(
         # The weekly report is the trend; this is the alarm. A jar that stopped
         # signing in fails every link, so a run of three should not wait a week.
         await telemetry.maybe_send_early_alert(pool, bot, get_settings().admin_ids)
-    if last_failure is not None and login_looking_block(
-        last_failure, task.url, extractor.cookie_file
+    # The verdict parses the cookie jar from disk; on the loop that parse would
+    # stall every other chat behind this one failure — so it reads in a thread.
+    if last_failure is not None and await asyncio.to_thread(
+        login_looking_block, last_failure, task.url, extractor.cookie_file
     ):
         # "Blocked" usually reaches the user as a shrug and the admins as nothing
         # at all. Both are wrong here: the cause is known and fixable.
@@ -353,13 +355,16 @@ async def _notify_login_block(
         return
 
     settings = get_settings()
+    # The hint parses the cookie jar from disk: one read per alert — not one per
+    # admin — and in a thread, so the loop keeps serving chats meanwhile.
+    hint = await asyncio.to_thread(youtube_login_hint, cookie_file)
     notified = 0
     # Each admin reads it in their own language: this alert is the one admins get
     # most often, and half of them did not choose the language it used to be in.
     for admin_id, admin_lang in await recipients.targets(
         pool, settings.admin_ids, fallback=task.lang
     ):
-        if hint := youtube_login_hint(cookie_file):
+        if hint:
             cause = escape_html(hint)
         else:
             cause = t("admin.no_cookies_cause", admin_lang)
