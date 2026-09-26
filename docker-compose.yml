@@ -432,6 +432,15 @@ services:
       # refuses to boot because a helper is missing is worse than one that says so.
       cobalt:
         condition: service_started
+      # The second node of the fallback pool (COBALT_FALLBACK_URLS below dials
+      # it), ordered like everything else that must be up before its dependent:
+      # this provider *does* define a healthcheck block, so the resolved
+      # condition is service_healthy. required: false for the same reason as
+      # warp above — an operator who emptied COBALT_FALLBACK_URLS and stopped
+      # this node must still get a booting bot.
+      cobalt-warp:
+        condition: service_healthy
+        required: false
     # No depends_on telegram-api: it is behind a profile, and the bot survives
     # (and reports) an unreachable API server rather than waiting for one.
     # `.env` supplies BOT_TOKEN, ADMIN_IDS, limits, card details, ...

@@ -632,6 +632,42 @@ do_update() {
 # 3. Start / restart, 4. Stop
 # ---------------------------------------------------------------------------
 
+#: Start the stack — `docker compose up -d`, the only lifecycle verb that honors
+#: the dependency graph and (re)creates containers as needed. `compose start`
+#: only starts containers that already exist and re-attaches nothing, so a cold
+#: or partial stack comes up half down; the ordering that keeps a namespace
+#: consumer behind its provider lives here. The log and the spinner are
+#: `build_and_log`'s — the one wrapper install and update use, with the same
+#: real-exit-code contract (and its plain-text fallback when gum is not there).
+start_services() {
+    local log_file="start-$(date +%Y%m%d-%H%M%S).log"
+    build_and_log "$log_file" || {
+        fail "start failed — see 'docker compose ps'."
+        say "Everything the build printed is kept in:  $PROJECT_DIR/$log_file"
+        return 1
+    }
+}
+
+#: Restart as a controlled bounce — never `docker compose restart`, which
+#: restarts the existing containers in parallel with no ordering guarantee: a
+#: consumer of a peer's network namespace (yt-session-generator joins warp's)
+#: can re-attach while its provider is transiently exited and die with "cannot
+#: join network namespace of a non running container". So: stop first (graceful,
+#: reverse dependency order), then the same `up -d` bring-up as a cold start,
+#: this time in dependency order. First failure aborts and keeps its exit code.
+restart_services() {
+    compose stop || {
+        fail "restart failed — 'docker compose ps' shows what state each service is in."
+        return 1
+    }
+    local log_file="restart-$(date +%Y%m%d-%H%M%S).log"
+    build_and_log "$log_file" || {
+        fail "restart failed — 'docker compose ps' shows what state each service is in."
+        say "Everything the build printed is kept in:  $PROJECT_DIR/$log_file"
+        return 1
+    }
+}
+
 do_start() {
     rule
     say "${BOLD}▶️  Start / Restart Services${RESET}"
@@ -645,17 +681,28 @@ do_start() {
     running="$(running_services)"
     if [ "${running:-0}" -gt 0 ]; then
         say "${GREEN}Restarting $running running service(s)...${RESET}"
-        compose restart || {
-            fail "restart failed — 'docker compose ps' shows what state each service is in."
-            return 1
-        }
+        restart_services || return 1
     else
         say "${GREEN}Starting the stack...${RESET}"
-        compose up -d || {
-            fail "start failed — see 'docker compose ps'."
-            return 1
-        }
+        start_services || return 1
     fi
+    ok "$(running_services) service(s) running."
+}
+
+#: `./install.sh restart` — the scripted entry point: always the same two steps,
+#: whatever the stack looks like (on a cold stack `stop` is a no-op and the
+#: bring-up is complete). One verb, one meaning.
+do_restart() {
+    rule
+    say "${BOLD}🔁 Restart Services${RESET}"
+    rule
+    installed || {
+        warn "Nothing installed at $PROJECT_DIR yet."
+        return 0
+    }
+    cd "$PROJECT_DIR" || return 1
+    say "${GREEN}Restarting the stack: graceful stop, then an ordered bring-up...${RESET}"
+    restart_services || return 1
     ok "$(running_services) service(s) running."
 }
 
@@ -923,6 +970,7 @@ Telegram Downloader Bot — installer and control center.
   ./install.sh install      install
   ./install.sh update       git pull + rebuild
   ./install.sh start        start / restart the stack
+  ./install.sh restart      restart the stack (stop, then ordered bring-up)
   ./install.sh stop         stop the stack
   ./install.sh status       containers and the last log lines
   ./install.sh diagnostics  run the bot's boot checks in the container
@@ -955,7 +1003,7 @@ main() {
         say "Telegram Downloader Bot — installer and control center (revision $(project_version))"
         exit 0
         ;;
-    install | update | start | stop | status | diagnostics | uninstall)
+    install | update | start | restart | stop | status | diagnostics | uninstall)
         local action="$1"
         if [ "$action" = "install" ] || installed; then
             "do_$action"
