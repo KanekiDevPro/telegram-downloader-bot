@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1072,6 +1073,12 @@ async def test_a_supported_platform_is_never_branded_unsupported(url: str) -> No
 
 
 async def test_a_link_no_layer_recognizes_stays_unsupported() -> None:
+    # The *first* catalogue probe imports yt-dlp's every site handler and can
+    # exceed ``_probe_supported``'s 2-second budget on a cold interpreter —
+    # which production reads as the generous answer ("supported", the worker
+    # decides). This test pins the *verdict*, so it pays the import cost up
+    # front instead of racing it.
+    user_module.ExtractorService.is_url_supported("https://example.com/x")
     assert not await user_module._probe_supported(
         "https://some-unknown-site.example/v/1"
     )
@@ -1605,6 +1612,104 @@ async def test_a_tap_on_a_dead_menu_is_answered_not_run() -> None:
     await user_module.on_stale_media_tap(_callback(bot, "fmt:video:720"), _user(), lang=FA)
 
     assert bot.answers[0].show_alert is True
+
+
+class _NoAckBot(RecordingBot):
+    """A client whose callback queries expired before the bot could answer —
+    Telegram rejects the acknowledgement ("query is too old")."""
+
+    async def __call__(self, method: Any) -> Any:
+        if isinstance(method, AnswerCallbackQuery):
+            raise TelegramBadRequest(
+                method=method,
+                message="Bad Request: query is too old and response timeout expired",
+            )
+        return await super().__call__(method)
+
+
+async def test_an_expired_ack_never_costs_the_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The callback acknowledgement is cosmetic; the tap's *work* is the
+    contract. An expired query (an old client, a busy bot) makes `answer()`
+    raise TelegramBadRequest — and that must never abort `_submit` after the
+    keyboard is already gone, or the user is left with a dead card and no
+    download ever starts."""
+    user_module._recent_requests.clear()
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", no_cached_rows)
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cached_row)
+    monkeypatch.setattr(user_module, "preflight", _NoRefusal())
+    bot = _NoAckBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    state = _fresh_state()
+    queue = _fake_queue()
+    await user_module.on_text_with_url(
+        _message("https://youtu.be/abc", bot), state, _user(), object(), queue, bot, lang=FA
+    )
+
+    await user_module.on_format_chosen(
+        _callback(bot, "fmt:video:720"), state, _user(), object(), queue, bot, lang=FA
+    )
+
+    assert len(queue.tasks) == 1, "the download runs even though the ack bounced"
+
+
+async def test_the_cookie_jar_is_read_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``youtube_preflight`` parses the cookie jar from disk — file I/O that may
+    not run on the event loop on every tap (the ``gen_extractors`` regression
+    class). Threaded, like every other blocking touch."""
+    loop_thread = threading.get_ident()
+    probe_threads: list[int] = []
+
+    def slow_preflight(url: str, cookie_file: Any, **kwargs: Any) -> Any:
+        probe_threads.append(threading.get_ident())
+        return SimpleNamespace(refused=False, message="")
+
+    monkeypatch.setattr(user_module.preflight, "youtube_preflight", slow_preflight)
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", no_cached_rows)
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cached_row)
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    state = _fresh_state()
+    queue = _fake_queue()
+    await user_module.on_text_with_url(
+        _message("https://youtu.be/abc", bot), state, _user(), object(), queue, bot, lang=FA
+    )
+
+    await user_module.on_format_chosen(
+        _callback(bot, "fmt:video:720"), state, _user(), object(), queue, bot, lang=FA
+    )
+
+    assert probe_threads and probe_threads[0] != loop_thread, (
+        "the jar is parsed on a worker thread, never on the loop"
+    )
+
+
+async def test_an_expired_ack_still_runs_the_probe_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retry tap's work is the re-extraction; its acknowledgement is not.
+    An expired query may not stop the probe the user asked for."""
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
+    probe = _RecordingProbe()
+    bot = _NoAckBot()
+    bot.state = SimpleNamespace(extractor=probe)
+    state = _fresh_state()
+    await state.update_data(url="https://youtu.be/abc")
+
+    await user_module.on_probe_retry(
+        _callback(bot, user_module.PROBE_CALLBACK),
+        state,
+        _user(),
+        object(),
+        _fake_queue(),
+        bot,
+        lang=FA,
+    )
+
+    assert probe.calls == ["https://youtu.be/abc"], "the re-extraction runs regardless"
 
 
 async def test_a_failed_download_offers_a_retry_only_its_owner_can_press(

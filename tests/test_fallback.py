@@ -11,6 +11,7 @@ with something about engines the user never asked for.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -410,6 +411,43 @@ async def test_the_status_message_leaves_the_chat_once_the_file_lands(
 
     assert [upload["kind"] for upload in env.bot.uploads] == ["video"], "the file was sent"
     assert env.bot.status.deleted, "and the status message went with it"
+
+
+async def test_a_progress_hook_never_raises_into_the_download_thread() -> None:
+    """yt-dlp calls the hook from its worker thread — anything the hook raises
+    aborts the download itself. A closing loop (shutdown teardown while a
+    cancelled ``to_thread`` download is still running) must cost at most the
+    progress line, never the file."""
+    editor = worker._ProgressEditor(Status())
+
+    def dead_loop(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("Event loop is closed")
+
+    editor._loop = SimpleNamespace(call_soon_threadsafe=dead_loop)  # type: ignore[assignment]
+
+    editor.hook({"status": "downloading", "downloaded_bytes": 1, "total_bytes": 2})
+
+
+async def test_a_failed_progress_edit_is_logged_not_lost(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A progress edit that dies on something the edit path does not absorb may
+    never end as an unretrieved task exception (the asyncio docs' GC hazard):
+    the failure is retrieved and logged where the job's other evidence lives."""
+    editor = worker._ProgressEditor(Status())
+
+    async def exploding(text: str) -> None:
+        raise RuntimeError("Telegram is unreachable")
+
+    monkeypatch.setattr(editor, "_edit", exploding)
+
+    with caplog.at_level("WARNING", logger="services.worker"):
+        editor.hook({"status": "downloading", "downloaded_bytes": 1, "total_bytes": 2})
+        await asyncio.sleep(0.05)  # the scheduled edit runs to its failure
+
+    assert any("background" in record.getMessage() for record in caplog.records), (
+        "the failure is retrieved and logged — never silently garbage-collected"
+    )
 
 
 async def test_a_chat_that_refuses_the_delete_keeps_the_card_at_rest(

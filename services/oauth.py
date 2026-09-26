@@ -26,6 +26,7 @@ import asyncio
 import logging
 import re
 import sys
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -197,23 +198,37 @@ class OAuthFlow:
         reader = asyncio.create_task(self._read_stderr(self._process.stderr, stderr_lines))
 
         try:
-            return_code = await asyncio.wait_for(self._process.wait(), timeout=CHILD_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            await self.cancel()
+            try:
+                return_code = await asyncio.wait_for(self._process.wait(), timeout=CHILD_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                await self.cancel()
+                await reader
+                return OAuthOutcome(
+                    "expired", code=self.code, detail="the device code was not entered in time"
+                )
             await reader
-            return OAuthOutcome("expired", code=self.code, detail="the device code was not entered in time")
-        await reader
 
-        stderr_text = "\n".join(stderr_lines)
-        if _OAUTH_REFUSAL in stderr_text:
-            # A build whose refusal appears only once the extractor is fully
-            # loaded (plugin ordering) — the probe could not have seen it.
-            return OAuthOutcome("unsupported", code=self.code, detail=stderr_text.strip()[:400])
-        if return_code == 0:
-            return OAuthOutcome("success", code=self.code)
-        return OAuthOutcome(
-            "failed", code=self.code, detail=stderr_text.strip()[-400:] or f"exit code {return_code}"
-        )
+            stderr_text = "\n".join(stderr_lines)
+            if _OAUTH_REFUSAL in stderr_text:
+                # A build whose refusal appears only once the extractor is fully
+                # loaded (plugin ordering) — the probe could not have seen it.
+                return OAuthOutcome("unsupported", code=self.code, detail=stderr_text.strip()[:400])
+            if return_code == 0:
+                return OAuthOutcome("success", code=self.code)
+            return OAuthOutcome(
+                "failed", code=self.code, detail=stderr_text.strip()[-400:] or f"exit code {return_code}"
+            )
+        except BaseException:
+            # Cancellation (a shutdown, a dropped handler) or an unexpected
+            # failure may never orphan the child or its stderr reader: "no login
+            # child may outlive the bot that started it" is a promise, and this
+            # is where a cancelled handler would otherwise break it. The
+            # original exception is re-raised after the cleanup.
+            await self.cancel()
+            reader.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await reader
+            raise
 
     async def _read_stderr(
         self,

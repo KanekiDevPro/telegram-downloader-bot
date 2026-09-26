@@ -1053,6 +1053,21 @@ async def _delete_raw_link(message: Message) -> None:
         pass
 
 
+async def _ack(tap: CallbackQuery) -> None:
+    """Answer a tap silently — a courtesy that must never abort the work.
+
+    Telegram rejects an acknowledgement for a query it considers expired (an
+    old client, a busy bot — "query is too old") and the answer is pure
+    cosmetics: the screen change *is* the response. An exception here used to
+    kill the handler mid-flow — after the keyboard was already gone — leaving a
+    dead card and a tap whose work never started.
+    """
+    try:
+        await tap.answer()
+    except (TelegramBadRequest, TelegramRetryAfter):
+        pass
+
+
 async def _forget_menu(message: Message) -> None:
     """The tapped menu leaves the chat the moment its file has landed.
 
@@ -1788,7 +1803,7 @@ async def on_probe_retry(
         await cb.answer(t("intake.link_expired", lang), show_alert=True)
         await state.clear()
         return
-    await cb.answer()
+    await _ack(cb)
     running = (int(user["telegram_id"]), str(url))
     if running in _probes_running:
         # The fresh lookup is already in the air — a spammed retry is answered
@@ -2034,7 +2049,7 @@ async def _submit(
     #    The queue must never see the second copy; the UI alone cannot promise it.
     if _double_tap(user["telegram_id"], request):
         if tap is not None:
-            await tap.answer()
+            await _ack(tap)
         return
 
     # 1) The choice is final: the card names it, the keyboard goes away.
@@ -2056,7 +2071,7 @@ async def _submit(
         link_preview_options=_NO_PREVIEW,
     )
     if tap is not None:
-        await tap.answer()  # silent: the screen change *is* the acknowledgement
+        await _ack(tap)  # silent: the screen change *is* the acknowledgement
 
     task = DownloadTask(
         url=url,
@@ -2121,7 +2136,11 @@ async def _submit(
     #    a fallback engine turns even the known case into a note, because it may
     #    still serve the file (see services/fallback.py).
     settings = get_settings()
-    verdict = preflight.youtube_preflight(
+    # Threaded: the preflight parses the cookie jar from disk (twice), and file
+    # I/O on the loop stalls every other update with it (the ``gen_extractors``
+    # regression class). The verdict itself is a pure function of the jar.
+    verdict = await asyncio.to_thread(
+        preflight.youtube_preflight,
         url,
         settings.cookie_file,
         lang=lang,

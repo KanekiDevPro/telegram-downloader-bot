@@ -1086,11 +1086,30 @@ async def _retire_status(status: Any, *, card: str = "") -> None:
             await _edit(status, card)  # the card at rest: no state line left
 
 
+def _log_task_failure(task: "asyncio.Task[Any]") -> None:
+    """A fire-and-forget task's failure lands here — retrieved, logged, never fatal.
+
+    Without this the exception is only noticed at garbage collection ("Task
+    exception was never retrieved"), which is a log line detached from the job
+    it belonged to — and the ``asyncio.create_task`` docs' warning about
+    unreferenced tasks applies just as much to the reference that keeps them
+    alive as to the retrieval of what they raised.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("background edit failed: %s", exc, exc_info=exc)
+
+
 class _ProgressEditor:
     """Throttled, thread-safe progress updates for yt-dlp hooks.
 
     yt-dlp calls the hook from a worker thread; edits are scheduled back onto
-    the event loop via ``call_soon_threadsafe``.
+    the event loop via ``call_soon_threadsafe``. The hook must never raise —
+    yt-dlp turns a hook exception into a failed download — and the scheduled
+    edits must stay referenced until done (the create_task GC hazard) with
+    their failures retrieved (see :func:`_log_task_failure`).
     """
 
     def __init__(
@@ -1101,6 +1120,9 @@ class _ProgressEditor:
         self._card = card
         self._loop = asyncio.get_running_loop()
         self._last_edit = 0.0
+        #: The edits in the air: the loop keeps only a weak grip on tasks, so
+        #: this set is the one that stops them being collected mid-flight.
+        self._pending: set[asyncio.Task[None]] = set()
 
     def hook(self, data: dict[str, Any]) -> None:
         if data.get("status") != "downloading":
@@ -1115,7 +1137,18 @@ class _ProgressEditor:
         # One compact state under the card — "⏳ 42%", never a sentence. The card
         # itself never moves while the state does.
         text = _on_card(self._card, t("media.progress", self._lang, percent=pct))
-        self._loop.call_soon_threadsafe(asyncio.create_task, self._edit(text))
+        try:
+            self._loop.call_soon_threadsafe(self._schedule, text)
+        except RuntimeError:
+            # The loop is gone (a download thread outliving shutdown): a
+            # progress line must never fail the download it decorates.
+            logger.debug("progress edit dropped — the event loop is gone", exc_info=True)
+
+    def _schedule(self, text: str) -> None:
+        task = asyncio.create_task(self._edit(text))
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+        task.add_done_callback(_log_task_failure)
 
     async def _edit(self, text: str) -> None:
         await _edit(self._status, text)

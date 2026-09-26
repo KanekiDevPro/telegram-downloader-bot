@@ -337,6 +337,38 @@ async def test_the_child_command_carries_the_contract() -> None:
     assert argv[-2:] == ["--dump-json", "https://youtu.be/dQw4w9WgXcQ"]
 
 
+async def test_a_cancelled_flow_stops_the_child_it_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Handler cancellation — a shutdown, a dropped update — must not orphan
+    the login child: a yt-dlp process left running keeps polling Google with
+    nobody watching. Cancelling ``run`` mid-flow terminates it."""
+
+    class HangingProcess(FakeProcess):
+        async def wait(self) -> int:
+            while not self.terminated:
+                await asyncio.sleep(0.01)
+            self.returncode = -15
+            return self.returncode
+
+    process = HangingProcess([])
+    process.set_returncode_none()  # still "running" when the flow is cancelled
+
+    async def fake_exec(*args: Any, **kwargs: Any) -> Any:
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    flow = OAuthFlow(python_executable=sys.executable)
+    task = asyncio.create_task(flow.run("https://youtu.be/dQw4w9WgXcQ"))
+    await asyncio.sleep(0.05)  # the child is up and the flow is mid-wait
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.terminated, "the child dies with the flow that started it"
+
+
 async def test_cancel_terminates_a_live_child(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cancelling stops the child — terminate, wait, and never hang."""
 

@@ -21,11 +21,12 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
-from aiogram.types import User
+from aiogram.types import ErrorEvent, User
 
 from core import texts as text_store
 from core.config import CLOUD_API_UPLOAD_LIMIT_MB, Settings, get_settings, probe_url
 from core.database import create_pool, init_db, text_overrides
+from core.i18n import DEFAULT_LANG, t
 from core.logging import setup_logging
 from core.telegram_api import build_session, session_target
 from handlers import ROUTERS
@@ -188,6 +189,41 @@ async def notify_admins(bot: Bot, admin_ids: Iterable[int], text: str) -> None:
             logger.warning("could not send an admin notice to %s", admin_id)
 
 
+async def on_unhandled_error(event: ErrorEvent, lang: str = DEFAULT_LANG) -> bool:
+    """The one place an escaped handler error lands: log it, unstick the user.
+
+    Any handler exception — an FSM read while RedisStorage is unreachable, a
+    database hiccup in the middleware, a Telegram network error — reaches here
+    through aiogram's ``ErrorsMiddleware``. Without this the Dispatcher only
+    logs: an answered-with-nothing callback spins in the client for half a
+    minute and the user is told nothing at all. So: the traceback goes to the
+    log (the operator's evidence), any callback query is answered (the spinner
+    stops) and a message gets one honest generic line. This handler must never
+    raise — it is the last stop, and a failing error handler only replaces one
+    unhandled error with another.
+    """
+    update = event.update
+    what = (
+        "callback tap"
+        if update.callback_query is not None
+        else "message"
+        if update.message is not None
+        else "update"
+    )
+    logger.error(
+        "unhandled error while processing a %s: %s", what, event.exception, exc_info=event.exception
+    )
+    try:
+        notice = t("work.unexpected", lang)
+        if update.callback_query is not None:
+            await update.callback_query.answer(notice)
+        elif update.message is not None:
+            await update.message.answer(notice)
+    except Exception:  # noqa: BLE001 — feedback is best-effort; the log already landed
+        logger.debug("could not deliver the error notice", exc_info=True)
+    return True
+
+
 async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict[str, Any]:
     """Create every component and wire them together.
 
@@ -237,6 +273,10 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
             default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         )
     dp = Dispatcher(storage=storage)
+    # Centralized error handling (aiogram v3's ErrorsMiddleware → "error" event):
+    # every handler failure lands in ``on_unhandled_error`` — logged with its
+    # traceback, the user unstuck — instead of dying at the Dispatcher's logger.
+    dp.error.register(on_unhandled_error)
 
     dp["pool"] = pool
     dp["queue"] = create_queue(settings, redis_client)
@@ -536,6 +576,10 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         "cobalt_cookies": cobalt_cookie_state,
         "redis": redis_client,
         "cobalt": cobalt,
+        # Shutdown's "no login child may outlive the bot" guard reads this key —
+        # without it the guard is dead code and an in-flight /oauth device flow
+        # leaves its yt-dlp child running after every shutdown.
+        "oauth": oauth,
         "workers": workers,
         "stop_event": stop_event,
     }
