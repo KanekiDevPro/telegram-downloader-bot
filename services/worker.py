@@ -878,6 +878,22 @@ def _input_file(path: Path) -> FSInputFile:
     return FSInputFile(path, filename=sanitize_filename(path.name))
 
 
+def _daemon_readable(path: Path) -> None:
+    """Make a delivered file openable by the local Bot API daemon — best-effort.
+
+    The bot writes as uid 10001 while the ``telegram-bot-api`` image reads as
+    its own user; a tighter umask would end a zero-copy upload as a refused URI
+    with no clue beyond "can't open file". The job directory is made traversable
+    (0o755) and the file readable (0o644) before the URI is ever issued. A
+    filesystem that refuses the chmod must not fail the delivery.
+    """
+    try:
+        path.parent.chmod(0o755)
+        path.chmod(0o644)
+    except OSError:
+        pass
+
+
 def _media_ref(path: Path) -> str | FSInputFile:
     """How this file travels to Telegram — a file URI when the local Bot API
     server can read it off the shared volume itself, real bytes otherwise.
@@ -887,7 +903,10 @@ def _media_ref(path: Path) -> str | FSInputFile:
     delivery costs a metadata call instead of a socket transfer.
     """
     uri = local_file_uri(path, get_settings())
-    return uri if uri is not None else _input_file(path)
+    if uri is None:
+        return _input_file(path)
+    _daemon_readable(path)
+    return uri
 
 
 async def _deliver_ref(send: Callable[[str | FSInputFile], Awaitable[Any]], path: Path) -> Any:
@@ -902,10 +921,14 @@ async def _deliver_ref(send: Callable[[str | FSInputFile], Awaitable[Any]], path
     if isinstance(ref, str):
         try:
             return await send(ref)
-        except TelegramBadRequest:
+        except TelegramBadRequest as exc:
+            # The daemon's own message is the diagnosis: "wrong file identifier"
+            # means it never ran in local mode, "can't open" means the mount or
+            # the permissions — so it goes in the log verbatim.
             logger.info(
-                "local Bot API refused the file URI for %s — streaming the bytes instead",
+                "local Bot API refused the file URI for %s (%s) — streaming the bytes instead",
                 path.name,
+                exc.message,
             )
     return await send(_input_file(path))
 
@@ -964,10 +987,13 @@ async def _send_album_group(bot: Bot, chat_id: int, images: list[Path], caption:
     refs: list[str | FSInputFile] = [_media_ref(path) for path in images]
     try:
         return await send_album(bot, chat_id, [InputMediaPhoto(media=ref) for ref in refs], caption)
-    except TelegramBadRequest:
+    except TelegramBadRequest as exc:
         if not any(isinstance(ref, str) for ref in refs):
             return None
-    logger.info("local Bot API refused the file URIs — streaming the album instead")
+        reason = exc.message
+    logger.info(
+        "local Bot API refused the file URIs (%s) — streaming the album instead", reason
+    )
     try:
         return await send_album(
             bot,

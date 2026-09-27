@@ -11,6 +11,12 @@ list usually names (``android``, ``ios``) are the ones whose policy says a token
 required. The tests below read that table through the same helper the doctor uses, so
 a yt-dlp upgrade that moves a client out of the token-free group fails here instead of
 quietly costing every download its extraction.
+
+Since production telemetry showed web-served downloads crawling at throttle speed
+on the WARP address (50.4 s for a job whose upload streamed out in 9.9 s), the
+order is also a *bandwidth* decision: the clients phones and TVs stream with come
+first, the PO-token provider pays their token cost, ``tv`` is the token-free
+lifeline, and ``web`` is last.
 """
 
 from __future__ import annotations
@@ -31,7 +37,9 @@ from services.extractor import (
 
 #: The clients the old "spoof a device and skip the token" advice names. ``tv`` is in
 #: the token-free group in this yt-dlp, the other two are not — which is the whole
-#: finding: the advice is half right for the wrong reason.
+#: finding: the advice is half right for the wrong reason. (The default list now
+#: names them too — with the PO-token provider paying the token cost, not as a
+#: bypass; see ``DEFAULT_YOUTUBE_CLIENTS``.)
 PHONE_CLIENTS = ("android", "ios")
 
 
@@ -50,20 +58,28 @@ def _extractor(tmp_path: Path, **kwargs: object) -> ExtractorService:
 # ---------------------------------------------------------------------------
 
 
-def test_the_default_client_list_is_the_token_free_half_of_ytdlps_table(
+def test_the_default_client_list_puts_the_streaming_clients_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The order is a bandwidth decision, measured in production: web-family
+    URLs are throttled on datacenter/WARP addresses (50.4 s download for the
+    same file that streamed to Telegram in 9.9 s), while the clients phones and
+    TVs stream with serve the same ladder at full speed. The token policy is the
+    other half: ``android``/``ios``/``mweb``/``web`` *need* GVS PO tokens in this
+    yt-dlp and the bgutil provider supplies them, ``tv`` is the one token-free
+    client left standing (the lifeline when the provider is down), and ``web``
+    is last — it is the throttled one *and* the client whose visitor binding
+    produces the SESSION_STALE failure.
+    """
     settings = _settings(monkeypatch)
 
     assert tuple(settings.ytdlp_youtube_clients) == DEFAULT_YOUTUBE_CLIENTS
     unknown, required, free = youtube_client_facts(settings.ytdlp_youtube_clients)
     assert unknown == (), "the shipped default must be valid in the installed yt-dlp"
-    # ``web`` is the one that wants a token, and it is last on purpose: the clients
-    # ahead of it answer without one, so a refused token costs the *last* client
-    # rather than every extraction. The provider is what keeps it usable at all.
-    assert required == ("web",)
-    assert free == DEFAULT_YOUTUBE_CLIENTS[:-1]
-    assert DEFAULT_YOUTUBE_CLIENTS[-1] == "web"
+    assert DEFAULT_YOUTUBE_CLIENTS[:3] == ("android", "ios", "mweb"), "streaming clients first"
+    assert DEFAULT_YOUTUBE_CLIENTS[-1] == "web", "web last: the throttled ladder backstop"
+    assert set(required) == {"android", "ios", "mweb", "web"}, "the provider pays their token cost"
+    assert free == ("tv",), "tv is the token-free lifeline"
     assert settings.ytdlp_force_ipv4 is True
 
 
@@ -109,7 +125,7 @@ def test_the_clients_reach_yt_dlp_under_the_key_it_reads(tmp_path: Path) -> None
 
     args = extractor._base_opts(extract_only=True)["extractor_args"]
 
-    assert args == {"youtube": {"player_client": ["tv", "visionos"]}}
+    assert args == {"youtube": {"player_client": ["tv", "visionos"], "formats": ["dashy"]}}
 
 
 def test_the_provider_and_the_clients_share_the_extractor_args_option(tmp_path: Path) -> None:
@@ -124,16 +140,17 @@ def test_the_provider_and_the_clients_share_the_extractor_args_option(tmp_path: 
 
     assert args == {
         "youtubepot-bgutilhttp": {"base_url": ["http://pot-provider:4416"]},
-        "youtube": {"player_client": ["tv"]},
+        "youtube": {"player_client": ["tv"], "formats": ["dashy"]},
     }
 
 
 def test_a_client_list_is_never_sent_without_a_reason_to_send_it(tmp_path: Path) -> None:
-    """The service's own default is neutral, so a probe/test does not inherit it."""
+    """Identity stays neutral (a probe/test does not inherit a spoof), while the
+    download mechanics every request wants ride along regardless."""
     extractor = _extractor(tmp_path)
 
-    assert extractor.extractor_args == {}
-    assert "extractor_args" not in extractor._base_opts(extract_only=True)
+    assert extractor.extractor_args["youtube"] == {"formats": ["dashy"]}
+    assert "player_client" not in extractor._base_opts(extract_only=True)["extractor_args"]["youtube"]
 
 
 def test_clients_are_lower_cased_and_not_repeated(tmp_path: Path) -> None:
@@ -239,6 +256,23 @@ def test_the_row_warns_about_a_client_that_needs_a_token(tmp_path: Path) -> None
 
     assert check.status == "warn"
     assert "android" in check.detail and "PO token" in check.detail
+
+
+def test_the_token_warning_stands_down_when_the_provider_pays(
+    tmp_path: Path,
+) -> None:
+    """A token-required client is only a problem without a token source: with
+    the bgutil provider configured the row stays ok and still names the
+    clients, so the fact is visible without the alarm."""
+    extractor = _extractor(
+        tmp_path, youtube_clients=("android", "tv"), pot_provider_url="http://pot-provider:4416"
+    )
+
+    check = _clients_check(extractor)
+
+    assert check.status == "ok"
+    assert "android" in check.detail and "PO token" in check.detail
+    assert "provider" in check.detail
 
 
 def test_the_row_warns_about_a_client_yt_dlp_would_skip(tmp_path: Path) -> None:

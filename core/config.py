@@ -103,25 +103,28 @@ COMPOSE_LOOPBACK_PORTS: dict[str, int] = {
 }
 
 #: The YouTube clients yt-dlp is asked for, in this order, unless ``.env`` says
-#: otherwise. ``web`` is last on purpose: it is the client whose *visitor binding*
-#: produces the "the page needs to be reloaded" (``SESSION_STALE``) failure this
-#: deployment keeps meeting, and the only one of these four that wants a PO token —
-#: which the bgutil provider supplies. The other three are the token-free half of
-#: yt-dlp's own table, and (except ``visionos``) all of them carry cookies, so a
-#: signed-in jar keeps working.
+#: otherwise. The order is a bandwidth decision first, a token-policy decision
+#: second. ``web`` is last on purpose: its googlevideo URLs are the throttled
+#: ones on datacenter/WARP addresses (one production job spent 50.4 s on a
+#: download the same ladder streamed to Telegram in 9.9 s), and it is the client
+#: whose *visitor binding* produces the "the page needs to be reloaded"
+#: (``SESSION_STALE``) failure this deployment keeps meeting.
 #:
-#: Measured from the installed yt-dlp (2026.08.19) rather than from folklore: in its
-#: ``INNERTUBE_CLIENTS`` table ``web``, ``web_safari``, ``mweb``, ``android``,
-#: ``android_vr``, ``ios`` and ``tv_simply`` all have ``GVS_PO_TOKEN_POLICY``
-#: marked ``required``, while ``visionos``, ``web_embedded``, ``tv`` and
-#: ``tv_downgraded`` do not. A device-spoofing list of ``android,ios`` is therefore
-#: the *opposite* of a bypass in this version — those two are the clients that
-#: demand the token. ``services.extractor.youtube_client_facts`` reads that same
-#: table at runtime, and ``/doctor`` reports what it finds.
+#: Token policy, measured from the installed yt-dlp (2026.08.19) rather than
+#: folklore: in its ``INNERTUBE_CLIENTS`` table ``web``, ``web_safari``,
+#: ``mweb``, ``android``, ``android_vr``, ``ios`` and ``tv_simply`` all have
+#: ``GVS_PO_TOKEN_POLICY`` marked ``required``, while ``visionos``,
+#: ``web_embedded``, ``tv`` and ``tv_downgraded`` do not. The streaming clients
+#: are therefore sent *with* the bgutil PO-token provider paying their token
+#: cost (``services.doctor._clients_check`` stands the warning down when it is
+#: configured), and ``tv`` stays in the list as the token-free lifeline for
+#: when the provider is down. ``services.extractor.youtube_client_facts``
+#: reads that same table at runtime, and ``/doctor`` reports what it finds.
 DEFAULT_YOUTUBE_CLIENTS: tuple[str, ...] = (
-    "visionos",
-    "web_embedded",
-    "tv_downgraded",
+    "android",
+    "ios",
+    "mweb",
+    "tv",
     "web",
 )
 

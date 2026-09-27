@@ -1278,11 +1278,22 @@ def _clients_check(extractor: ExtractorService) -> Check:
             icon="🎬",
         )
     if required:
+        needs = f"{listed} — {'، '.join(required)} در این نسخهٔ yt-dlp *نیاز* به PO token دارد"
+        if extractor.using_pot_provider:
+            # A token-required client is only a problem without a token source:
+            # the bgutil provider pays the cost, so the fact is named without
+            # the alarm.
+            return Check(
+                CLIENTS_CHECK_NAME,
+                "ok",
+                f"{needs} و provider (bgutil) آن را تأمین می‌کند؛ بی‌توکن‌ها: "
+                f"{'، '.join(free) or '—'}. {ipv4}",
+                icon="🎬",
+            )
         return Check(
             CLIENTS_CHECK_NAME,
             "warn",
-            f"{listed} — {'، '.join(required)} در این نسخهٔ yt-dlp *نیاز* به PO token دارد "
-            "(بدون provider همان کلاینت‌ها رد می‌شوند)؛ بی‌توکن‌ها: "
+            f"{needs} (بدون provider همان کلاینت‌ها رد می‌شوند)؛ بی‌توکن‌ها: "
             f"{'، '.join(free) or '—'}. {ipv4}",
             icon="🎬",
         )

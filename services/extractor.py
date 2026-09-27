@@ -1726,11 +1726,21 @@ class ExtractorService:
         args: dict[str, dict[str, list[str]]] = {}
         if self.pot_provider_url:
             args["youtubepot-bgutilhttp"] = {"base_url": [self.pot_provider_url]}
+        # ``formats=dashy`` is download mechanics, not identity: it makes the
+        # YouTube extractor emit every stream as 10 MB ranged fragments that
+        # carry ``&range`` — the anti-throttle shape of yt-dlp/yt-dlp#6400 —
+        # under ``http_dash_segments``, the protocol the fragment downloader
+        # takes, where ``concurrent_fragment_downloads`` actually fires. Plain
+        # ``https`` lands in aria2c (or one throttled stream) with the
+        # extractor's per-format chunking ignored. It rides every request, so it
+        # lives at this merge point rather than beside any client list.
+        youtube: dict[str, list[str]] = {"formats": ["dashy"]}
         if clients:
             # ``player_client`` is the key yt-dlp reads (``_configuration_arg``);
             # anything else — ``client``, for instance — is never looked at, so it
             # would look like a spoof and change nothing.
-            args["youtube"] = {"player_client": list(clients)}
+            youtube["player_client"] = list(clients)
+        args["youtube"] = youtube
         return args
 
     @staticmethod

@@ -65,3 +65,18 @@ def test_the_server_reads_the_bot_s_downloads_off_the_shared_volume() -> None:
 
     assert "downloads:/app/downloads:ro" in compose
     assert "TELEGRAM_API_SHARED_DIR: /app/downloads" in compose
+
+
+def test_lifecycle_commands_activate_the_local_api_profile() -> None:
+    """The production failure behind "the local Bot API refused the file URI":
+    ``telegram-api`` lives behind the ``local-api`` profile, and a profile-less
+    ``docker compose up -d`` silently *skips* a running profile-gated container
+    — so the bot got recreated with the new shared-volume env while the server
+    kept its pre-volume mounts and could not open a single delivered file. Every
+    lifecycle command in the root installer must therefore activate the profile
+    whenever the local API is configured (and never before: an unconfigured
+    telegram-api exits on start and crash-loops)."""
+    script = (BASE_DIR / "install.sh").read_text(encoding="utf-8")
+
+    assert '"--profile local-api"' in script
+    assert "TELEGRAM_API_BASE_URL" in script, "the profile is gated on the local API being configured"

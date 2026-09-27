@@ -227,3 +227,41 @@ async def test_a_refused_album_falls_back_to_streamed_pictures(
     assert bot.methods == ["send_media_group", "send_media_group"]
     second = bot.calls[1][1]
     assert all(isinstance(item.media, FSInputFile) for item in second)
+
+
+async def test_the_refusal_log_names_the_daemon_s_own_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """"refused the file URI" alone sent nobody anywhere: "wrong file identifier"
+    means the daemon never ran in local mode, "can't open" means the mount or the
+    permissions — the message is the diagnosis, so it goes in the log verbatim."""
+    shared = tmp_path / "shared"
+    media = _media(shared / "job-1", "فقط ۴ سال! [icAb-wGW-4w].mp4")
+    _use(monkeypatch, _settings(shared))
+    bot = FakeBot(refuse_uris=True)
+
+    with caplog.at_level("INFO"):
+        await worker._send_document(bot, 1, media, "caption")  # type: ignore[arg-type]
+
+    assert "Bad Request: wrong file identifier" in caplog.text
+
+
+async def test_the_daemon_is_handed_readable_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bot writes as uid 10001; the telegram-bot-api daemon reads as uid
+    1000 (the image's own user). A tighter umask would end a zero-copy upload as
+    a refused URI with no clue beyond "can't open file", so the job directory is
+    made traversable and the file readable before the URI is ever issued —
+    best-effort: a filesystem that refuses chmod must not fail the delivery."""
+    shared = tmp_path / "shared"
+    media = _media(shared / "job-1", "song.m4a")
+    _use(monkeypatch, _settings(shared))
+    chmods: list[tuple[str, int]] = []
+    monkeypatch.setattr(Path, "chmod", lambda self, mode: chmods.append((str(self), mode)))
+    bot = FakeBot()
+
+    await worker._send_document(bot, 1, media, "caption")  # type: ignore[arg-type]
+
+    assert (str(media.parent), 0o755) in chmods, "the daemon must be able to enter the job dir"
+    assert (str(media), 0o644) in chmods, "and to open the file itself"
+    assert chmods.index((str(media.parent), 0o755)) < chmods.index((str(media), 0o644))
+    assert isinstance(bot.refs[0], str), "the readable path is the one that gets the URI"

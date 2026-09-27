@@ -284,12 +284,30 @@ GUM_MENU_CHOICES=(
 
 has_docker() { command -v docker >/dev/null 2>&1; }
 
+#: Is the local Bot API configured? `telegram-api` lives behind the `local-api`
+#: profile and must only be activated when `TELEGRAM_API_BASE_URL` says the bot
+#: is actually going to use it: an unconfigured server has no api_id/api_hash,
+#: exits on start and crash-loops.
+local_api_configured() {
+    local env_file="${PROJECT_DIR:-.}/.env"
+    [ -f "$env_file" ] || env_file=".env"
+    [ -n "$(sed -n 's/^TELEGRAM_API_BASE_URL=//p' "$env_file" 2>/dev/null | tail -n 1)" ]
+}
+
 #: `docker compose` (v2 plugin) or the standalone `docker-compose`, whichever exists.
+#:
+#: Every command carries the `local-api` profile whenever the local API is
+#: configured: a profile-less `docker compose up -d` silently SKIPS a running
+#: profile-gated container, which is how the bot came up with the shared-volume
+#: mount while the telegram-api server kept its pre-volume one and refused every
+#: file URI. $profile deliberately splits into two words (--profile local-api).
 compose() {
+    local profile=""
+    local_api_configured && profile="--profile local-api"
     if docker compose version >/dev/null 2>&1; then
-        docker compose "$@"
+        docker compose $profile "$@"
     elif command -v docker-compose >/dev/null 2>&1; then
-        docker-compose "$@"
+        docker-compose $profile "$@"
     else
         fail "Neither 'docker compose' nor 'docker-compose' is installed."
         return 127

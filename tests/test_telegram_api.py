@@ -5,6 +5,7 @@ Constructing an ``AiohttpSession`` opens no sockets, so all of this runs offline
 
 from __future__ import annotations
 
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -247,3 +248,42 @@ def test_no_uri_without_the_pieces_that_make_it_safe(
         TELEGRAM_API_SHARED_DIR=str(shared),
     )
     assert local_file_uri(media, not_local) is None
+
+
+def _daemon_file_path(file_uri: str) -> str:
+    """``Client::get_local_file_path`` from tdlib/telegram-bot-api — the daemon's
+    own parsing of what ``local_file_uri`` produces: strip the ``file:/`` scheme
+    prefix, strip one leading slash (ten when it is the ``/localhost`` authority
+    form), percent-decode. Reimplemented here so the formatting contract is
+    pinned against the *daemon* rather than against pathlib's idea of a URI.
+    """
+    rest = file_uri[len("file:/") :]
+    if rest.startswith("/"):
+        rest = rest[len("/localhost") :] if rest.startswith("/localhost") else rest[1:]
+    return urllib.parse.unquote(rest)
+
+
+def test_the_uri_survives_the_daemon_s_own_parser_for_real_filenames(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The names real downloads produce — Persian titles, spaces, exclamation
+    marks, brackets — must survive the server's percent-decoding round-trip as
+    byte-exact paths, or a zero-copy upload dies as "wrong file identifier" and
+    the fallback streams hundreds of MB that needed no streaming at all."""
+    shared = tmp_path / "shared"
+    (shared / "job-1").mkdir(parents=True)
+    media = shared / "job-1" / "فقط ۴ سال تا پایان دنیا مونده! [icAb-wGW-4w].mp4"
+    media.write_bytes(b"x")
+    settings = _settings(
+        monkeypatch,
+        TELEGRAM_API_BASE_URL="http://telegram-api:8081",
+        TELEGRAM_API_LOCAL="1",
+        TELEGRAM_API_SHARED_DIR=str(shared),
+    )
+
+    uri = local_file_uri(media, settings)
+
+    assert uri is not None
+    assert uri.startswith("file:///"), "three slashes — no authority"
+    assert "ف" not in uri, "percent-encoded, as pathlib promises"
+    assert _daemon_file_path(uri) == "/" + media.resolve().as_posix().lstrip("/")

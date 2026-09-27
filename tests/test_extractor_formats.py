@@ -78,11 +78,15 @@ def test_proxy_is_passed_to_yt_dlp_only_when_set() -> None:
 # PO token provider
 # ---------------------------------------------------------------------------
 
-def test_no_extractor_args_without_provider() -> None:
+def test_download_mechanics_are_always_on_and_spoofing_is_not() -> None:
+    """Without a provider and without a client list, yt-dlp is told only *how*
+    to download (the dashy switch pinned below) — never *who* to be."""
     extractor = _extractor()
     assert extractor.using_pot_provider is False
-    assert extractor.extractor_args == {}
-    assert "extractor_args" not in extractor._base_opts(extract_only=True)
+    assert extractor.extractor_args == {"youtube": {"formats": ["dashy"]}}
+    assert extractor._base_opts(extract_only=True)["extractor_args"] == {
+        "youtube": {"formats": ["dashy"]}
+    }
 
 
 def test_provider_url_becomes_bgutil_extractor_args() -> None:
@@ -90,7 +94,10 @@ def test_provider_url_becomes_bgutil_extractor_args() -> None:
     assert extractor.using_pot_provider is True
     opts = extractor._base_opts(extract_only=True)
     # Exactly the key yt-dlp's --extractor-args "youtubepot-bgutilhttp:base_url=…" sets.
-    assert opts["extractor_args"] == {"youtubepot-bgutilhttp": {"base_url": ["http://pot-provider:4416"]}}
+    assert opts["extractor_args"] == {
+        "youtubepot-bgutilhttp": {"base_url": ["http://pot-provider:4416"]},
+        "youtube": {"formats": ["dashy"]},
+    }
 
 
 def test_bgutil_plugin_is_installed() -> None:
@@ -465,3 +472,79 @@ def test_the_tuning_is_the_same_for_real_downloads() -> None:
     assert opts["buffersize"] == 1048576
     assert opts["http_chunk_size"] == 10485760
     assert opts["concurrent_fragment_downloads"] == 8
+
+
+# ---------------------------------------------------------------------------
+# Which downloader actually fetches (verified against the installed yt-dlp)
+# ---------------------------------------------------------------------------
+
+def test_the_dashy_switch_lands_youtube_streams_in_the_fragment_downloader() -> None:
+    """YouTube streams are plain ``https`` URLs, and two measured facts about
+    that shape are why ``formats=dashy`` is part of every request:
+
+    * the external downloader grabs plain ``https`` and never looks at the
+      per-format ``downloader_options`` the YouTube extractor sets (its 10 MB
+      ranged-request throttle fix is silently ignored — pinned below);
+    * aria2c requests the URL without the ``&range`` the YouTube player appends
+      to every playback request, and googlevideo delays and throttles requests
+      lacking it (yt-dlp/yt-dlp#6400).
+
+    ``formats=dashy`` makes the extractor emit the same stream as 10 MB ranged
+    fragments *carrying* ``&range``, under ``http_dash_segments`` — the fragment
+    downloader, where ``concurrent_fragment_downloads: 8`` actually fires.
+    Eight parallel player-shaped ranged requests, not eight plain GETs on a
+    throttled URL. This is what took a production job's download stage from
+    50.4 s to streaming-speed.
+    """
+    from yt_dlp.downloader import get_suitable_downloader
+    from yt_dlp.downloader.dash import DashSegmentsFD
+
+    args = _extractor()._base_opts(extract_only=True)["extractor_args"]
+    assert args["youtube"]["formats"] == ["dashy"]
+
+    # The shape the dashy switch actually emits (yt-dlp's ``build_fragments``):
+    # a ``http_dash_segments`` format whose fragments are 10 MB ranged requests.
+    info = {
+        "protocol": "http_dash_segments",
+        "fragments": [
+            {"url": "https://rr1---sn-x.googlevideo.com/videoplayback?a=b", "range": "0-1048575"}
+        ],
+        "ext": "mp4",
+    }
+    assert get_suitable_downloader(info, {"external_downloader": "aria2c"}) is DashSegmentsFD
+
+
+def test_aria2c_takes_plain_https_and_ignores_the_extractor_s_chunking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The routing fact above, spelled out: ``downloader_options`` never
+    disqualify an external downloader (``ExternalFD.supports`` never reads it),
+    so a YouTube ``https`` format handed to aria2c loses the extractor's chunked
+    ranged-request throttling fix entirely."""
+    from yt_dlp.downloader import get_suitable_downloader
+    from yt_dlp.downloader.external import Aria2cFD
+
+    monkeypatch.setattr(Aria2cFD, "available", classmethod(lambda cls, path=None: True))
+    info = {
+        "url": "https://example.com/file.mp4",
+        "protocol": "https",
+        "ext": "mp4",
+        "downloader_options": {"http_chunk_size": 10485760},
+    }
+
+    assert Aria2cFD.supports(info) is True, "the per-format chunking is ignored by design"
+    assert get_suitable_downloader(info, {"external_downloader": "aria2c"}) is Aria2cFD
+
+
+def test_the_throughput_knobs_are_the_names_the_installed_yt_dlp_reads() -> None:
+    """A yt-dlp upgrade that renames a knob must fail here — not silently
+    download with stock 1 KB reads and sequential fragments."""
+    import inspect
+
+    from yt_dlp.downloader import fragment as fragment_module
+    from yt_dlp.downloader import http as http_module
+
+    http_src = inspect.getsource(http_module)
+    assert "self.params.get('buffersize', 1024)" in http_src
+    assert "self.params.get('http_chunk_size')" in http_src
+    assert "concurrent_fragment_downloads" in inspect.getsource(fragment_module)
