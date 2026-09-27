@@ -11,7 +11,7 @@ import asyncio
 import logging
 import shutil
 import time
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +31,7 @@ from core import database
 from core import texts as text_store
 from core.config import get_settings
 from core.i18n import DEFAULT_LANG, error_message, t
+from core.telegram_api import local_file_uri
 from core.ui import remember_retry, retry_keyboard
 from core.utils import (
     MediaFormat,
@@ -877,6 +878,38 @@ def _input_file(path: Path) -> FSInputFile:
     return FSInputFile(path, filename=sanitize_filename(path.name))
 
 
+def _media_ref(path: Path) -> str | FSInputFile:
+    """How this file travels to Telegram — a file URI when the local Bot API
+    server can read it off the shared volume itself, real bytes otherwise.
+
+    The URI is the whole upload: the server opens the file where the volume
+    mounts it (``core.telegram_api.local_file_uri`` decides), so a large
+    delivery costs a metadata call instead of a socket transfer.
+    """
+    uri = local_file_uri(path, get_settings())
+    return uri if uri is not None else _input_file(path)
+
+
+async def _deliver_ref(send: Callable[[str | FSInputFile], Awaitable[Any]], path: Path) -> Any:
+    """Run ``send`` with the fast ref first and the bytes as the safety net.
+
+    A server that refuses the file URI (a volume that is not mounted there, a
+    build without local mode) must never fail a link: the same send is retried
+    with the file streamed, which is exactly what happened before this fast
+    path existed. Anything the *streamed* attempt raises keeps its old meaning.
+    """
+    ref = _media_ref(path)
+    if isinstance(ref, str):
+        try:
+            return await send(ref)
+        except TelegramBadRequest:
+            logger.info(
+                "local Bot API refused the file URI for %s — streaming the bytes instead",
+                path.name,
+            )
+    return await send(_input_file(path))
+
+
 @dataclass(frozen=True)
 class Delivered:
     """What reached the chat, and how a cached replay should send it again.
@@ -917,8 +950,33 @@ def _photo_id(message: Any) -> str:
 
 async def _send_document(bot: Bot, chat_id: int, path: Path, caption: str) -> str:
     """The last resort that is never wrong: the bytes, as a file."""
-    sent = await bot.send_document(chat_id, _input_file(path), caption=caption)
+    sent = await _deliver_ref(lambda ref: bot.send_document(chat_id, ref, caption=caption), path)
     return _file_id(sent.document)
+
+
+async def _send_album_group(bot: Bot, chat_id: int, images: list[Path], caption: str) -> Any:
+    """One media group — fast refs first; ``None`` means "refused as a group".
+
+    A refused group is atomic (Telegram lands no picture at all), so a refused
+    file-URI attempt is retried with streamed bytes without ever duplicating a
+    photo; only a second refusal falls through to the per-picture route.
+    """
+    refs: list[str | FSInputFile] = [_media_ref(path) for path in images]
+    try:
+        return await send_album(bot, chat_id, [InputMediaPhoto(media=ref) for ref in refs], caption)
+    except TelegramBadRequest:
+        if not any(isinstance(ref, str) for ref in refs):
+            return None
+    logger.info("local Bot API refused the file URIs — streaming the album instead")
+    try:
+        return await send_album(
+            bot,
+            chat_id,
+            [InputMediaPhoto(media=_input_file(path)) for path in images],
+            caption,
+        )
+    except TelegramBadRequest:
+        return None
 
 
 async def _send_photos(bot: Bot, chat_id: int, images: list[Path], caption: str) -> Delivered:
@@ -930,20 +988,16 @@ async def _send_photos(bot: Bot, chat_id: int, images: list[Path], caption: str)
     """
     if len(images) == 1:
         try:
-            single = await bot.send_photo(chat_id, _input_file(images[0]), caption=caption)
+            single = await _deliver_ref(
+                lambda ref: bot.send_photo(chat_id, ref, caption=caption), images[0]
+            )
             return Delivered(file_id=_photo_id(single), kind="photo")
         except TelegramBadRequest:
             logger.info("Telegram refused a photo as a photo — sending it as a document")
             file_id = await _send_document(bot, chat_id, images[0], caption)
             return Delivered(file_id=file_id, kind="file")
-    try:
-        group = await send_album(
-            bot,
-            chat_id,
-            [InputMediaPhoto(media=_input_file(path)) for path in images],
-            caption,
-        )
-    except TelegramBadRequest:
+    group = await _send_album_group(bot, chat_id, images, caption)
+    if group is None:
         logger.info("Telegram refused a media group — sending each picture on its own")
         for path in images:
             await _send_document(bot, chat_id, path, caption)
@@ -980,11 +1034,14 @@ async def _send_file(
                 "duration": track.duration_s,
                 "thumbnail": _input_file(cover) if cover is not None else None,
             }
-        sent = await bot.send_audio(chat_id, _input_file(path), caption=caption, **tags)
+        sent = await _deliver_ref(
+            lambda ref: bot.send_audio(chat_id, ref, caption=caption, **tags), path
+        )
         return _file_id(sent.audio)
     try:
-        sent = await bot.send_video(
-            chat_id, _input_file(path), caption=caption, supports_streaming=True
+        sent = await _deliver_ref(
+            lambda ref: bot.send_video(chat_id, ref, caption=caption, supports_streaming=True),
+            path,
         )
         return _file_id(sent.video)
     except TelegramBadRequest:

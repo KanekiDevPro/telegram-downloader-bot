@@ -14,7 +14,7 @@ from aiogram.types import User
 
 import main
 from core.config import Settings
-from core.telegram_api import build_session, session_target
+from core.telegram_api import build_session, local_file_uri, session_target
 
 
 def _settings(monkeypatch: pytest.MonkeyPatch, **env: str) -> Settings:
@@ -164,3 +164,86 @@ async def test_cloud_api_failure_still_raises(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(Bot, "get_me", fake_get_me)
     with pytest.raises(OSError):
         await main.connect_bot(settings)
+
+
+# ---------------------------------------------------------------------------
+# Zero-copy upload: a file URI is offered only where the server can read it
+# ---------------------------------------------------------------------------
+
+def _shared_setup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **extra: str
+) -> tuple[Settings, Path, Path]:
+    shared = tmp_path / "shared"
+    (shared / "job-1").mkdir(parents=True)
+    inside = shared / "job-1" / "video.mp4"
+    inside.write_bytes(b"x")
+    outside = tmp_path / "elsewhere.mp4"
+    outside.write_bytes(b"x")
+    settings = _settings(
+        monkeypatch,
+        TELEGRAM_API_BASE_URL="http://telegram-api:8081",
+        TELEGRAM_API_LOCAL="1",
+        TELEGRAM_API_SHARED_DIR=str(shared),
+        **extra,
+    )
+    return settings, inside, outside
+
+
+def test_the_file_uri_is_offered_only_for_files_on_the_shared_volume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The local server reads the file *itself* — the same absolute path, seen
+    through the volume both containers mount (identity on purpose: the URI must
+    name the file where the server is, and a wrong guess is a failed upload).
+    """
+    settings, inside, outside = _shared_setup(monkeypatch, tmp_path)
+
+    assert local_file_uri(inside, settings) == inside.resolve().as_uri()
+    assert local_file_uri(outside, settings) is None, "outside the volume the server cannot see it"
+
+
+def test_the_file_uri_never_outlives_a_fallback_to_the_cloud(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cloud API has never heard of a file URI — after the local server is
+    declared unreachable every upload must be bytes again."""
+    settings, inside, _outside = _shared_setup(monkeypatch, tmp_path)
+    settings.use_cloud_api_fallback()
+
+    assert local_file_uri(inside, settings) is None
+
+
+def test_no_uri_without_the_pieces_that_make_it_safe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    media = shared / "a.mp4"
+    media.write_bytes(b"x")
+
+    # No shared volume configured:
+    plain = _settings(
+        monkeypatch,
+        TELEGRAM_API_BASE_URL="http://telegram-api:8081",
+        TELEGRAM_API_LOCAL="1",
+        TELEGRAM_API_SHARED_DIR="",
+    )
+    assert local_file_uri(media, plain) is None
+
+    # The cloud API:
+    cloud = _settings(
+        monkeypatch,
+        TELEGRAM_API_BASE_URL="",
+        TELEGRAM_API_LOCAL="",
+        TELEGRAM_API_SHARED_DIR=str(shared),
+    )
+    assert local_file_uri(media, cloud) is None
+
+    # A local server without local mode (the 50 MB ceiling variant):
+    not_local = _settings(
+        monkeypatch,
+        TELEGRAM_API_BASE_URL="http://telegram-api:8081",
+        TELEGRAM_API_LOCAL="0",
+        TELEGRAM_API_SHARED_DIR=str(shared),
+    )
+    assert local_file_uri(media, not_local) is None

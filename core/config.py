@@ -342,6 +342,15 @@ class Settings(BaseSettings):
     #: Host directory mounted into telegram-bot-api, when it differs from
     #: DOWNLOAD_DIR (enables reading files off disk instead of re-uploading).
     telegram_api_files_dir: Path | None = Field(default=None, alias="TELEGRAM_API_FILES_DIR")
+    #: The job directory the telegram-api container mounts *at the same path*,
+    #: read-only — the one contract behind zero-copy uploads. When a produced
+    #: file lives here and the local server runs in local mode, the upload is
+    #: sent as a ``file://`` URI and the server reads the file off the shared
+    #: volume itself (core.telegram.org/bots/api: a local server accepts uploads
+    #: "using their local path and the file URI scheme") — no bytes cross the
+    #: socket. Empty (the default) keeps every deployment streaming;
+    #: `docker-compose.yml` points it at the shared `downloads` volume.
+    telegram_api_shared_dir: Path | None = Field(default=None, alias="TELEGRAM_API_SHARED_DIR")
 
     #: Set at runtime by ``use_cloud_api_fallback`` when the configured local
     #: server turns out to be unreachable. Mirrored in ``docker-compose.yml``.
@@ -703,7 +712,9 @@ class Settings(BaseSettings):
             return True
         return value  # anything else: let pydantic report a clear validation error
 
-    @field_validator("telegram_api_files_dir", "session_route_file", mode="before")
+    @field_validator(
+        "telegram_api_files_dir", "telegram_api_shared_dir", "session_route_file", mode="before"
+    )
     @classmethod
     def _blank_env_dir_is_none(cls, value: object) -> object:
         if value is None or (isinstance(value, str) and not value.strip()):

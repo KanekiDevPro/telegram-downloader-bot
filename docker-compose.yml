@@ -231,6 +231,12 @@ services:
       TELEGRAM_LOCAL: ${TELEGRAM_API_LOCAL:-1}
     volumes:
       - telegram-api-data:/var/lib/telegram-bot-api
+      # The bot's job directory, at the *same* path the bot writes to
+      # (TELEGRAM_API_SHARED_DIR on the bot names it): this is what lets an
+      # upload arrive as a `file://` URI the server reads straight off the
+      # volume — a zero-copy delivery instead of hundreds of MB over the
+      # socket. Read-only: the server only ever opens these files.
+      - downloads:/app/downloads:ro
     ports:
       - "8081:8081"
     healthcheck:
@@ -452,6 +458,10 @@ services:
       DATABASE_URL: postgresql://downloader:downloader@postgres:5432/downloader
       REDIS_URL: redis://redis:6379/0
       DOWNLOAD_DIR: /app/downloads
+      # Zero-copy uploads: the same volume the telegram-api service mounts at
+      # this very path (see its `downloads` mount). Files under it are delivered
+      # by file URI; anything outside still streams. Empty disables the fast path.
+      TELEGRAM_API_SHARED_DIR: /app/downloads
       # Empty = official cloud API (see .env: TELEGRAM_API_BASE_URL).
       TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:-}
       TELEGRAM_API_LOCAL: ${TELEGRAM_API_LOCAL:-1}

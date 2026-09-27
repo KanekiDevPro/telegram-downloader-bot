@@ -427,3 +427,110 @@ def test_the_smaller_button_really_makes_a_smaller_file() -> None:
         assert levels == sorted(levels, reverse=True), codec
     assert AUDIO_EXPORTS["opus.best"] == ("opus", "192")
     assert AUDIO_EXPORTS["mp3"] == ("mp3", "192"), "the historical default is untouched"
+
+
+# ---------------------------------------------------------------------------
+# The remux is a stream copy: nothing in the chain re-encodes what it can copy
+# ---------------------------------------------------------------------------
+
+def test_the_video_chain_has_no_reencode_step(tmp_path: Path) -> None:
+    """Tier selection is a *format* choice, never a transcode: separate audio
+    and video streams are merged by yt-dlp's FFmpegMergerPP, whose arguments are
+    fixed at ``-c copy``. All this module can do is keep the chain honest — no
+    post-processor of ours may ever join the video path — and this pins it."""
+    from services.extractor import MERGE_OUTPUT_FORMAT, ExtractorService
+
+    opts = ExtractorService(tmp_path)._base_opts(extract_only=False, media_format="video")
+
+    assert "postprocessors" not in opts
+    assert opts["merge_output_format"] == MERGE_OUTPUT_FORMAT
+
+
+def _audio_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    source_codec: str,
+    source_ext: str,
+    tier_codec: str,
+    tier_quality: str | None,
+) -> dict[str, Any]:
+    """Run yt-dlp's real copy-or-encode *decision* with ffmpeg faked out.
+
+    The half-built post-processor is deliberate: the contract under test is the
+    decision table in ``FFmpegExtractAudioPP.run`` — a machine without ffmpeg
+    must still pin it — and every attribute and method ``run()`` reads is set up
+    here. Nothing that carries a decision is stubbed; only the two ffmpeg
+    touches (probe and encode) are faked, and they record what they were asked
+    to do. This is the same style of contract as
+    ``test_browser_spec_matches_yt_dlp_own_parser``: the installed yt-dlp is the
+    specification, and a version that stops copying streams should fail here
+    rather than quietly cost every audio job its CPU budget.
+    """
+    from yt_dlp.postprocessor.ffmpeg import FFmpegExtractAudioPP
+
+    pp = object.__new__(FFmpegExtractAudioPP)
+    pp._downloader = None  # to_screen is a no-op without one; run() reads no other state
+    pp._progress_hooks = []  # what PostProcessor.__init__ would have set; the run() wrapper asks
+    pp.mapping = tier_codec
+    pp._preferredquality = float(tier_quality) if tier_quality is not None else None
+    pp._nopostoverwrites = False
+    seen: dict[str, Any] = {}
+
+    def fake_probe(path: str) -> str:
+        return source_codec
+
+    def fake_ffmpeg(path: str, out_path: str, codec: str | None, more_opts: list[str]) -> None:
+        seen["codec"] = codec
+        seen["opts"] = list(more_opts)
+        Path(out_path).write_bytes(b"x")
+
+    monkeypatch.setattr(pp, "get_audio_codec", fake_probe)
+    monkeypatch.setattr(pp, "run_ffmpeg", fake_ffmpeg)
+    source = tmp_path / f"track.{source_ext}"
+    source.write_bytes(b"x")
+    pp.run({"filepath": str(source), "ext": source_ext})
+    return seen
+
+
+def test_an_audio_tier_copies_the_stream_the_site_already_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AAC/Opus in, same codec out: stream copy — zero CPU, zero generation loss.
+
+    The opus tier on an opus source is the everyday YouTube case, and the m4a
+    tier on an AAC source is the untouched-stream promise: there not even
+    ffmpeg runs."""
+    assert _audio_decision(
+        tmp_path,
+        monkeypatch,
+        source_codec="opus",
+        source_ext="webm",
+        tier_codec="opus",
+        tier_quality="192",
+    ) == {"codec": "copy", "opts": []}, "copy, and the bitrate knob is dropped with it"
+
+    assert _audio_decision(
+        tmp_path,
+        monkeypatch,
+        source_codec="aac",
+        source_ext="m4a",
+        tier_codec="m4a",
+        tier_quality="256",
+    ) == {}, "already the target container — not converted at all"
+
+
+def test_a_reencode_happens_only_when_the_user_asks_for_another_codec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _audio_decision(
+        tmp_path,
+        monkeypatch,
+        source_codec="aac",
+        source_ext="m4a",
+        tier_codec="mp3",
+        tier_quality="192",
+    )
+
+    assert seen["codec"] == "libmp3lame", "the one tier that must encode"
+    assert seen["opts"][0] == "-b:a" and seen["opts"][1].startswith("192")

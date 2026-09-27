@@ -28,7 +28,13 @@ DEFAULT_LOCAL_API_PORT = 8081
 #: Where telegram-bot-api stores the files it serves in local mode.
 DEFAULT_SERVER_FILES_DIR = "/var/lib/telegram-bot-api"
 
-__all__ = ["DEFAULT_LOCAL_API_PORT", "DEFAULT_SERVER_FILES_DIR", "build_session", "session_target"]
+__all__ = [
+    "DEFAULT_LOCAL_API_PORT",
+    "DEFAULT_SERVER_FILES_DIR",
+    "build_session",
+    "local_file_uri",
+    "session_target",
+]
 
 
 def build_session(settings: Settings) -> AiohttpSession | None:
@@ -71,6 +77,38 @@ def _files_path_wrapper(settings: Settings) -> SimpleFilesPathWrapper | None:
         server_path=Path(DEFAULT_SERVER_FILES_DIR),
         local_path=settings.telegram_api_files_dir,
     )
+
+
+def local_file_uri(path: Path, settings: Settings) -> str | None:
+    """``file://`` URI for a zero-copy upload through a local Bot API server — or ``None``.
+
+    A local server reads the file *itself* when the upload names its local path
+    with the file URI scheme (core.telegram.org/bots/api: local servers accept
+    uploads "using their local path and the file URI scheme"), so delivering a
+    460 MB file becomes a metadata call instead of 460 MB through the socket.
+    Three gates decide it:
+
+    * the deployment is on a local server running in local mode and has not
+      fallen back to the cloud — the cloud has never heard of a file URI;
+    * ``TELEGRAM_API_SHARED_DIR`` names the directory the server mounts *at the
+      same path* (the URI is the path itself, so a wrong guess would be a failed
+      upload — an unconfigured shared dir keeps every upload streaming);
+    * the file actually lives inside that directory.
+
+    Anything else answers ``None``: stream the bytes, exactly as before.
+    """
+    shared = settings.telegram_api_shared_dir
+    if not (
+        settings.uses_local_api
+        and settings.telegram_api_local
+        and not settings.cloud_api_fallback
+        and shared is not None
+    ):
+        return None
+    resolved = path.resolve()
+    if not resolved.is_relative_to(shared.resolve()):
+        return None
+    return resolved.as_uri()
 
 
 def session_target(settings: Settings) -> str:

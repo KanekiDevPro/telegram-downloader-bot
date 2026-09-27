@@ -22,7 +22,12 @@ import pytest
 from core.config import DEFAULT_YOUTUBE_CLIENTS, Settings
 from services import doctor as doctor_service
 from services.doctor import CLIENTS_CHECK_NAME, _clients_check
-from services.extractor import IPV4_ANY, ExtractorService, youtube_client_facts
+from services.extractor import (
+    IPV4_ANY,
+    ExtractorService,
+    effective_youtube_clients,
+    youtube_client_facts,
+)
 
 #: The clients the old "spoof a device and skip the token" advice names. ``tv`` is in
 #: the token-free group in this yt-dlp, the other two are not — which is the whole
@@ -265,3 +270,88 @@ def test_the_row_sits_with_the_rest_of_the_engine_configuration(
 
     names = [check.name for check in checks]
     assert names.index(CLIENTS_CHECK_NAME) == names.index("JS runtime") + 1
+
+
+# ---------------------------------------------------------------------------
+# The cookie-aware hierarchy
+# ---------------------------------------------------------------------------
+
+VALID_JAR = (
+    "# Netscape HTTP Cookie File\n"
+    "#HttpOnly_.youtube.com\tTRUE\t/\tFALSE\t2147483647\tLOGIN_INFO\tv\n"
+)
+
+
+def _jar(tmp_path: Path) -> Path:
+    jar = tmp_path / "cookies.txt"
+    jar.write_text(VALID_JAR, encoding="utf-8")
+    return jar
+
+
+def test_a_cookie_blind_client_costs_a_round_trip_only_anonymous(tmp_path: Path) -> None:
+    """With a signed-in jar, ``visionos`` is a wasted player request.
+
+    ``visionos`` is the one client in the default list that cannot carry a
+    cookie session (yt-dlp's own JS-less anonymous fallback): when cookies are
+    active its player response is either the anonymous one or one yt-dlp
+    *skips* outright (``_video.py``: "got player responses for video … instead
+    of …"), and either way a whole round-trip bought nothing. So the jar makes
+    the request list shorter — and the same list stays whole without one.
+    """
+    clients = ("visionos", "web_embedded", "tv_downgraded", "web")
+
+    with_jar = _extractor(tmp_path, cookie_file=_jar(tmp_path), youtube_clients=clients)
+    without = _extractor(tmp_path, cookie_file=None, youtube_clients=clients)
+
+    assert with_jar._base_opts(extract_only=True)["extractor_args"]["youtube"]["player_client"] == [
+        "web_embedded",
+        "tv_downgraded",
+        "web",
+    ]
+    assert without._base_opts(extract_only=True)["extractor_args"]["youtube"]["player_client"] == (
+        list(clients)
+    )
+
+
+def test_browser_cookies_count_as_cookies_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    extractor = _extractor(
+        tmp_path, cookies_from_browser="chrome", youtube_clients=("visionos", "tv")
+    )
+    monkeypatch.setattr("services.extractor.browser_cookie_jar_is_usable", lambda spec: True)
+    extractor._browser_cookies_ok = None
+
+    args = extractor._base_opts(extract_only=True)["extractor_args"]
+
+    assert args["youtube"]["player_client"] == ["tv"]
+
+
+def test_the_configured_list_is_never_rewritten_behind_the_operator_s_back(
+    tmp_path: Path,
+) -> None:
+    """``extractor_args`` reports what was configured; only the request adapts."""
+    clients = ("visionos", "web_embedded")
+    extractor = _extractor(tmp_path, cookie_file=_jar(tmp_path), youtube_clients=clients)
+
+    assert extractor.extractor_args["youtube"]["player_client"] == list(clients)
+
+
+def test_the_jar_less_second_opinion_keeps_every_client(tmp_path: Path) -> None:
+    """``allow_cookies=False`` is the anonymous retry — there ``visionos`` fits."""
+    extractor = _extractor(
+        tmp_path, cookie_file=_jar(tmp_path), youtube_clients=("visionos", "tv")
+    )
+
+    args = extractor._base_opts(extract_only=True, allow_cookies=False)["extractor_args"]
+
+    assert args["youtube"]["player_client"] == ["visionos", "tv"]
+
+
+def test_the_filter_is_a_pure_function_of_the_cookie_state() -> None:
+    assert effective_youtube_clients(("visionos", "tv"), cookies_active=True) == ("tv",)
+    assert effective_youtube_clients(("visionos", "tv"), cookies_active=False) == ("visionos", "tv")
+    assert effective_youtube_clients((), cookies_active=True) == ()
+    # Variant spellings (``base.variant``) are judged by their base client.
+    assert effective_youtube_clients(("visionos.tv",), cookies_active=True) == ()
+    assert effective_youtube_clients(("web_embedded.visionos",), cookies_active=True) == (
+        "web_embedded.visionos",
+    )

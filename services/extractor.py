@@ -753,6 +753,32 @@ def missing_youtube_login_cookies(path: Path | None) -> tuple[str, ...]:
     return tuple(missing)
 
 
+#: Clients that cannot carry a cookie session — in the installed yt-dlp's own
+#: table ``visionos`` is the JS-less anonymous fallback. While cookies are active
+#: such a client's player request is a round-trip that buys nothing: it comes
+#: back anonymous at best, and at worst comes back for the wrong video and is
+#: skipped outright (yt-dlp's ``_video.py``: "got player responses for video …
+#: instead of …"). Dropped from what is *sent* while a jar is active; the
+#: configured list itself is never rewritten (``extractor_args`` keeps it).
+COOKIE_BLIND_CLIENTS: tuple[str, ...] = ("visionos",)
+
+
+def effective_youtube_clients(
+    clients: Sequence[str], *, cookies_active: bool
+) -> tuple[str, ...]:
+    """The clients actually asked for: configured, minus the cookie-blind ones.
+
+    Pure in its inputs so the rule is pin-able (tests/test_youtube_clients.py).
+    Variant spellings (``base.variant``) are judged by their base client — the
+    name yt-dlp matches against its table.
+    """
+    if not cookies_active:
+        return tuple(clients)
+    return tuple(
+        client for client in clients if client.split(".", 1)[0] not in COOKIE_BLIND_CLIENTS
+    )
+
+
 def youtube_client_facts(
     clients: Sequence[str],
 ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
@@ -1616,6 +1642,10 @@ class ExtractorService:
         self._browser_cookie_spec = cookies_from_browser.strip()
         self._browser_cookies_ok: bool | None = None
         self._warned_cookie_paths: set[Path] = set()
+        #: The OAuth2 findings are configuration-level: one loud line per
+        #: process, never one per request (``_base_opts`` runs per extraction).
+        self._warned_oauth_conflict = False
+        self._warned_oauth_dead_switch = False
         #: Jar sources already reported for :data:`COOKIE_STORAGE_CODE` — one
         #: loud error per jar, not one per download.
         self._cookie_storage_failures: set[str] = set()
@@ -1689,14 +1719,18 @@ class ExtractorService:
         than each writing it: an assignment that dropped the other would be the
         worst kind of misconfiguration — one that reads as configured.
         """
+        return self._build_extractor_args(self.youtube_clients)
+
+    def _build_extractor_args(self, clients: Sequence[str]) -> dict[str, dict[str, list[str]]]:
+        """The single merge point for the settings that share this one option."""
         args: dict[str, dict[str, list[str]]] = {}
         if self.pot_provider_url:
             args["youtubepot-bgutilhttp"] = {"base_url": [self.pot_provider_url]}
-        if self.youtube_clients:
+        if clients:
             # ``player_client`` is the key yt-dlp reads (``_configuration_arg``);
             # anything else — ``client``, for instance — is never looked at, so it
             # would look like a spoof and change nothing.
-            args["youtube"] = {"player_client": list(self.youtube_clients)}
+            args["youtube"] = {"player_client": list(clients)}
         return args
 
     @staticmethod
@@ -1736,6 +1770,16 @@ class ExtractorService:
             # that reaches YouTube, which never hands a stream to an external
             # downloader at all. Plain files are unaffected.
             "concurrent_fragment_downloads": 8,
+            # yt-dlp's own HTTP downloader reads the socket in 1 MB blocks
+            # (``buffersize`` — the stock default is 1 KB per read: a syscall
+            # storm on a link that moves hundreds of megabytes) and fetches a
+            # plain response as 10 MB ranged chunks (``http_chunk_size``),
+            # which raises single-connection throughput and dodges the
+            # per-request throttling CDNs apply to long transfers. Together
+            # with the fragment concurrency above and aria2c below, every
+            # fetch shape is covered.
+            "buffersize": 1048576,
+            "http_chunk_size": 10485760,
             "format": format_selector(media_format, quality),
             "merge_output_format": MERGE_OUTPUT_FORMAT,
             # Resolution first, then HEVC on ties — see :data:`FORMAT_SORT`.
@@ -1767,7 +1811,13 @@ class ExtractorService:
             # n-challenge solver script be fetched when the ``yt-dlp-ejs``
             # package is not installed.
             opts["remote_components"] = list(self.remote_components)
-        if args := self.extractor_args:
+        # The client list adapts to whether cookies go out with this request:
+        # a cookie-blind client would spend a player round-trip for nothing.
+        clients = effective_youtube_clients(
+            self.youtube_clients,
+            cookies_active=allow_cookies and (self.using_cookies or self.using_browser_cookies),
+        )
+        if args := self._build_extractor_args(clients):
             opts["extractor_args"] = args
         if self.force_ipv4:
             # yt-dlp's ``--force-ipv4``: its socket layer filters resolved addresses
@@ -1789,12 +1839,14 @@ class ExtractorService:
             # the token exchange), so a deployment with both configured gets one
             # loud warning rather than a silent conflict.
             if allow_cookies and (self.cookie_file is not None or self.using_browser_cookies):
-                logger.warning(
-                    "OAuth2 login is enabled alongside a cookie jar — yt-dlp's OAuth "
-                    "flow is documented to misbehave when account/anonymous cookies "
-                    "are sent in the same request. If logins fail, unset COOKIE_FILE "
-                    "or turn YTDLP_USE_OAUTH2 off."
-                )
+                if not self._warned_oauth_conflict:
+                    self._warned_oauth_conflict = True
+                    logger.warning(
+                        "OAuth2 login is enabled alongside a cookie jar — yt-dlp's OAuth "
+                        "flow is documented to misbehave when account/anonymous cookies "
+                        "are sent in the same request. If logins fail, unset COOKIE_FILE "
+                        "or turn YTDLP_USE_OAUTH2 off."
+                    )
             opts["username"] = OAUTH2_USERNAME
             opts["password"] = OAUTH2_PASSWORD
         elif self.oauth_impossible:
@@ -1807,12 +1859,14 @@ class ExtractorService:
             # but it must also not let a knob that cannot work take down the
             # route that does. Measured by services/oauth.py, surfaced by
             # /doctor, and never allowed to poison the requests.
-            logger.warning(
-                "YTDLP_USE_OAUTH2=1 but this yt-dlp refuses the OAuth2 flow — "
-                "the flag is NOT applied to requests (a dead switch must not take "
-                "down the working cookie route). /doctor shows the refusal; a "
-                "reviving plugin re-enables it."
-            )
+            if not self._warned_oauth_dead_switch:
+                self._warned_oauth_dead_switch = True
+                logger.warning(
+                    "YTDLP_USE_OAUTH2=1 but this yt-dlp refuses the OAuth2 flow — "
+                    "the flag is NOT applied to requests (a dead switch must not take "
+                    "down the working cookie route). /doctor shows the refusal; a "
+                    "reviving plugin re-enables it."
+                )
         # Browser cookies are merged with the jar file by yt-dlp; whichever is
         # missing is skipped, so both can be configured safely. ``allow_cookies=False``
         # is the second opinion a stale session sometimes needs: the same request

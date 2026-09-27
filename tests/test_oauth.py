@@ -665,4 +665,45 @@ def test_the_cache_line_reports_what_it_sees(tmp_path: Any) -> None:
     assert "token" in cache_state_line(str(tmp_path / "jar"))
 
 
+# ---------------------------------------------------------------------------
+# The dead switch: one loud warning, not one per request
+# ---------------------------------------------------------------------------
+
+def _extractor(tmp_path: Any, **kwargs: Any) -> Any:
+    from services.extractor import ExtractorService
+
+    return ExtractorService(tmp_path, **kwargs)
+
+
+def test_the_dead_switch_warning_is_said_once_not_per_request(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``_base_opts`` runs per extraction; the refusal is a *configuration*
+    finding, so it must be heard once — a warning repeated for every link is
+    noise that trains operators to stop reading the log."""
+    monkeypatch.setattr("services.oauth.probe_oauth_support_sync", lambda: False)
+    extractor = _extractor(tmp_path, use_oauth2=True)
+
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            opts = extractor._base_opts(extract_only=True)
+
+    dead = [r for r in caplog.records if "dead switch" in r.getMessage()]
+    assert len(dead) == 1, "once per process — the bot must not spam its own log"
+    assert "username" not in opts, "the flag never reaches the request"
+
+
+def test_the_oauth_cookie_conflict_warning_is_also_once(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr("services.oauth.probe_oauth_support_sync", lambda: True)
+    extractor = _extractor(tmp_path, use_oauth2=True, cookie_file=tmp_path / "cookies.txt")
+
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            extractor._base_opts(extract_only=True)
+
+    conflicts = [r for r in caplog.records if "alongside a cookie jar" in r.getMessage()]
+    assert len(conflicts) == 1
+
 

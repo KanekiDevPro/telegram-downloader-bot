@@ -563,3 +563,20 @@ def test_menu_auto_best_is_off_when_absent_and_needs_a_deliberate_opt_in(
 
     monkeypatch.setenv("MENU_AUTO_BEST", "0")
     assert Settings(_env_file=None).menu_auto_best is False  # type: ignore[call-arg]
+
+
+def test_the_shared_upload_dir_is_off_until_an_operator_points_it_at_the_volume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``TELEGRAM_API_SHARED_DIR`` names the job directory the telegram-api
+    container mounts *at the same path* — the one contract that turns an upload
+    into a file URI. Unset (the default) keeps every deployment streaming, and
+    a relative path lives under the project like the other path settings."""
+    monkeypatch.delenv("TELEGRAM_API_SHARED_DIR", raising=False)
+    assert Settings(_env_file=None).telegram_api_shared_dir is None  # type: ignore[call-arg]
+
+    monkeypatch.setenv("TELEGRAM_API_SHARED_DIR", str(tmp_path))
+    assert Settings(_env_file=None).telegram_api_shared_dir == tmp_path  # type: ignore[call-arg]
+
+    monkeypatch.setenv("TELEGRAM_API_SHARED_DIR", "")
+    assert Settings(_env_file=None).telegram_api_shared_dir is None  # type: ignore[call-arg]

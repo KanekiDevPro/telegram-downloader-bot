@@ -434,3 +434,34 @@ def test_cookie_file_defaults_to_project_root() -> None:
 def test_cookie_file_can_be_disabled(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("COOKIE_FILE", value)
     assert Settings(_env_file=None).cookie_file is None  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# Throughput tuning (the 30-second delivery budget)
+# ---------------------------------------------------------------------------
+
+def test_socket_buffer_and_http_chunk_size_are_tuned() -> None:
+    """Two yt-dlp knobs that decide how fast bytes actually arrive.
+
+    ``buffersize`` is yt-dlp's own HTTP downloader read block
+    (``downloader/http.py``: ``ctx.block_size`` — its default is 1024 bytes per
+    socket read, a syscall per kilobyte on a link that moves hundreds of
+    megabytes), and ``http_chunk_size`` splits a response into 10 MB ranged
+    requests, which both raises single-connection throughput and dodges the
+    per-request CDN throttling Google Video applies to long transfers. These
+    only reach fragmented and non-external-downloader fetches — aria2c carries
+    plain files (pinned above) — so together the three knobs cover every shape.
+    """
+    opts = _extractor()._base_opts(extract_only=True)
+
+    assert opts["buffersize"] == 1048576, "1 MB read blocks, not 1 KB"
+    assert opts["http_chunk_size"] == 10485760, "10 MB ranged chunks"
+
+
+def test_the_tuning_is_the_same_for_real_downloads() -> None:
+    """Extract-only opts are what the probes see; the download must not drift."""
+    opts = _extractor()._base_opts(extract_only=False, media_format="video")
+
+    assert opts["buffersize"] == 1048576
+    assert opts["http_chunk_size"] == 10485760
+    assert opts["concurrent_fragment_downloads"] == 8

@@ -54,3 +54,14 @@ def test_a_yes_writes_all_three_settings_into_env() -> None:
         "because a second line is dead weight to every reader of the file"
     )
     assert "local-api" in script, "the answer names how the server itself is started"
+
+
+def test_the_server_reads_the_bot_s_downloads_off_the_shared_volume() -> None:
+    """Zero-copy upload (see tests/test_zero_copy_upload.py) needs the
+    telegram-api container to see the bot's job directory *at the same path*,
+    read-only — and the bot to be told where that volume is. Without this
+    wiring the file URI would name a file the server cannot open."""
+    compose = (BASE_DIR / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "downloads:/app/downloads:ro" in compose
+    assert "TELEGRAM_API_SHARED_DIR: /app/downloads" in compose
