@@ -12,6 +12,8 @@ three settings, without ever leaving the duplicate-key mess a blind append would
 
 from __future__ import annotations
 
+import re
+
 from core.config import BASE_DIR
 
 INSTALLER = BASE_DIR / "deploy" / "install.sh"
@@ -80,3 +82,38 @@ def test_lifecycle_commands_activate_the_local_api_profile() -> None:
 
     assert '"--profile local-api"' in script
     assert "TELEGRAM_API_BASE_URL" in script, "the profile is gated on the local API being configured"
+
+
+_SERVICE_KEY = re.compile(r"^  [A-Za-z0-9_-]+:\s*$|^[a-z][a-z0-9_-]*:\s*$", re.M)
+
+
+def _service_block(compose: str, name: str) -> str:
+    """One service's YAML block: from its key to the next key at the same or
+    shallower indent (nested ``volumes:``/``environment:`` lists stay inside)."""
+    header = re.search(rf"^  {re.escape(name)}:\s*$", compose, re.M)
+    assert header is not None, f"{name} is missing from docker-compose.yml"
+    rest = compose[header.end() :]
+    end = _SERVICE_KEY.search(rest)
+    return rest[: end.start()] if end else rest
+
+
+def test_both_containers_mount_one_named_volume_at_one_path() -> None:
+    """``file:///app/downloads/…`` names the same file in both containers only
+    if both mount the *same named volume* at that exact path — the URI is built
+    from the bot's view of the disk and resolved through the daemon's. "Bad
+    Request: can't find real file path" is what it looks like when the two
+    views diverge (a server kept on its pre-volume mounts while the bot was
+    recreated around it). Pin the whole chain: one ``downloads`` volume,
+    read-write on the bot, read-only on the server, and the shared-dir name
+    equal to the mount target so the URI can never name a path the daemon
+    lacks."""
+    compose = (BASE_DIR / "docker-compose.yml").read_text(encoding="utf-8")
+    server = _service_block(compose, "telegram-api")
+    bot = _service_block(compose, "bot")
+    volumes = compose.split("\nvolumes:", 1)[1]
+
+    assert re.search(r"^  downloads:\s*$", volumes, re.M), "the named volume is declared"
+    assert re.search(r"^ *- downloads:/app/downloads:ro\s*$", server, re.M), "read-only on the server"
+    assert re.search(r"^ *- downloads:/app/downloads\s*$", bot, re.M), "read-write on the bot"
+    assert "TELEGRAM_API_SHARED_DIR: /app/downloads" in bot
+    assert "DOWNLOAD_DIR: /app/downloads" in bot

@@ -120,6 +120,14 @@ COMPOSE_LOOPBACK_PORTS: dict[str, int] = {
 #: configured), and ``tv`` stays in the list as the token-free lifeline for
 #: when the provider is down. ``services.extractor.youtube_client_facts``
 #: reads that same table at runtime, and ``/doctor`` reports what it finds.
+#:
+#: Cookie policy, same honesty: ``android`` and ``ios`` cannot carry a cookie
+#: session either (yt-dlp: ``Skipping client "android" since it does not
+#: support cookies``), so while a jar is active
+#: ``services.extractor.effective_youtube_clients`` sends ``mweb``, ``tv`` and
+#: ``web`` — the metadata-fast clients leading — and the two cookie-blind
+#: players never cost a round-trip at the menu or in a job. Jar-less runs keep
+#: the full ladder above.
 DEFAULT_YOUTUBE_CLIENTS: tuple[str, ...] = (
     "android",
     "ios",
@@ -267,6 +275,21 @@ def _resolve_path(value: object) -> Path:
     """
     path = Path(str(value)).expanduser()
     return path if path.is_absolute() else (BASE_DIR / path).resolve()
+
+
+def _strip_env_comment(value: object) -> object:
+    """Cut a glued ``# comment`` off an env value before it becomes a path.
+
+    ``KEY=value # comment`` is a comment to dotenv and to Docker Compose's
+    *documentation* — but Compose's ``env_file`` ships the comment text as part
+    of the value, so a validator that trusts the raw string mints a truthy,
+    corrupt ``Path("# optional: host dir …")``. Every path key strips from the
+    first ``#`` on; what is left is the value, and a comment-only value is then
+    "unset" by each key's own blank rule. The price is that a literal ``#`` in
+    a real path cannot arrive raw from the environment — the corrupt-path
+    failure is much the worse trade.
+    """
+    return value.split("#", 1)[0].strip() if isinstance(value, str) else value
 
 
 class Settings(BaseSettings):
@@ -662,6 +685,7 @@ class Settings(BaseSettings):
     @classmethod
     def _blank_cookie_file_is_none(cls, value: object) -> object:
         """An empty ``COOKIE_FILE=`` means "no cookie file", not Path('.')."""
+        value = _strip_env_comment(value)
         if value is None:
             return None
         if isinstance(value, str) and value.strip().lower() in {"", "none", "null", "-"}:
@@ -672,6 +696,7 @@ class Settings(BaseSettings):
     @classmethod
     def _resolve_cobalt_cookies_dir(cls, value: object) -> object:
         """Blank means "do not generate one"; a relative dir lives under the project."""
+        value = _strip_env_comment(value)
         if value is None:
             return None
         if isinstance(value, str) and value.strip().lower() in {"", "none", "null", "-"}:
@@ -681,6 +706,7 @@ class Settings(BaseSettings):
     @field_validator("download_dir", mode="before")
     @classmethod
     def _resolve_download_dir(cls, value: object) -> object:
+        value = _strip_env_comment(value)
         if value is None or (isinstance(value, str) and not value.strip()):
             return BASE_DIR / "downloads"
         return _resolve_path(value)
@@ -689,6 +715,7 @@ class Settings(BaseSettings):
     @classmethod
     def _normalize_webhook_path(cls, value: object) -> object:
         """Guarantee a leading slash so the webhook URL is always well-formed."""
+        value = _strip_env_comment(value)
         if not isinstance(value, str) or not value.strip():
             return "/webhook"
         path = "/" + value.strip().strip("/")
@@ -720,6 +747,7 @@ class Settings(BaseSettings):
     )
     @classmethod
     def _blank_env_dir_is_none(cls, value: object) -> object:
+        value = _strip_env_comment(value)
         if value is None or (isinstance(value, str) and not value.strip()):
             return None
         return _resolve_path(value)

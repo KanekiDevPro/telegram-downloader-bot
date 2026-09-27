@@ -325,8 +325,10 @@ def _jar(tmp_path: Path) -> Path:
 def test_a_cookie_blind_client_costs_a_round_trip_only_anonymous(tmp_path: Path) -> None:
     """With a signed-in jar, ``visionos`` is a wasted player request.
 
-    ``visionos`` is the one client in the default list that cannot carry a
-    cookie session (yt-dlp's own JS-less anonymous fallback): when cookies are
+    ``visionos`` is the classic cookie-blind client (yt-dlp's own JS-less
+    anonymous fallback; ``android`` and ``ios`` are cookie-blind in this
+    yt-dlp as well — it logs ``Skipping client … since it does not support
+    cookies``): when cookies are
     active its player response is either the anonymous one or one yt-dlp
     *skips* outright (``_video.py``: "got player responses for video … instead
     of …"), and either way a whole round-trip bought nothing. So the jar makes
@@ -389,3 +391,26 @@ def test_the_filter_is_a_pure_function_of_the_cookie_state() -> None:
     assert effective_youtube_clients(("web_embedded.visionos",), cookies_active=True) == (
         "web_embedded.visionos",
     )
+
+
+def test_cookie_authenticated_requests_never_send_the_cookie_blind_clients(
+    tmp_path: Path,
+) -> None:
+    """A signed-in jar makes ``android`` and ``ios`` dead weight — the
+    installed yt-dlp says so itself (``_video.py``: ``Skipping client "android"
+    since it does not support cookies``). Every cookie-blind client is a player
+    round-trip paid twice — once when the intake probes and again when the job
+    fetches — and it returns nothing a signed-in request can use. The jar
+    shortens the list before yt-dlp ever sees it, at both moments; the
+    configured list keeps its streaming ladder for jar-less runs."""
+    clients = ("android", "ios", "mweb", "tv", "web")
+
+    assert effective_youtube_clients(clients, cookies_active=True) == ("mweb", "tv", "web")
+    assert effective_youtube_clients(clients, cookies_active=False) == clients
+
+    extractor = _extractor(tmp_path, cookie_file=_jar(tmp_path), youtube_clients=clients)
+    probe = extractor._base_opts(extract_only=True)["extractor_args"]["youtube"]["player_client"]
+    fetch = extractor._base_opts(extract_only=False)["extractor_args"]["youtube"]["player_client"]
+
+    assert probe == ["mweb", "tv", "web"], "the intake probe is a signed-in request too"
+    assert fetch == ["mweb", "tv", "web"], "and the download must not log client skips"

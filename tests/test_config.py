@@ -580,3 +580,35 @@ def test_the_shared_upload_dir_is_off_until_an_operator_points_it_at_the_volume(
 
     monkeypatch.setenv("TELEGRAM_API_SHARED_DIR", "")
     assert Settings(_env_file=None).telegram_api_shared_dir is None  # type: ignore[call-arg]
+
+
+def test_a_glued_inline_comment_never_becomes_part_of_a_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Docker Compose's ``env_file`` ships ``KEY=value # comment`` verbatim —
+    its parser keeps the comment text in the value — and a live deployment
+    carried ``TELEGRAM_API_FILES_DIR=   # optional: host dir …`` exactly that
+    way. A path validator that trusts the raw value mints a truthy, corrupt
+    ``Path("# optional: host dir …")`` and hands it to aiogram's local-file
+    wrapper. The rule every path key follows: anything from the first ``#`` on
+    is a comment; what is left is the value, and a comment-only value means
+    "unset" (or the key's default). A literal ``#`` in a real path cannot come
+    in raw from the environment — the corrupt-path failure is the worse trade."""
+    settings = _settings(
+        monkeypatch,
+        TELEGRAM_API_FILES_DIR="   # optional: host dir mounted as the server's file storage",
+        YT_SESSION_ROUTE_FILE="# just a note",
+        TELEGRAM_API_SHARED_DIR=f"{tmp_path}  # the shared volume",
+        DOWNLOAD_DIR="downloads#trailing-garbage",
+        COOKIE_FILE="downloads/cookies.txt # the jar",
+        COBALT_COOKIES_DIR="# none",
+        WEBHOOK_PATH="hook # comment",
+    )
+
+    assert settings.telegram_api_files_dir is None
+    assert settings.session_route_file is None
+    assert settings.cobalt_cookies_dir is None
+    assert settings.telegram_api_shared_dir == tmp_path
+    assert settings.download_dir == (BASE_DIR / "downloads").resolve()
+    assert settings.cookie_file == (BASE_DIR / "downloads" / "cookies.txt").resolve()
+    assert settings.webhook_path == "/hook"

@@ -548,3 +548,24 @@ def test_the_throughput_knobs_are_the_names_the_installed_yt_dlp_reads() -> None
     assert "self.params.get('buffersize', 1024)" in http_src
     assert "self.params.get('http_chunk_size')" in http_src
     assert "concurrent_fragment_downloads" in inspect.getsource(fragment_module)
+
+
+def test_the_intake_probe_is_a_metadata_probe_not_a_download_dry_run() -> None:
+    """Eleven seconds from link to menu is the probe paying for checks the
+    menu never asked for. The stock ``check_formats`` stance fires a HEAD/GET
+    at every untested format URL before the list is even reported; a menu only
+    needs to know which formats exist. The probe is metadata only — nothing is
+    downloaded (``skip_download``), no comment section, no subtitle fetch, no
+    format validation; the manifests and storyboards a player response lists
+    are listings, not fetches. The download path keeps yt-dlp's own judgement:
+    its pre-flight is the one that must catch a dead URL *before* a job starts."""
+    probe = _extractor()._base_opts(extract_only=True)
+
+    assert probe["skip_download"] is True
+    assert probe["check_formats"] is False
+    assert probe["getcomments"] is False
+    assert probe["writesubtitles"] is False
+    assert probe["writeautomaticsub"] is False
+
+    fetch = _extractor()._base_opts(extract_only=False, media_format="video", quality="")
+    assert fetch.get("check_formats") is not False, "the download keeps yt-dlp's pre-flight"

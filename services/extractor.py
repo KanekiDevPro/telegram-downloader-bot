@@ -753,14 +753,16 @@ def missing_youtube_login_cookies(path: Path | None) -> tuple[str, ...]:
     return tuple(missing)
 
 
-#: Clients that cannot carry a cookie session — in the installed yt-dlp's own
-#: table ``visionos`` is the JS-less anonymous fallback. While cookies are active
-#: such a client's player request is a round-trip that buys nothing: it comes
-#: back anonymous at best, and at worst comes back for the wrong video and is
-#: skipped outright (yt-dlp's ``_video.py``: "got player responses for video …
-#: instead of …"). Dropped from what is *sent* while a jar is active; the
-#: configured list itself is never rewritten (``extractor_args`` keeps it).
-COOKIE_BLIND_CLIENTS: tuple[str, ...] = ("visionos",)
+#: Clients that cannot carry a cookie session — the installed yt-dlp refuses to
+#: send them one ("Skipping client "android" since it does not support
+#: cookies", ``_video.py``) or comes back with the anonymous/wrong response
+#: ("got player responses for video … instead of …"). Either way the player
+#: request is a round-trip that buys nothing — and it is paid twice, at the
+#: intake probe and again at download time. ``visionos`` is the JS-less
+#: anonymous fallback; ``android`` and ``ios`` are the streaming clients that
+#: are equally cookie-blind. Dropped from what is *sent* while a jar is active;
+#: the configured list itself is never rewritten (``extractor_args`` keeps it).
+COOKIE_BLIND_CLIENTS: tuple[str, ...] = ("visionos", "android", "ios")
 
 
 def effective_youtube_clients(
@@ -1890,7 +1892,21 @@ class ExtractorService:
             else:
                 self.warn_if_cookies_unusable()
         if extract_only:
+            # A metadata probe is not a download dry-run: the menu only needs
+            # to know which formats exist. The stock ``check_formats`` stance
+            # fires a HEAD/GET at every untested format URL before the list is
+            # even reported — the 11.71 s a production intake burned — and
+            # comments and subtitles are per-request fetches for metadata the
+            # menu never shows. Nothing is downloaded either way
+            # (``skip_download``); the manifests and storyboards a player
+            # response lists are listings, not fetches. The download path keeps
+            # yt-dlp's own judgement: its pre-flight is the one that must catch
+            # a dead URL before a job starts.
             opts["skip_download"] = True
+            opts["check_formats"] = False
+            opts["getcomments"] = False
+            opts["writesubtitles"] = False
+            opts["writeautomaticsub"] = False
         return opts
 
     def _translate(self, exc: DownloadError) -> ExtractionError:
