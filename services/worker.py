@@ -31,7 +31,7 @@ from core import database
 from core import texts as text_store
 from core.config import get_settings
 from core.i18n import DEFAULT_LANG, error_message, t
-from core.telegram_api import local_file_uri
+from core.telegram_api import local_api_is_reachable, local_file_uri
 from core.ui import remember_retry, retry_keyboard
 from core.utils import (
     MediaFormat,
@@ -894,6 +894,36 @@ def _daemon_readable(path: Path) -> None:
         pass
 
 
+#: How often a latched cloud fallback may re-check the local server (seconds).
+#: The delivery path is hot; a server that failed at boot must not cost a probe
+#: per send. One probe per interval — and the latch lifts the moment it answers.
+LOCAL_API_RECOVERY_INTERVAL_S = 30.0
+_recovery_probe_at = 0.0
+
+
+async def _recover_local_api_if_healthy() -> None:
+    """Un-latch ``cloud_api_fallback`` the moment the local server answers again.
+
+    The latch says where the *session* sends (aimed by
+    ``core.telegram_api.SettingsDrivenAPIServer``): while it is set, calls go to
+    the official cloud API and uploads are capped at 50 MB. A server that was
+    down at boot and came back must not cost the deployment its zero-copy path
+    forever, so the delivery path re-checks — rate-limited — and clears the
+    latch; the very same session re-aims itself on the next call.
+    """
+    global _recovery_probe_at
+    settings = get_settings()
+    if not settings.cloud_api_fallback:
+        return
+    now = time.monotonic()
+    if now - _recovery_probe_at < LOCAL_API_RECOVERY_INTERVAL_S:
+        return
+    _recovery_probe_at = now
+    if await local_api_is_reachable(settings):
+        settings.restore_local_api()
+        logger.info("the local Bot API server is answering again — zero-copy delivery resumed")
+
+
 def _media_ref(path: Path) -> str | FSInputFile:
     """How this file travels to Telegram — a file URI when the local Bot API
     server can read it off the shared volume itself, real bytes otherwise.
@@ -917,6 +947,7 @@ async def _deliver_ref(send: Callable[[str | FSInputFile], Awaitable[Any]], path
     with the file streamed, which is exactly what happened before this fast
     path existed. Anything the *streamed* attempt raises keeps its old meaning.
     """
+    await _recover_local_api_if_healthy()
     ref = _media_ref(path)
     if isinstance(ref, str):
         try:
@@ -984,6 +1015,7 @@ async def _send_album_group(bot: Bot, chat_id: int, images: list[Path], caption:
     file-URI attempt is retried with streamed bytes without ever duplicating a
     photo; only a second refusal falls through to the per-picture route.
     """
+    await _recover_local_api_if_healthy()
     refs: list[str | FSInputFile] = [_media_ref(path) for path in images]
     try:
         return await send_album(bot, chat_id, [InputMediaPhoto(media=ref) for ref in refs], caption)

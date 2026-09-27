@@ -102,6 +102,33 @@ def _use(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> None:
     monkeypatch.setattr(worker, "get_settings", lambda: settings)
 
 
+async def test_a_recovered_local_server_takes_the_zero_copy_path_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback latch is not a verdict. A server that was down at boot (and
+    latched the cloud fallback) and comes back must get its zero-copy path back
+    on the next delivery — the send path re-checks the server (rate-limited),
+    clears the latch, and hands over the URI instead of streaming the bytes."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    settings = _settings(shared)
+    settings.use_cloud_api_fallback()
+    _use(monkeypatch, settings)
+
+    async def healthy(_settings: Settings) -> bool:
+        return True
+
+    monkeypatch.setattr(worker, "local_api_is_reachable", healthy)
+    monkeypatch.setattr(worker, "_recovery_probe_at", 0.0)
+    media = _media(shared / "job-1")
+    bot = FakeBot()
+
+    await worker._send_document(bot, 1, media, "caption")  # type: ignore[arg-type]
+
+    assert isinstance(bot.refs[0], str), "the recovered server gets the URI again"
+    assert settings.cloud_api_fallback is False
+
+
 async def test_the_upload_is_a_file_uri_not_a_stream_of_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

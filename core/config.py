@@ -859,6 +859,17 @@ class Settings(BaseSettings):
         """Remember that the local Bot API server was unreachable (see main.py)."""
         self.cloud_api_fallback = True
 
+    def restore_local_api(self) -> None:
+        """Clear the fallback once the local server answers again.
+
+        The flag is the aim, not a verdict (see
+        ``core.telegram_api.SettingsDrivenAPIServer``): while it is set, calls
+        go to the official cloud API and zero-copy is off. Clearing it re-aims
+        the *same* session at the local server, so a server that came back
+        mid-run gets its zero-copy path back without a restart.
+        """
+        self.cloud_api_fallback = False
+
     @property
     def admin_id_set(self) -> frozenset[int]:
         return frozenset(self.admin_ids)

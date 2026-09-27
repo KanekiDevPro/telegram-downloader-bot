@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import aiohttp
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import SimpleFilesPathWrapper, TelegramAPIServer
 
-from core.config import Settings
+from core.config import Settings, probe_url
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +32,75 @@ DEFAULT_SERVER_FILES_DIR = "/var/lib/telegram-bot-api"
 __all__ = [
     "DEFAULT_LOCAL_API_PORT",
     "DEFAULT_SERVER_FILES_DIR",
+    "SettingsDrivenAPIServer",
     "build_session",
+    "local_api_is_reachable",
     "local_file_uri",
     "session_target",
 ]
+
+
+class SettingsDrivenAPIServer:
+    """A Telegram API target whose aim follows ``settings.cloud_api_fallback``.
+
+    Both directions, on every call — the flag is *state*, not a verdict. While
+    it is set the URLs point at the official cloud API; the moment something
+    clears it (``Settings.restore_local_api``), the very same session aims at
+    the local server again: no restart, no rebuilt Bot, and the zero-copy file
+    URI resumes with it (see ``services.worker._recover_local_api_if_healthy``).
+    """
+
+    def __init__(self, settings: Settings, local: TelegramAPIServer) -> None:
+        self._settings = settings
+        self._local = local
+        self._cloud = TelegramAPIServer.from_base("https://api.telegram.org")
+
+    def _target(self) -> TelegramAPIServer:
+        if self._settings.cloud_api_fallback:
+            return self._cloud
+        return self._local
+
+    @property
+    def base(self) -> str:
+        return self._target().base
+
+    @property
+    def file(self) -> str:
+        return self._target().file
+
+    @property
+    def is_local(self) -> bool:
+        return self._target().is_local
+
+    @property
+    def wrap_local_file(self) -> Any:
+        return self._target().wrap_local_file
+
+    def api_url(self, token: str, method: str) -> str:
+        return self._target().api_url(token, method)
+
+    def file_url(self, token: str, path: str | Path) -> str:
+        return self._target().file_url(token, path)
+
+
+async def local_api_is_reachable(settings: Settings) -> bool:
+    """Does the local Bot API server answer at all? One cheap probe.
+
+    The healthcheck's semantics, from outside the container: any HTTP response
+    means a process is serving (the root path answers 404 by design). Used to
+    un-latch ``cloud_api_fallback`` when the server is back — rate-limited by
+    the caller (``services.worker``), never a per-send cost. The address is the
+    one *this process* can reach (:func:`core.config.probe_url`).
+    """
+    if not settings.uses_local_api:
+        return False
+    try:
+        timeout = aiohttp.ClientTimeout(total=2.0)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(probe_url(settings.telegram_api_base_url)) as response:
+                return response.status > 0
+    except (aiohttp.ClientError, TimeoutError, OSError):
+        return False
 
 
 def build_session(settings: Settings) -> AiohttpSession | None:
@@ -62,7 +128,9 @@ def build_session(settings: Settings) -> AiohttpSession | None:
             "TELEGRAM_API_BASE_URL is set but TELEGRAM_API_ID/TELEGRAM_API_HASH are "
             "missing — the telegram-api container will not start without them."
         )
-    return AiohttpSession(api=api)
+    return AiohttpSession(
+        api=cast("TelegramAPIServer", SettingsDrivenAPIServer(settings, api))
+    )
 
 
 def _files_path_wrapper(settings: Settings) -> SimpleFilesPathWrapper | None:

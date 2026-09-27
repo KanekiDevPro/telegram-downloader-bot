@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -573,6 +575,54 @@ def test_the_intake_probe_is_a_metadata_probe_not_a_download_dry_run() -> None:
 
     fetch = _extractor()._base_opts(extract_only=False, media_format="video", quality="")
     assert fetch.get("check_formats") is not False, "the download keeps yt-dlp's pre-flight"
+
+
+def test_concurrent_youtube_dl_construction_registers_the_plugins_once(tmp_path: Path) -> None:
+    """The live crash: ``AssertionError: PoTokenProvider BgUtilHTTP already
+    registered`` — one registry entry, two claimants, from two raced probes.
+    yt-dlp loads its plugins on the *first* ``YoutubeDL`` construction, a
+    check-then-act on ``all_plugins_loaded`` with no lock, and its loader
+    executes plugin module bodies outside the import system's locks — so two
+    constructions in the same moment both run the bgutil registration and the
+    second dies on the assertion (taking the PO-token route with it, and the
+    intake's 9 s of retries after it). Warming the registry once and
+    constructing under a lock makes the load single-flight. Reproduced in a
+    fresh interpreter where the registry really is cold: the loader must run
+    exactly once and never write an assertion."""
+    script = tmp_path / "race.py"
+    script.write_text(
+        "import importlib, sys, threading, time\n"
+        f"sys.path.insert(0, {str(BASE_DIR)!r})\n"
+        "ydl_module = importlib.import_module('yt_dlp.YoutubeDL')\n"
+        "loads = []\n"
+        "original = ydl_module.load_all_plugins\n"
+        "def counting():\n"
+        "    loads.append(1)\n"
+        "    time.sleep(0.1)\n"
+        "    original()\n"
+        "ydl_module.load_all_plugins = counting\n"
+        "extractor = importlib.import_module('services.extractor')\n"
+        "barrier = threading.Barrier(4)\n"
+        "def build():\n"
+        "    barrier.wait()\n"
+        "    with extractor._new_ydl({'quiet': True}):\n"
+        "        pass\n"
+        "threads = [threading.Thread(target=build) for _ in range(4)]\n"
+        "for thread in threads:\n"
+        "    thread.start()\n"
+        "for thread in threads:\n"
+        "    thread.join()\n"
+        "print('LOADS', len(loads))\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=120
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "LOADS 1" in result.stdout, f"one plugin load, ever: {result.stdout!r}"
+    assert "already registered" not in result.stderr + result.stdout, "no double registration"
 
 
 def _answer(title: str) -> MediaInfo:

@@ -10,9 +10,10 @@
 # The local Bot API server needs TELEGRAM_API_ID and TELEGRAM_API_HASH from
 # https://my.telegram.org. It is a first-class service of the default stack —
 # no compose profile gates it — so every `up` keeps it (and its volume mounts)
-# in step with the bot. Without credentials the server cannot serve, and the
-# bot logs the failure and falls back to the official cloud API (50 MB
-# uploads) — an unconfigured server never blocks the boot.
+# in step with the bot. The bot waits for the server to report *healthy*
+# before it boots — a still-starting server once read as "unreachable", latched
+# the cloud fallback and killed zero-copy for the whole run — so write the keys
+# before `up` (deploy/install.sh offers to).
 
 services:
   postgres:
@@ -449,9 +450,14 @@ services:
       cobalt-warp:
         condition: service_healthy
         required: false
-    # No depends_on telegram-api: the bot survives (and reports) an unreachable
-    # API server rather than waiting for one — a local server that is absent,
-    # unconfigured or crashed must never block the boot.
+      # The zero-copy upload path needs a *healthy* local server, not a
+      # starting one: the boot probe once read a still-starting telegram-api as
+      # "unreachable", latched the cloud fallback and killed zero-copy for the
+      # whole run. `service_healthy` closes that race — the bot boots against a
+      # server that is answering. (Without keys the server cannot serve at all:
+      # write them before `up`; deploy/install.sh offers to.)
+      telegram-api:
+        condition: service_healthy
     # `.env` supplies BOT_TOKEN, ADMIN_IDS, limits, card details, ...
     env_file:
       - path: .env

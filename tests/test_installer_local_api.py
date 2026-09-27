@@ -94,18 +94,19 @@ def test_the_server_is_a_first_class_compose_citizen() -> None:
     """``telegram-api`` serves the zero-copy path and the 2000 MB ceiling, so it
     starts with the stack like bot, postgres and redis: every ``up`` keeps it —
     and its volume mounts — in step with the bot, which is what makes profile
-    drift impossible rather than merely unlikely. Its healthcheck stays, and
-    the bot still never waits on it: a local server that is absent,
-    unconfigured or crashed must not block the boot (the bot falls back to the
-    cloud API and reports it)."""
+    drift impossible rather than merely unlikely. Its healthcheck stays — and
+    it is what the bot now *waits for*: booting against a still-starting server
+    read as "unreachable", latched the cloud fallback and killed zero-copy for
+    the whole run. ``service_healthy`` closes that race for good."""
     compose = (BASE_DIR / "docker-compose.yml").read_text(encoding="utf-8")
     server = _service_block(compose, "telegram-api")
     bot = _service_block(compose, "bot")
 
     assert "profiles:" not in server, "nothing gates the server out of the default lifecycle"
     assert "healthcheck:" in server, "and it stays health-checked like the rest"
-    assert re.search(r"^\s*telegram-api:\s*$", bot, re.M) is None, (
-        "the bot must never wait on the server — no depends_on entry for it"
+    assert re.search(r"telegram-api:\s*\n\s*condition: service_healthy", bot), (
+        "the bot boots only after the server is healthy — a starting server must "
+        "never look unreachable and latch the cloud fallback"
     )
 
 

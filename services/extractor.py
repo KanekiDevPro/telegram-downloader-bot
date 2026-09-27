@@ -17,6 +17,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -33,6 +34,42 @@ from core.utils import AUDIO_FORMATS, MediaFormat, normalize_quality
 
 ProgressHook = Callable[[dict[str, Any]], None]
 T = TypeVar("T")
+
+#: yt-dlp loads its plugin registry on the *first* ``YoutubeDL`` construction:
+#: a check-then-act on ``all_plugins_loaded`` with no lock (in its
+#: ``YoutubeDL.__init__``), and its loader executes plugin module bodies outside
+#: the import system's locks. Two raced probes constructing together therefore
+#: both run the bgutil PO-token registration, and the second dies on
+#: ``AssertionError: PoTokenProvider BgUtilHTTP already registered`` — losing
+#: the token route and costing the intake its retries. One lock around
+#: construction makes the load single-flight: warmed here once, and every later
+#: construction (raced or not) enters after the registry is whole.
+_YDL_INIT_LOCK = threading.Lock()
+_YTDLP_WARMED = False
+
+
+def warm_up_ytdlp() -> None:
+    """Load yt-dlp's plugin registry exactly once, on one thread.
+
+    Called at service startup and as the backstop before every construction -
+    idempotent, and cheap after the first call.
+    """
+    global _YTDLP_WARMED
+    if _YTDLP_WARMED:
+        return
+    with _YDL_INIT_LOCK:
+        if _YTDLP_WARMED:
+            return
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}):
+            pass
+        _YTDLP_WARMED = True
+
+
+def _new_ydl(opts: dict[str, Any]) -> yt_dlp.YoutubeDL:
+    """Construct ``YoutubeDL`` with the plugin registry loaded exactly once."""
+    warm_up_ytdlp()
+    with _YDL_INIT_LOCK:
+        return yt_dlp.YoutubeDL(opts)
 
 #: Failure codes worth another attempt. YouTube's stale-session error ("The page
 #: needs to be reloaded") is routinely transient — a rotated visitor binding — and
@@ -651,7 +688,7 @@ def browser_cookie_jar_is_usable(spec: str) -> bool:
         logger.warning("COOKIES_FROM_BROWSER ignored: %s", exc)
         return False
     try:
-        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+        with _new_ydl({"quiet": True, "no_warnings": True}) as ydl:
             # Same call yt-dlp makes for --cookies-from-browser, so the probe
             # cannot pass while a real download would fail.
             jar = load_cookies(None, (browser, profile, keyring, container), ydl)
@@ -1416,7 +1453,7 @@ def selected_streams(info: Mapping[str, Any], quality: object) -> tuple[dict[str
     if not formats:
         return ()
     sortable = {"formats": formats}
-    with yt_dlp.YoutubeDL(
+    with _new_ydl(
         {
             "quiet": True,
             "no_warnings": True,
@@ -1610,6 +1647,7 @@ class ExtractorService:
         #: YouTube answers "Sign in to confirm you're not a bot" even with a valid
         #: cookie jar when the host's IP is blocked, which a proxy can fix.
         self.proxy = proxy.strip()
+        warm_up_ytdlp()  # the plugin registry is whole before anything can race
         self.pot_provider_url = pot_provider_url.strip().rstrip("/")
         self.js_runtimes = detect_js_runtimes(js_runtime)
         #: Lower-cased and de-duplicated, like the client list below: yt-dlp
@@ -2094,7 +2132,7 @@ class ExtractorService:
             else:
                 run_opts = {**opts, "cookiefile": str(run_copy)}
         try:
-            with yt_dlp.YoutubeDL(run_opts) as ydl:
+            with _new_ydl(run_opts) as ydl:
                 yield ydl
         finally:
             if run_copy is not None:

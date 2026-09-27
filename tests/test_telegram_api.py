@@ -190,6 +190,56 @@ def _shared_setup(
     return settings, inside, outside
 
 
+def test_the_cloud_fallback_is_a_state_not_a_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The startup race: the bot probed the local server while it was still
+    coming up, latched ``cloud_api_fallback``, and zero-copy was dead forever.
+    The latch records where the session sends *now* — the moment the server
+    answers again, clearing it must bring the file URI back, or a two-minute
+    outage costs the deployment its fast path for good."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    settings = _settings(
+        monkeypatch,
+        TELEGRAM_API_BASE_URL="http://telegram-api:8081",
+        TELEGRAM_API_LOCAL="1",
+        TELEGRAM_API_SHARED_DIR=str(shared),
+    )
+    media = shared / "job-1" / "video.mp4"
+    media.parent.mkdir()
+    media.write_bytes(b"x")
+
+    assert local_file_uri(media, settings) is not None
+    settings.use_cloud_api_fallback()
+    assert local_file_uri(media, settings) is None
+    assert "cloud" in session_target(settings)
+
+    settings.restore_local_api()
+
+    assert local_file_uri(media, settings) is not None, "the URI comes back with the server"
+    assert session_target(settings) == "http://telegram-api:8081"
+
+
+def test_the_session_aim_follows_the_fallback_flag_both_ways(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The flag is the aim, read on every call — not a decision baked into the
+    session at construction. While it is set the URLs point at the official
+    cloud API; clearing it re-aims the very same session at the local server,
+    so recovery needs no restart and no rebuilt Bot."""
+    settings = _settings(monkeypatch, TELEGRAM_API_BASE_URL="http://telegram-api:8081")
+    session = build_session(settings)
+    assert session is not None
+    api = session.api
+
+    assert api.api_url("123:abc", "getMe") == "http://telegram-api:8081/bot123:abc/getMe"
+    settings.use_cloud_api_fallback()
+    assert "api.telegram.org" in api.api_url("123:abc", "getMe")
+    settings.restore_local_api()
+    assert api.api_url("123:abc", "getMe") == "http://telegram-api:8081/bot123:abc/getMe"
+
+
 def test_the_file_uri_is_offered_only_for_files_on_the_shared_volume(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

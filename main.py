@@ -91,7 +91,7 @@ async def connect_bot(settings: Settings) -> tuple[Bot, User]:
             CLOUD_API_UPLOAD_LIMIT_MB,
         )
         logger.error(
-            "start it with `docker compose --profile local-api up -d` after adding "
+            "start it with `docker compose up -d --build` after adding "
             "TELEGRAM_API_ID / TELEGRAM_API_HASH from https://my.telegram.org to .env"
         )
         await bot.session.close()
