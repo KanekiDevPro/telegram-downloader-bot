@@ -28,12 +28,12 @@ def _example() -> str:
     return ENV_EXAMPLE.read_text(encoding="utf-8")
 
 
-def test_the_example_names_the_three_keys_and_the_profile() -> None:
+def test_the_example_names_the_three_keys_and_the_installer() -> None:
     example = _example()
     assert "TELEGRAM_API_ID=" in example
     assert "TELEGRAM_API_HASH=" in example
     assert "TELEGRAM_API_BASE_URL=http://telegram-api:8081" in example
-    assert "local-api" in example, "the comment block names the compose profile that serves it"
+    assert "--profile" not in example, "the server starts with the stack — no profile to remember"
     assert "deploy/install.sh" in example, "and the installer that can write the keys for you"
 
 
@@ -55,7 +55,9 @@ def test_a_yes_writes_all_three_settings_into_env() -> None:
         "a key .env already carries is filled in place — never duplicated, "
         "because a second line is dead weight to every reader of the file"
     )
-    assert "local-api" in script, "the answer names how the server itself is started"
+    assert "docker compose up -d" in script, (
+        "the answer names the plain start — the server comes up with the stack"
+    )
 
 
 def test_the_server_reads_the_bot_s_downloads_off_the_shared_volume() -> None:
@@ -69,19 +71,42 @@ def test_the_server_reads_the_bot_s_downloads_off_the_shared_volume() -> None:
     assert "TELEGRAM_API_SHARED_DIR: /app/downloads" in compose
 
 
-def test_lifecycle_commands_activate_the_local_api_profile() -> None:
-    """The production failure behind "the local Bot API refused the file URI":
-    ``telegram-api`` lives behind the ``local-api`` profile, and a profile-less
-    ``docker compose up -d`` silently *skips* a running profile-gated container
-    — so the bot got recreated with the new shared-volume env while the server
-    kept its pre-volume mounts and could not open a single delivered file. Every
-    lifecycle command in the root installer must therefore activate the profile
-    whenever the local API is configured (and never before: an unconfigured
-    telegram-api exits on start and crash-loops)."""
+def test_the_lifecycle_recreates_the_stack_without_profile_flags() -> None:
+    """The production failure behind "the local Bot API refused the file URI",
+    settled for good: a profile-gated ``telegram-api`` was silently *skipped*
+    by a profile-less ``docker compose up -d`` while the bot was recreated
+    around the new shared-volume mount — the two views of the disk drifted and
+    every file URI was refused. The profile trap is gone (see
+    ``test_the_server_is_a_first_class_compose_citizen``); what the lifecycle
+    owes is that a volume, env or config change recreates the containers on the
+    next ``up`` — ``--remove-orphans``, never a manual ``--force-recreate``."""
     script = (BASE_DIR / "install.sh").read_text(encoding="utf-8")
 
-    assert '"--profile local-api"' in script
-    assert "TELEGRAM_API_BASE_URL" in script, "the profile is gated on the local API being configured"
+    assert "--profile local-api" not in script, "the server is a first-class service — nothing to activate"
+    assert "local_api_configured" not in script
+    assert "up -d --build --remove-orphans" in script, (
+        "a volume or config change must recreate containers on the next up — "
+        "no --force-recreate, no manual CLI"
+    )
+
+
+def test_the_server_is_a_first_class_compose_citizen() -> None:
+    """``telegram-api`` serves the zero-copy path and the 2000 MB ceiling, so it
+    starts with the stack like bot, postgres and redis: every ``up`` keeps it —
+    and its volume mounts — in step with the bot, which is what makes profile
+    drift impossible rather than merely unlikely. Its healthcheck stays, and
+    the bot still never waits on it: a local server that is absent,
+    unconfigured or crashed must not block the boot (the bot falls back to the
+    cloud API and reports it)."""
+    compose = (BASE_DIR / "docker-compose.yml").read_text(encoding="utf-8")
+    server = _service_block(compose, "telegram-api")
+    bot = _service_block(compose, "bot")
+
+    assert "profiles:" not in server, "nothing gates the server out of the default lifecycle"
+    assert "healthcheck:" in server, "and it stays health-checked like the rest"
+    assert re.search(r"^\s*telegram-api:\s*$", bot, re.M) is None, (
+        "the bot must never wait on the server — no depends_on entry for it"
+    )
 
 
 _SERVICE_KEY = re.compile(r"^  [A-Za-z0-9_-]+:\s*$|^[a-z][a-z0-9_-]*:\s*$", re.M)
