@@ -1,0 +1,33 @@
+name: ci
+
+# The gates the repo already treats as its contract: the test suite (which
+# includes the committed-env-fragment check in tests/test_config.py — a value
+# dotenv and Compose read differently must never ship), the lint, and the
+# types. Run on every push so a red gate blocks shipping.
+on:
+  push:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Tests
+        run: python -m pytest
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Types
+        run: mypy .

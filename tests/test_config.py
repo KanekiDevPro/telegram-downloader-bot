@@ -11,6 +11,7 @@ These lock in the fixes for two startup-breaking bugs:
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -612,3 +613,75 @@ def test_a_glued_inline_comment_never_becomes_part_of_a_path(
     assert settings.download_dir == (BASE_DIR / "downloads").resolve()
     assert settings.cookie_file == (BASE_DIR / "downloads" / "cookies.txt").resolve()
     assert settings.webhook_path == "/hook"
+
+
+# ---------------------------------------------------------------------------
+# Committed env fragments — the CI gate
+# ---------------------------------------------------------------------------
+
+
+def _committed_env_fragments() -> list[Path]:
+    """Every ``.env*`` file git actually *tracks* (a developer's local ``.env``
+    is none of this check's business). Falls back to the template alone where
+    git is unavailable, so the gate never passes by finding nothing."""
+    try:
+        listing = subprocess.run(
+            ["git", "ls-files"], cwd=BASE_DIR, capture_output=True, text=True, check=True
+        ).stdout.splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        listing = [".env.example"]
+    fragments = [BASE_DIR / name for name in sorted(listing) if Path(name).name.startswith(".env")]
+    assert any(path.name == ".env.example" for path in fragments), "the template must be covered"
+    return fragments
+
+
+def _env_fragment_values(path: Path) -> dict[str, str]:
+    """``KEY=value`` lines the way Compose's ``env_file`` reads them: the value
+    is everything after the first ``=``, whitespace-trimmed, verbatim — an
+    inline ``#`` is part of it. Lines without ``=`` (blank, comments, section
+    markers) carry no value and are skipped."""
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip()
+    return values
+
+
+def test_no_committed_env_fragment_carries_a_comment_glued_value() -> None:
+    """The ship-blocker behind the live ``TELEGRAM_API_FILES_DIR=   # optional:
+    …`` incident: dotenv reads a glued comment as a comment, Docker Compose
+    ships it as part of the value — the same file means two different things to
+    two parsers. The Settings layer now tolerates it (see
+    ``test_a_glued_inline_comment_never_becomes_part_of_a_path``), but a
+    committed fragment must never rely on that: no value may carry a ``#``."""
+    offenders = {
+        f"{path.name}:{key}": value
+        for path in _committed_env_fragments()
+        for key, value in _env_fragment_values(path).items()
+        if "#" in value
+    }
+
+    assert not offenders, f"comment-glued values mean different things to dotenv and Compose: {offenders}"
+
+
+def test_committed_env_fragments_parse_cleanly_through_the_settings_layer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every committed fragment must construct a real ``Settings`` — the
+    template is what operators copy into production, so a value the settings
+    layer rejects is a deployment that fails at boot. Fed through the
+    environment, the same door production uses (``_env_file`` disabled so the
+    developer's local ``.env`` cannot answer for the fragment)."""
+    for path in _committed_env_fragments():
+        values = _env_fragment_values(path)
+        for key, value in values.items():
+            monkeypatch.setenv(key, value)
+
+        settings = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert isinstance(settings, Settings), f"{path.name} must parse through Settings"
+
+        for key in values:
+            monkeypatch.delenv(key, raising=False)

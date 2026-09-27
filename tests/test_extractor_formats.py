@@ -7,7 +7,9 @@ an invalid one is only discovered when a user sends a link.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
+import time
 from pathlib import Path
 
 import pytest
@@ -19,7 +21,9 @@ from services.extractor import (
     MERGE_OUTPUT_FORMAT,
     VIDEO_FORMAT_SELECTOR,
     BrowserSpecError,
+    ExtractionError,
     ExtractorService,
+    MediaInfo,
     YdlLogAdapter,
     classify_ydl_warning,
     cookie_jar_is_usable,
@@ -569,3 +573,93 @@ def test_the_intake_probe_is_a_metadata_probe_not_a_download_dry_run() -> None:
 
     fetch = _extractor()._base_opts(extract_only=False, media_format="video", quality="")
     assert fetch.get("check_formats") is not False, "the download keeps yt-dlp's pre-flight"
+
+
+def _answer(title: str) -> MediaInfo:
+    return MediaInfo(
+        source_url="https://youtu.be/x",
+        title=title,
+        platform="YouTube",
+        webpage_url="https://youtu.be/x",
+        extension="mp4",
+        thumbnail=None,
+        duration=10,
+        filesize_approx=1,
+        is_live=False,
+    )
+
+
+def test_the_metadata_probe_races_the_fast_clients_and_takes_the_first_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The intake budget is "as fast as the menu can appear", so the probe asks
+    the two metadata-fast clients (``mweb``, ``tv``) *at the same time* and
+    serves the menu from whichever answers first — the wait is the minimum of
+    the two, not the sum yt-dlp spends walking a client list one player response
+    at a time. The loser is asked anyway (its answer is simply not waited for),
+    one single-client request per racer: no request names a client twice."""
+    extractor = _extractor(youtube_clients=("mweb", "tv", "web"))
+    seen: list[tuple[str, ...]] = []
+    mweb, tv = _answer("mweb"), _answer("tv")
+
+    def fake_sync(url: str, *, youtube_clients: tuple[str, ...] | None = None) -> MediaInfo:
+        seen.append(tuple(youtube_clients or ()))
+        if youtube_clients == ("mweb",):
+            time.sleep(0.2)
+            return mweb
+        return tv
+
+    monkeypatch.setattr(extractor, "_extract_sync", fake_sync)
+
+    info = asyncio.run(extractor.extract("https://youtu.be/x"))
+
+    deadline = time.monotonic() + 2  # the loser thread finishes after the winner returns
+    while len(seen) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert info is tv, "the first answer wins — the other racer is not waited for"
+    assert set(seen) == {("mweb",), ("tv",)}, "one single-client request per racer"
+
+
+def test_the_failing_race_falls_back_to_the_plain_probe_with_the_whole_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both raced clients failing is not the answer the user gets: the plain
+    probe — the configured list, retries and all — is the fallback of last
+    resort, and its error is the one that reaches the user exactly as before
+    the race existed."""
+    extractor = _extractor(youtube_clients=("mweb", "tv", "web"))
+    seen: list[tuple[str, ...] | None] = []
+    answer = _answer("plain")
+
+    def fake_sync(url: str, *, youtube_clients: tuple[str, ...] | None = None) -> MediaInfo:
+        seen.append(tuple(youtube_clients) if youtube_clients is not None else None)
+        if youtube_clients is not None:
+            raise ExtractionError("GENERAL", "client refused")
+        return answer
+
+    monkeypatch.setattr(extractor, "_extract_sync", fake_sync)
+
+    info = asyncio.run(extractor.extract("https://youtu.be/x"))
+
+    assert info is answer, "the plain probe is the fallback of last resort"
+    assert set(seen[:2]) == {("mweb",), ("tv",)}, "both racers failed first"
+    assert seen[2] is None, "and the fallback names no override — the configured list, whole"
+
+
+def test_a_client_list_without_the_fast_pair_keeps_the_plain_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured list without both metadata-fast clients must never grow new
+    clients behind the operator's back: one probe, with the configured list."""
+    extractor = _extractor(youtube_clients=("tv",))
+    seen: list[tuple[str, ...] | None] = []
+
+    def fake_sync(url: str, *, youtube_clients: tuple[str, ...] | None = None) -> MediaInfo:
+        seen.append(youtube_clients)
+        return _answer("plain")
+
+    monkeypatch.setattr(extractor, "_extract_sync", fake_sync)
+
+    asyncio.run(extractor.extract("https://youtu.be/x"))
+
+    assert seen == [None], "one probe, no override — the configured list is the whole story"

@@ -764,6 +764,14 @@ def missing_youtube_login_cookies(path: Path | None) -> tuple[str, ...]:
 #: the configured list itself is never rewritten (``extractor_args`` keeps it).
 COOKIE_BLIND_CLIENTS: tuple[str, ...] = ("visionos", "android", "ios")
 
+#: The metadata-fast clients the intake probe races (see
+#: ``ExtractorService._probe``): both answer a player request quickest of the
+#: configured set, and asking both at once makes the wait the minimum of the
+#: two instead of the sum of a walked client list. ``mweb`` and ``tv`` are also
+#: the pair a cookie session never breaks (neither is cookie-blind), which is
+#: why the race is named after them and not after the streaming clients.
+PROBE_RACE_CLIENTS: tuple[str, ...] = ("mweb", "tv")
+
 
 def effective_youtube_clients(
     clients: Sequence[str], *, cookies_active: bool
@@ -1763,6 +1771,7 @@ class ExtractorService:
         media_format: MediaFormat = "video",
         quality: object = "",
         allow_cookies: bool = True,
+        youtube_clients: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         opts: dict[str, Any] = {
             "quiet": True,
@@ -1826,7 +1835,7 @@ class ExtractorService:
         # The client list adapts to whether cookies go out with this request:
         # a cookie-blind client would spend a player round-trip for nothing.
         clients = effective_youtube_clients(
-            self.youtube_clients,
+            youtube_clients if youtube_clients is not None else self.youtube_clients,
             cookies_active=allow_cookies and (self.using_cookies or self.using_browser_cookies),
         )
         if args := self._build_extractor_args(clients):
@@ -2213,12 +2222,61 @@ class ExtractorService:
     async def extract(self, url: str) -> MediaInfo:
         """Fetch media metadata without downloading. Never blocks the loop."""
         try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(self._extract_sync, url),
-                timeout=self.timeout_s,
-            )
+            return await asyncio.wait_for(self._probe(url), timeout=self.timeout_s)
         except asyncio.TimeoutError:
             raise ExtractionError("TIMEOUT", "بررسی لینک بیش از حد طول کشید؛ دوباره تلاش کنید.") from None
+
+    async def _probe(self, url: str) -> MediaInfo:
+        """The intake probe: the metadata-fast clients race, first answer wins.
+
+        The budget is "as fast as the menu can appear" — a production intake
+        spent 11.71 s walking the client list one player response at a time.
+        :data:`PROBE_RACE_CLIENTS` answer metadata fastest, so both are asked
+        *at once* and the menu is drawn from whichever replies first: the wait
+        is the minimum of the two, not the sum. The trade, stated once: the
+        menu shows the winner's view of the formats, which can be narrower than
+        the download's merged client ladder produces (the format selector then
+        serves the nearest tier). A list without both racers, and a race both
+        of whose legs fail, keep the plain probe exactly as it was — its error
+        is the one the user sees.
+        """
+        raced = tuple(
+            client for client in self.youtube_clients if client.split(".", 1)[0] in PROBE_RACE_CLIENTS
+        )
+        if len(raced) < 2:
+            return await asyncio.to_thread(self._extract_sync, url)
+        started = time.monotonic()
+        tasks = {
+            client: asyncio.create_task(
+                asyncio.to_thread(self._extract_sync, url, youtube_clients=(client,))
+            )
+            for client in raced
+        }
+        pending = set(tasks.values())
+        first_error: Exception | None = None
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                try:
+                    result = task.result()
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+                    continue
+                for other in pending:
+                    other.cancel()
+                won = next(client for client, racer in tasks.items() if racer is task)
+                logger.info(
+                    "metadata probe answered by %s in %.2fs (raced %s)",
+                    won,
+                    time.monotonic() - started,
+                    ", ".join(client for client in raced if client != won),
+                )
+                return result
+        # Both legs failed — the plain probe is the fallback of last resort: the
+        # configured list whole, retries and all, its error untouched.
+        logger.info("the raced probe (%s) both failed — falling back to the full list", ", ".join(raced))
+        return await asyncio.to_thread(self._extract_sync, url)
 
     def _with_retries(self, what: str, attempt_fn: Callable[[], T]) -> T:
         """Run ``attempt_fn``, retrying only the failures that deserve it.
@@ -2247,11 +2305,17 @@ class ExtractorService:
         # Final attempt: its failure is the one the user gets to see.
         return attempt_fn()
 
-    def _extract_sync(self, url: str) -> MediaInfo:
-        return self._with_retries("extracting metadata", lambda: self._extract_attempt(url))
+    def _extract_sync(self, url: str, *, youtube_clients: Sequence[str] | None = None) -> MediaInfo:
+        """One metadata fetch with the retry budget. ``youtube_clients`` is the
+        probe race's single-client override (see ``_probe``); ``None`` sends the
+        configured list, whole."""
+        return self._with_retries(
+            "extracting metadata",
+            lambda: self._extract_attempt(url, youtube_clients=youtube_clients),
+        )
 
-    def _extract_attempt(self, url: str) -> MediaInfo:
-        opts = self._base_opts(extract_only=True)
+    def _extract_attempt(self, url: str, *, youtube_clients: Sequence[str] | None = None) -> MediaInfo:
+        opts = self._base_opts(extract_only=True, youtube_clients=youtube_clients)
         try:
             with self._ydl(opts) as ydl:
                 info = ydl.extract_info(url, download=False)

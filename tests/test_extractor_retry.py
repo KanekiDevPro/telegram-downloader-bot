@@ -57,7 +57,9 @@ def _flaky(monkeypatch: pytest.MonkeyPatch, outcomes: list[object]) -> list[int]
     """Make each metadata attempt return/raise the next scripted outcome."""
     calls = [0]
 
-    def fake_attempt(_self: ExtractorService, url: str) -> MediaInfo:
+    def fake_attempt(
+        _self: ExtractorService, url: str, *, youtube_clients: tuple[str, ...] | None = None
+    ) -> MediaInfo:
         outcome = outcomes[min(calls[0], len(outcomes) - 1)]
         calls[0] += 1
         if isinstance(outcome, Exception):
