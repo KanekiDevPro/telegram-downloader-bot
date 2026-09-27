@@ -29,6 +29,8 @@ from core.config import DEFAULT_YOUTUBE_CLIENTS, Settings
 from services import doctor as doctor_service
 from services.doctor import CLIENTS_CHECK_NAME, _clients_check
 from services.extractor import (
+    COOKIE_COMPATIBLE_CLIENTS,
+    COOKIE_INCOMPATIBLE_CLIENTS,
     IPV4_ANY,
     ExtractorService,
     effective_youtube_clients,
@@ -181,14 +183,17 @@ def test_the_proxy_and_the_cookies_are_untouched_by_the_evasion(tmp_path: Path) 
         tmp_path,
         proxy="socks5://user:pw@127.0.0.1:1080",
         cookie_file=jar,
-        youtube_clients=("tv",),
+        youtube_clients=("mweb", "tv"),
         force_ipv4=True,
     )
 
     opts = extractor._base_opts(extract_only=True)
 
     assert opts["proxy"] == "socks5://user:pw@127.0.0.1:1080"
-    assert opts["extractor_args"]["youtube"]["player_client"] == ["tv"]
+    assert opts["extractor_args"]["youtube"]["player_client"] == ["mweb"], (
+        "the jar leaves the cookie-incompatible tv out — the hierarchy's business, "
+        "not the evasion's"
+    )
     assert opts["source_address"] == IPV4_ANY
     assert opts["cookiefile"] != str(jar), "the jar is still handed over as a writable copy"
 
@@ -334,14 +339,13 @@ def test_a_cookie_blind_client_costs_a_round_trip_only_anonymous(tmp_path: Path)
     of …"), and either way a whole round-trip bought nothing. So the jar makes
     the request list shorter — and the same list stays whole without one.
     """
-    clients = ("visionos", "web_embedded", "tv_downgraded", "web")
+    clients = ("visionos", "web_embedded", "web")
 
     with_jar = _extractor(tmp_path, cookie_file=_jar(tmp_path), youtube_clients=clients)
     without = _extractor(tmp_path, cookie_file=None, youtube_clients=clients)
 
     assert with_jar._base_opts(extract_only=True)["extractor_args"]["youtube"]["player_client"] == [
         "web_embedded",
-        "tv_downgraded",
         "web",
     ]
     assert without._base_opts(extract_only=True)["extractor_args"]["youtube"]["player_client"] == (
@@ -351,14 +355,14 @@ def test_a_cookie_blind_client_costs_a_round_trip_only_anonymous(tmp_path: Path)
 
 def test_browser_cookies_count_as_cookies_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     extractor = _extractor(
-        tmp_path, cookies_from_browser="chrome", youtube_clients=("visionos", "tv")
+        tmp_path, cookies_from_browser="chrome", youtube_clients=("visionos", "web")
     )
     monkeypatch.setattr("services.extractor.browser_cookie_jar_is_usable", lambda spec: True)
     extractor._browser_cookies_ok = None
 
     args = extractor._base_opts(extract_only=True)["extractor_args"]
 
-    assert args["youtube"]["player_client"] == ["tv"]
+    assert args["youtube"]["player_client"] == ["web"]
 
 
 def test_the_configured_list_is_never_rewritten_behind_the_operator_s_back(
@@ -383,7 +387,8 @@ def test_the_jar_less_second_opinion_keeps_every_client(tmp_path: Path) -> None:
 
 
 def test_the_filter_is_a_pure_function_of_the_cookie_state() -> None:
-    assert effective_youtube_clients(("visionos", "tv"), cookies_active=True) == ("tv",)
+    # ``visionos`` is cookie-blind and ``tv`` cookie-incompatible: both sit out.
+    assert effective_youtube_clients(("visionos", "tv"), cookies_active=True) == ()
     assert effective_youtube_clients(("visionos", "tv"), cookies_active=False) == ("visionos", "tv")
     assert effective_youtube_clients((), cookies_active=True) == ()
     # Variant spellings (``base.variant``) are judged by their base client.
@@ -393,24 +398,76 @@ def test_the_filter_is_a_pure_function_of_the_cookie_state() -> None:
     )
 
 
-def test_cookie_authenticated_requests_never_send_the_cookie_blind_clients(
+def test_cookie_authenticated_requests_send_only_the_cookie_compatible_clients(
     tmp_path: Path,
 ) -> None:
-    """A signed-in jar makes ``android`` and ``ios`` dead weight — the
-    installed yt-dlp says so itself (``_video.py``: ``Skipping client "android"
-    since it does not support cookies``). Every cookie-blind client is a player
-    round-trip paid twice — once when the intake probes and again when the job
-    fetches — and it returns nothing a signed-in request can use. The jar
-    shortens the list before yt-dlp ever sees it, at both moments; the
-    configured list keeps its streaming ladder for jar-less runs."""
+    """A signed-in jar shortens the list before yt-dlp ever sees it — at both
+    moments — and the drop list has two classes. ``android``/``ios``
+    (``visionos`` likewise) are cookie-*blind*: the installed yt-dlp says so
+    itself (``_video.py``: ``Skipping client "android" since it does not support
+    cookies``), so each is a player round-trip paid twice — once when the intake
+    probes and again when the job fetches — and buys nothing. ``tv`` is worse:
+    cookie-*incompatible*, see
+    ``test_the_cookie_incompatible_clients_sit_out_signed_in_requests``. What
+    survives is exactly the cookie-compatible set; the configured list keeps
+    its whole streaming ladder for jar-less runs."""
     clients = ("android", "ios", "mweb", "tv", "web")
 
-    assert effective_youtube_clients(clients, cookies_active=True) == ("mweb", "tv", "web")
+    assert effective_youtube_clients(clients, cookies_active=True) == ("mweb", "web")
     assert effective_youtube_clients(clients, cookies_active=False) == clients
 
     extractor = _extractor(tmp_path, cookie_file=_jar(tmp_path), youtube_clients=clients)
     probe = extractor._base_opts(extract_only=True)["extractor_args"]["youtube"]["player_client"]
     fetch = extractor._base_opts(extract_only=False)["extractor_args"]["youtube"]["player_client"]
 
-    assert probe == ["mweb", "tv", "web"], "the intake probe is a signed-in request too"
-    assert fetch == ["mweb", "tv", "web"], "and the download must not log client skips"
+    assert probe == ["mweb", "web"], "the intake probe is a signed-in request too"
+    assert fetch == ["mweb", "web"], "and the download must not log client skips"
+
+
+def test_the_cookie_incompatible_clients_sit_out_signed_in_requests(tmp_path: Path) -> None:
+    """``tv`` carries cookies fine — that is exactly the problem: with a
+    session attached, YouTube answers ``tv`` (and ``tv_downgraded``) with an
+    unplayable status, "the page needs to be reloaded" (``SESSION_STALE``).
+    Not cookie-blind but cookie-*incompatible*, and one poisoned client is
+    enough to poison the request. So a signed-in request never pairs them, at
+    either moment — while jar-less runs keep the token-free lifeline untouched."""
+    assert COOKIE_INCOMPATIBLE_CLIENTS == ("tv", "tv_downgraded")
+
+    assert effective_youtube_clients(("mweb", "tv", "web"), cookies_active=True) == ("mweb", "web")
+    assert effective_youtube_clients(("tv_downgraded", "web"), cookies_active=True) == ("web",)
+    assert effective_youtube_clients(("tv.tv",), cookies_active=True) == ()
+    assert effective_youtube_clients(("mweb", "tv", "web"), cookies_active=False) == (
+        "mweb",
+        "tv",
+        "web",
+    )
+
+    extractor = _extractor(
+        tmp_path, cookie_file=_jar(tmp_path), youtube_clients=("mweb", "tv", "web")
+    )
+    assert extractor._base_opts(extract_only=True)["extractor_args"]["youtube"]["player_client"] == [
+        "mweb",
+        "web",
+    ]
+
+
+def test_a_signed_in_request_never_falls_back_to_yt_dlp_s_default_clients(
+    tmp_path: Path,
+) -> None:
+    """A configured list whose every client is cookie-blind or incompatible
+    would leave the request with *no* ``player_client`` — and yt-dlp would then
+    pick its own default set, ``tv`` included, and pair it with the jar: the
+    exact "the page needs to be reloaded" failure this hierarchy exists to
+    prevent. The cookie-compatible trio stands in instead. (A *blank* list is
+    a different thing — "let yt-dlp decide", the operator's explicit choice —
+    and it stays hands-off.)"""
+    assert COOKIE_COMPATIBLE_CLIENTS == ("mweb", "web_embedded", "web")
+
+    extractor = _extractor(
+        tmp_path, cookie_file=_jar(tmp_path), youtube_clients=("visionos", "tv")
+    )
+    assert extractor._base_opts(extract_only=True)["extractor_args"]["youtube"]["player_client"] == [
+        "mweb",
+        "web_embedded",
+        "web",
+    ]

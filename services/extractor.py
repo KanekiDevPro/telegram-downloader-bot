@@ -73,7 +73,9 @@ def _new_ydl(opts: dict[str, Any]) -> yt_dlp.YoutubeDL:
 
 #: Failure codes worth another attempt. YouTube's stale-session error ("The page
 #: needs to be reloaded") is routinely transient — a rotated visitor binding — and
-#: the retry costs one round trip instead of a user-visible failure. Blocks are
+#: the retry costs one round trip instead of a user-visible failure; it is also
+#: never worth *sleeping* for (``_extract_sync`` fails over instantly instead,
+#: and ``_with_retries`` keeps its backoff for anything else). Blocks are
 #: deliberately *not* here: retrying a flagged IP just wastes the user's time.
 RETRYABLE_EXTRACTION_CODES: frozenset[str] = frozenset({"SESSION_STALE"})
 
@@ -801,19 +803,40 @@ def missing_youtube_login_cookies(path: Path | None) -> tuple[str, ...]:
 #: the configured list itself is never rewritten (``extractor_args`` keeps it).
 COOKIE_BLIND_CLIENTS: tuple[str, ...] = ("visionos", "android", "ios")
 
-#: The metadata-fast clients the intake probe races (see
-#: ``ExtractorService._probe``): both answer a player request quickest of the
-#: configured set, and asking both at once makes the wait the minimum of the
-#: two instead of the sum of a walked client list. ``mweb`` and ``tv`` are also
-#: the pair a cookie session never breaks (neither is cookie-blind), which is
-#: why the race is named after them and not after the streaming clients.
-PROBE_RACE_CLIENTS: tuple[str, ...] = ("mweb", "tv")
+#: Cookies *reach* these clients — and that is exactly the problem: with a
+#: session attached, YouTube answers ``tv`` (and ``tv_downgraded``) with an
+#: unplayable status, "the page needs to be reloaded" (``SESSION_STALE``). Not
+#: cookie-blind but cookie-*incompatible*, and one poisoned client is enough to
+#: poison the whole request. Dropped from what is sent while a jar is active,
+#: like the cookie-blind ones above; jar-less runs keep ``tv`` as the
+#: token-free lifeline it is.
+COOKIE_INCOMPATIBLE_CLIENTS: tuple[str, ...] = ("tv", "tv_downgraded")
+
+#: What a signed-in request falls back to when the configured list holds no
+#: cookie-compatible client at all. yt-dlp's *default* set is not the answer:
+#: it names ``tv``, and ``tv`` + session cookies is exactly the failure the
+#: class above exists to prevent. (A blank configured list is a different
+#: thing — "let yt-dlp decide", the operator's explicit choice — and stays
+#: hands-off.)
+COOKIE_COMPATIBLE_CLIENTS: tuple[str, ...] = ("mweb", "web_embedded", "web")
+
+#: The metadata clients, fastest answer first: what the intake probe races and
+#: what a ``SESSION_STALE`` failover walks (see ``ExtractorService._probe`` and
+#: ``ExtractorService._extract_sync``). The race asks the first two the request
+#: may use at once — the wait is the minimum of the two, not the sum of a
+#: walked client list — and a cookie-incompatible ``tv`` never appears in a
+#: signed-in race (``effective_youtube_clients`` drops it), where ``web`` or
+#: ``web_embedded`` takes its leg instead.
+METADATA_CLIENT_PRIORITY: tuple[str, ...] = ("mweb", "tv", "web_embedded", "web")
 
 
 def effective_youtube_clients(
     clients: Sequence[str], *, cookies_active: bool
 ) -> tuple[str, ...]:
-    """The clients actually asked for: configured, minus the cookie-blind ones.
+    """The clients actually asked for: configured, minus the cookie-*unusable*
+    ones. Two classes sit out a signed-in request — the cookie-blind clients (a
+    round-trip that buys nothing) and the cookie-incompatible ones (a
+    round-trip that poisons the request, see ``COOKIE_INCOMPATIBLE_CLIENTS``).
 
     Pure in its inputs so the rule is pin-able (tests/test_youtube_clients.py).
     Variant spellings (``base.variant``) are judged by their base client — the
@@ -821,9 +844,14 @@ def effective_youtube_clients(
     """
     if not cookies_active:
         return tuple(clients)
-    return tuple(
-        client for client in clients if client.split(".", 1)[0] not in COOKIE_BLIND_CLIENTS
-    )
+    unusable = COOKIE_BLIND_CLIENTS + COOKIE_INCOMPATIBLE_CLIENTS
+    return tuple(client for client in clients if client.split(".", 1)[0] not in unusable)
+
+
+def _step_name(clients: Sequence[str] | None, allow_cookies: bool) -> str:
+    """How a failover step names itself in the log (see ``_failover_steps``)."""
+    named = ", ".join(clients) if clients else "the whole configured list"
+    return named if allow_cookies else f"{named} without the jar"
 
 
 def youtube_client_facts(
@@ -1871,11 +1899,17 @@ class ExtractorService:
             # package is not installed.
             opts["remote_components"] = list(self.remote_components)
         # The client list adapts to whether cookies go out with this request:
-        # a cookie-blind client would spend a player round-trip for nothing.
-        clients = effective_youtube_clients(
-            youtube_clients if youtube_clients is not None else self.youtube_clients,
-            cookies_active=allow_cookies and (self.using_cookies or self.using_browser_cookies),
-        )
+        # a cookie-blind client would spend a player round-trip for nothing,
+        # and a cookie-incompatible one would poison the whole request.
+        requested = youtube_clients if youtube_clients is not None else self.youtube_clients
+        cookies_active = allow_cookies and (self.using_cookies or self.using_browser_cookies)
+        clients = effective_youtube_clients(requested, cookies_active=cookies_active)
+        if cookies_active and requested and not clients:
+            # Every configured client is cookie-blind or cookie-incompatible.
+            # Emitting *no* ``player_client`` would make yt-dlp pick its own
+            # default set — ``tv`` included — and pair it with the jar, so the
+            # cookie-compatible trio stands in instead.
+            clients = COOKIE_COMPATIBLE_CLIENTS
         if args := self._build_extractor_args(clients):
             opts["extractor_args"] = args
         if self.force_ipv4:
@@ -2269,18 +2303,25 @@ class ExtractorService:
 
         The budget is "as fast as the menu can appear" — a production intake
         spent 11.71 s walking the client list one player response at a time.
-        :data:`PROBE_RACE_CLIENTS` answer metadata fastest, so both are asked
-        *at once* and the menu is drawn from whichever replies first: the wait
-        is the minimum of the two, not the sum. The trade, stated once: the
+        :data:`METADATA_CLIENT_PRIORITY`'s front-runners answer metadata
+        fastest, so the first two the request may use are asked *at once* and
+        the menu is drawn from whichever replies first: the wait is the minimum
+        of the two, not the sum. The trade, stated once: the
         menu shows the winner's view of the formats, which can be narrower than
         the download's merged client ladder produces (the format selector then
         serves the nearest tier). A list without both racers, and a race both
         of whose legs fail, keep the plain probe exactly as it was — its error
         is the one the user sees.
         """
-        raced = tuple(
-            client for client in self.youtube_clients if client.split(".", 1)[0] in PROBE_RACE_CLIENTS
+        effective = effective_youtube_clients(
+            self.youtube_clients,
+            cookies_active=self.using_cookies or self.using_browser_cookies,
         )
+        eligible = [
+            client for client in effective if client.split(".", 1)[0] in METADATA_CLIENT_PRIORITY
+        ]
+        eligible.sort(key=lambda c: METADATA_CLIENT_PRIORITY.index(c.split(".", 1)[0]))
+        raced = tuple(eligible[:2])
         if len(raced) < 2:
             return await asyncio.to_thread(self._extract_sync, url)
         started = time.monotonic()
@@ -2320,8 +2361,12 @@ class ExtractorService:
         """Run ``attempt_fn``, retrying only the failures that deserve it.
 
         Called from inside a worker thread (never on the event loop), so the
-        backoff can simply sleep. Every retry is logged with its attempt number
-        and delay: a silent retry would make a slow download unexplainable.
+        backoff can simply sleep — except for ``SESSION_STALE``: a stale session
+        never heals by sleeping, so its retry runs immediately. (The metadata
+        path does better still — ``_extract_sync`` fails over to the next
+        fallback client instead of retrying the same request.) Every retry is
+        logged with its attempt number: a silent retry would make a slow
+        download unexplainable.
         """
         for attempt in range(self.retry_attempts):
             try:
@@ -2329,12 +2374,15 @@ class ExtractorService:
             except ExtractionError as exc:
                 if exc.code not in RETRYABLE_EXTRACTION_CODES:
                     raise
-                delay = self.retry_backoff_s * (2**attempt)
+                stale = exc.code == "SESSION_STALE"
+                delay = 0.0 if stale else self.retry_backoff_s * (2**attempt)
                 logger.info(
-                    "%s failed with %s — retrying in %.1fs (attempt %d of %d)",
+                    "%s failed with %s — %s (attempt %d of %d)",
                     what,
                     exc.code,
-                    delay,
+                    "retrying immediately; a stale session never heals by sleeping"
+                    if stale
+                    else f"retrying in {delay:.1f}s",
                     attempt + 2,
                     self.retry_attempts + 1,
                 )
@@ -2344,16 +2392,76 @@ class ExtractorService:
         return attempt_fn()
 
     def _extract_sync(self, url: str, *, youtube_clients: Sequence[str] | None = None) -> MediaInfo:
-        """One metadata fetch with the retry budget. ``youtube_clients`` is the
-        probe race's single-client override (see ``_probe``); ``None`` sends the
-        configured list, whole."""
-        return self._with_retries(
-            "extracting metadata",
-            lambda: self._extract_attempt(url, youtube_clients=youtube_clients),
-        )
+        """One metadata fetch. ``youtube_clients`` is the probe race's
+        single-client override (see ``_probe``); ``None`` sends the configured
+        list, whole.
 
-    def _extract_attempt(self, url: str, *, youtube_clients: Sequence[str] | None = None) -> MediaInfo:
-        opts = self._base_opts(extract_only=True, youtube_clients=youtube_clients)
+        ``SESSION_STALE`` ("The page needs to be reloaded") is a mismatch between
+        this request's client or session and what YouTube expects right now —
+        the 3 s and 6 s sleeps the old retry budget spent on it never healed one
+        (production burned ~9 s a job proving it). So the attempt fails over
+        *sideways*, immediately: the same request without the jar (yt-dlp's own
+        "retry without the cookies", the second opinion ``_search_attempt``
+        takes), then the next fallback client of
+        :data:`METADATA_CLIENT_PRIORITY`, each on the heels of the failure.
+        ``retry_attempts`` caps the walk — it is how many failovers may follow
+        the first attempt. Any other failure raises at once: only a stale
+        session is ever walked past, and no request is tried twice.
+        """
+        steps = self._failover_steps(youtube_clients)
+        for index in range(len(steps) - 1):
+            clients, allow_cookies = steps[index]
+            try:
+                return self._extract_attempt(
+                    url, youtube_clients=clients, allow_cookies=allow_cookies
+                )
+            except ExtractionError as exc:
+                if exc.code != "SESSION_STALE":
+                    raise
+                logger.info(
+                    "extracting metadata failed with %s — failing over to %s immediately "
+                    "(attempt %d of %d); a stale session never heals by sleeping",
+                    exc.code,
+                    _step_name(*steps[index + 1]),
+                    index + 2,
+                    len(steps),
+                )
+        # The last link: its failure is the one the user gets to see.
+        clients, allow_cookies = steps[-1]
+        return self._extract_attempt(url, youtube_clients=clients, allow_cookies=allow_cookies)
+
+    def _failover_steps(
+        self, youtube_clients: Sequence[str] | None
+    ) -> list[tuple[Sequence[str] | None, bool]]:
+        """``(clients, allow_cookies)`` for one fetch's failover walk, in order.
+
+        The request as configured comes first; a signed-in run then gets the
+        jarless second opinion of the same request; then one step per fallback
+        client the request did not already name, in metadata-priority order.
+        ``retry_attempts`` caps the list: that budget is how many failovers may
+        follow the first attempt.
+        """
+        requested = tuple(youtube_clients) if youtube_clients is not None else None
+        steps: list[tuple[Sequence[str] | None, bool]] = [(requested, True)]
+        if self.using_cookies or self.using_browser_cookies:
+            steps.append((requested, False))
+        asked = {
+            client.split(".", 1)[0]
+            for client in (requested if requested is not None else self.youtube_clients)
+        }
+        steps.extend(((base,), False) for base in METADATA_CLIENT_PRIORITY if base not in asked)
+        return steps[: max(self.retry_attempts, 0) + 1]
+
+    def _extract_attempt(
+        self,
+        url: str,
+        *,
+        youtube_clients: Sequence[str] | None = None,
+        allow_cookies: bool = True,
+    ) -> MediaInfo:
+        opts = self._base_opts(
+            extract_only=True, youtube_clients=youtube_clients, allow_cookies=allow_cookies
+        )
         try:
             with self._ydl(opts) as ydl:
                 info = ydl.extract_info(url, download=False)

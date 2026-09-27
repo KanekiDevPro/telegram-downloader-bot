@@ -1,7 +1,10 @@
 """Retry policy tests (offline, no sleeping).
 
-YouTube's stale-session error ("The page needs to be reloaded") is transient
-often enough to deserve another attempt — but only that class of failure, and
+YouTube's stale-session error ("The page needs to be reloaded") deserves
+another attempt — but never a *slept* one: it is a client/session mismatch
+that no 3 s/6 s backoff ever healed (production burned ~9 s a job proving it),
+so the next attempt is a failover *sideways* — the next fallback client, jar
+left behind — run immediately. Only that class of failure gets even that, and
 only a bounded number of times, so a genuinely blocked host still fails fast
 instead of burning the user's queue slot. These tests pin both halves.
 """
@@ -26,9 +29,30 @@ STALE = ExtractionError("SESSION_STALE", "سشن کهنه است")
 BLOCKED = ExtractionError("EXTRACTOR_BLOCKED", "سایت مبدأ مسدود کرد")
 
 
-def _service(tmp_path: Path, *, attempts: int = 2, backoff: float = 3.0) -> ExtractorService:
+#: The shipped default list — the request shape production actually sends.
+DEFAULT_CLIENTS = ("android", "ios", "mweb", "tv", "web")
+
+#: A jar with one real cookie row — ``using_cookies`` insists on at least one.
+VALID_JAR = (
+    "# Netscape HTTP Cookie File\n"
+    "#HttpOnly_.youtube.com\tTRUE\t/\tFALSE\t2147483647\tLOGIN_INFO\tv\n"
+)
+
+
+def _service(
+    tmp_path: Path,
+    *,
+    attempts: int = 2,
+    backoff: float = 3.0,
+    cookie_file: Path | None = None,
+) -> ExtractorService:
     return ExtractorService(
-        tmp_path, js_runtime="none", retry_attempts=attempts, retry_backoff_s=backoff
+        tmp_path,
+        js_runtime="none",
+        cookie_file=cookie_file,
+        youtube_clients=DEFAULT_CLIENTS,
+        retry_attempts=attempts,
+        retry_backoff_s=backoff,
     )
 
 
@@ -53,15 +77,29 @@ def _info() -> MediaInfo:
     )
 
 
-def _flaky(monkeypatch: pytest.MonkeyPatch, outcomes: list[object]) -> list[int]:
-    """Make each metadata attempt return/raise the next scripted outcome."""
+def _flaky(
+    monkeypatch: pytest.MonkeyPatch,
+    outcomes: list[object],
+    steps: list[tuple[tuple[str, ...] | None, bool]] | None = None,
+) -> list[int]:
+    """Make each metadata attempt return/raise the next scripted outcome.
+
+    ``steps`` records the ``(clients, allow_cookies)`` each attempt ran with,
+    so the failover order itself is pin-able.
+    """
     calls = [0]
 
     def fake_attempt(
-        _self: ExtractorService, url: str, *, youtube_clients: tuple[str, ...] | None = None
+        _self: ExtractorService,
+        url: str,
+        *,
+        youtube_clients: tuple[str, ...] | None = None,
+        allow_cookies: bool = True,
     ) -> MediaInfo:
         outcome = outcomes[min(calls[0], len(outcomes) - 1)]
         calls[0] += 1
+        if steps is not None:
+            steps.append((youtube_clients, allow_cookies))
         if isinstance(outcome, Exception):
             raise outcome
         return outcome  # type: ignore[return-value]
@@ -78,29 +116,65 @@ def test_only_the_stale_session_error_is_retryable() -> None:
     assert RETRYABLE_EXTRACTION_CODES == frozenset({"SESSION_STALE"})
 
 
-def test_stale_session_is_retried_until_it_succeeds(
+def test_a_stale_session_fails_over_to_the_next_fallback_client_without_sleeping(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """"The page needs to be reloaded" is a client/session mismatch — the old
+    budget answered it with 3 s and 6 s sleeps that never healed one. The next
+    attempt is a failover *sideways* instead, run immediately: the next
+    fallback client of the metadata priority, jar left behind."""
     sleeps = _capture_sleeps(monkeypatch)
-    calls = _flaky(monkeypatch, [STALE, STALE, _info()])
+    steps: list[tuple[tuple[str, ...] | None, bool]] = []
+    calls = _flaky(monkeypatch, [STALE, _info()], steps=steps)
 
     result = _service(tmp_path)._extract_sync("https://youtu.be/x")
 
     assert result.title == "Big Buck Bunny"
-    assert calls[0] == 3
-    assert sleeps == [3.0, 6.0]  # exponential, base = EXTRACTOR_RETRY_BACKOFF_S
+    assert calls[0] == 2
+    assert sleeps == [], "a stale session never heals by sleeping"
+    assert steps == [(None, True), (("web_embedded",), False)], (
+        "the next fallback client, jar left behind"
+    )
 
 
-def test_retries_are_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_stale_session_with_a_jar_fails_over_jarless_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A signed-in request's first sidestep leaves the jar behind — yt-dlp's
+    own "retry without the cookies", the second opinion ``_search_attempt``
+    already takes — and only then does the walk reach the next client."""
     sleeps = _capture_sleeps(monkeypatch)
-    calls = _flaky(monkeypatch, [STALE])
+    steps: list[tuple[tuple[str, ...] | None, bool]] = []
+    calls = _flaky(monkeypatch, [STALE, STALE, _info()], steps=steps)
+    jar = tmp_path / "cookies.txt"
+    jar.write_text(VALID_JAR, encoding="utf-8")
+
+    result = _service(tmp_path, cookie_file=jar)._extract_sync("https://youtu.be/x")
+
+    assert result.title == "Big Buck Bunny"
+    assert calls[0] == 3
+    assert sleeps == []
+    assert steps == [
+        (None, True),
+        (None, False),
+        (("web_embedded",), False),
+    ]
+
+
+def test_the_failover_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host that answers every client "reloaded" gets the chain walked once —
+    each request tried exactly once, nothing slept — and then its failure."""
+    sleeps = _capture_sleeps(monkeypatch)
+    steps: list[tuple[tuple[str, ...] | None, bool]] = []
+    calls = _flaky(monkeypatch, [STALE], steps=steps)
 
     with pytest.raises(ExtractionError) as caught:
         _service(tmp_path, attempts=2)._extract_sync("https://youtu.be/x")
 
     assert caught.value.code == "SESSION_STALE"
-    assert calls[0] == 3  # first try + 2 retries
-    assert sleeps == [3.0, 6.0]
+    assert calls[0] == 2  # the request + one fallback client — no repeats
+    assert len(set(steps)) == len(steps), "no request is tried twice"
+    assert sleeps == []
 
 
 def test_zero_attempts_means_a_single_try(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,7 +201,7 @@ def test_blocks_are_not_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert sleeps == []
 
 
-def test_every_retry_is_logged(
+def test_every_failover_is_logged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     _capture_sleeps(monkeypatch)
@@ -137,7 +211,7 @@ def test_every_retry_is_logged(
         _service(tmp_path)._extract_sync("https://youtu.be/x")
 
     messages = [record.getMessage() for record in caplog.records]
-    assert any("retrying in 3.0s (attempt 2 of 3)" in message for message in messages)
+    assert any("failing over" in message and "(attempt 2 of 2)" in message for message in messages)
 
 
 # ---------------------------------------------------------------------------

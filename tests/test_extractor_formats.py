@@ -11,6 +11,7 @@ import asyncio
 import importlib
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -713,3 +714,39 @@ def test_a_client_list_without_the_fast_pair_keeps_the_plain_probe(
     asyncio.run(extractor.extract("https://youtu.be/x"))
 
     assert seen == [None], "one probe, no override — the configured list is the whole story"
+
+
+def test_the_cookie_authenticated_race_races_the_cookie_compatible_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A signed-in probe races the pair the jar can actually use. ``tv`` +
+    session cookies is exactly the "the page needs to be reloaded"
+    (``SESSION_STALE``) failure, so ``tv`` sits this race out and ``web`` takes
+    its leg: the race still fires (two cookie-compatible racers), and no leg
+    ever names a cookie-incompatible client."""
+    jar = tmp_path / "cookies.txt"
+    jar.write_text(
+        "# Netscape HTTP Cookie File\n"
+        "#HttpOnly_.youtube.com\tTRUE\t/\tFALSE\t2147483647\tLOGIN_INFO\tv\n",
+        encoding="utf-8",
+    )
+    extractor = _extractor(
+        cookie_file=jar,
+        youtube_clients=("android", "ios", "mweb", "tv", "web"),  # the shipped default
+    )
+    seen: list[tuple[str, ...]] = []
+    both_legs_in = threading.Barrier(2, timeout=5)
+
+    def fake_sync(url: str, *, youtube_clients: tuple[str, ...] | None = None) -> MediaInfo:
+        seen.append(tuple(youtube_clients or ()))
+        try:
+            both_legs_in.wait()  # both legs are entered before either answers
+        except threading.BrokenBarrierError:
+            pass
+        return _answer("cookie-compatible")
+
+    monkeypatch.setattr(extractor, "_extract_sync", fake_sync)
+
+    asyncio.run(extractor.extract("https://youtu.be/x"))
+
+    assert set(seen) == {("mweb",), ("web",)}, "the cookie-compatible pair — no tv leg"
