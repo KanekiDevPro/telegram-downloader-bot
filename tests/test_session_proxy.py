@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -55,6 +56,16 @@ def report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     path = tmp_path / "browser-route.json"
     monkeypatch.setenv("YT_SESSION_ROUTE_FILE", str(path))
     return path
+
+
+@pytest.fixture(autouse=True)
+def _no_display(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No ``$DISPLAY`` unless a test asks for one.
+
+    The display repair acts on whatever ``$DISPLAY`` says, so a suite run on a
+    machine with a broken display set must not let it spawn a real Xvfb mid-test.
+    """
+    monkeypatch.delenv("DISPLAY", raising=False)
 
 
 def _measurable(
@@ -248,7 +259,11 @@ async def test_a_launch_carries_the_proxy_argument(
 
     await module.start(headless=False, user_data_dir="/tmp/profile")
 
-    assert module.calls[0]["browser_args"] == ["--proxy-server=socks5://127.0.0.1:1080"]
+    assert module.calls[0]["browser_args"] == [
+        "--proxy-server=socks5://127.0.0.1:1080",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+    ]
     assert json.loads(report.read_text(encoding="utf-8"))["applied"] == "kwargs"
 
 
@@ -263,6 +278,8 @@ async def test_the_callers_own_arguments_are_kept(
     assert module.calls[0]["browser_args"] == [
         "--proxy-server=socks5://127.0.0.1:1080",
         "--window-size=1280,720",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
     ]
 
 
@@ -275,7 +292,11 @@ async def test_a_proxy_the_caller_set_is_not_overridden(
 
     await module.start(browser_args=["--proxy-server=http://elsewhere:8080"])
 
-    assert module.calls[0]["browser_args"] == ["--proxy-server=http://elsewhere:8080"]
+    assert module.calls[0]["browser_args"] == [
+        "--proxy-server=http://elsewhere:8080",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+    ]
     assert json.loads(report.read_text(encoding="utf-8"))["applied"] == "caller"
 
 
@@ -289,6 +310,7 @@ async def test_a_config_object_is_patched_instead_of_the_ignored_keyword(
     class Config:
         def __init__(self) -> None:
             self.arguments: list[str] = []
+            self.sandbox: bool | None = None
 
         @property
         def browser_args(self) -> list[str]:
@@ -300,21 +322,31 @@ async def test_a_config_object_is_patched_instead_of_the_ignored_keyword(
     config = Config()
     await module.start(config)
 
-    assert config.arguments == ["--proxy-server=socks5://127.0.0.1:1080"]
+    assert config.arguments == [
+        "--proxy-server=socks5://127.0.0.1:1080",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+    ]
+    assert config.sandbox is False
     assert "browser_args" not in module.calls[0]
+    assert "sandbox" not in module.calls[0]
     assert json.loads(report.read_text(encoding="utf-8"))["applied"] == "config"
 
 
-async def test_a_launch_without_a_usable_proxy_sets_no_argument(
+async def test_a_launch_without_a_usable_proxy_keeps_the_browser_direct(
     injector: ModuleType, monkeypatch: pytest.MonkeyPatch, report: Path
 ) -> None:
+    """No proxy is a routing decision; the root-safe defaults are not optional."""
     module = _fake(monkeypatch, injector)
     _measurable(monkeypatch, injector, proxy_up=False)
     injector.install(module)
 
     await module.start(headless=False)
 
-    assert module.calls[0] == {"headless": False}
+    args = module.calls[0].get("browser_args", [])
+    assert not any(item.startswith("--proxy-server") for item in args)
+    assert module.calls[0]["sandbox"] is False
+    assert args == ["--disable-setuid-sandbox", "--disable-dev-shm-usage"]
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert (payload["force"], payload["reason"]) == (False, "proxy-down")
 
@@ -410,3 +442,253 @@ def test_an_empty_report_path_writes_nothing(
     injector.write_report("", {"force": True})
 
     assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# The display the browser needs
+# ---------------------------------------------------------------------------
+
+
+def _display_env(monkeypatch: pytest.MonkeyPatch, module: ModuleType, tmp_path: Path) -> Path:
+    """Point the repair at a scratch directory and ask it for a display."""
+    monkeypatch.setattr(module, "X_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("DISPLAY", ":99")
+    return tmp_path
+
+
+def test_a_healthy_display_is_left_alone(
+    injector: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The common case is one probe and no action — a repair must not fidget."""
+    _display_env(monkeypatch, injector, tmp_path)
+    spawns: list[int] = []
+    monkeypatch.setattr(injector, "probe_display", lambda path: True)
+    monkeypatch.setattr(injector, "spawn_xvfb", spawns.append)
+
+    assert injector.ensure_x_display() == "ok"
+    assert spawns == []
+
+
+def test_a_stale_lock_is_cleaned_and_a_new_xvfb_started(
+    injector: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The crash-loop repair: a dead owner's lock must stop owning the display."""
+    root = _display_env(monkeypatch, injector, tmp_path)
+    (root / ".X99-lock").write_text("     4242", encoding="ascii")
+    socket_dir = root / ".X11-unix"
+    socket_dir.mkdir()
+    (socket_dir / "X99").write_bytes(b"stale socket")
+    monkeypatch.setattr(injector, "_pid_alive", lambda pid: False)
+    up = {"on": False}
+    spawns: list[int] = []
+
+    def spawn(display: int) -> None:
+        spawns.append(display)
+        up["on"] = True
+
+    monkeypatch.setattr(injector, "spawn_xvfb", spawn)
+    monkeypatch.setattr(injector, "probe_display", lambda path: up["on"])
+
+    assert injector.ensure_x_display(wait=1.0, poll=0.01) == "repaired"
+    assert spawns == [99]
+    assert not (root / ".X99-lock").exists(), "the stale lock is what keeps the display dark"
+    assert not (socket_dir / "X99").exists()
+
+
+def test_a_live_owner_is_waited_for_not_stomped(
+    injector: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A lock held by a live PID is believed — removing it would race a real Xvfb."""
+    root = _display_env(monkeypatch, injector, tmp_path)
+    (root / ".X99-lock").write_text("     4242", encoding="ascii")
+    monkeypatch.setattr(injector, "_pid_alive", lambda pid: True)
+    answers = [False, True]  # the starting server answers during the wait
+    monkeypatch.setattr(injector, "probe_display", lambda path: answers.pop(0) if answers else True)
+    spawns: list[int] = []
+    monkeypatch.setattr(injector, "spawn_xvfb", spawns.append)
+
+    assert injector.ensure_x_display(wait=1.0, poll=0.01) == "ok"
+    assert spawns == []
+    assert (root / ".X99-lock").exists()
+
+
+def test_a_dark_display_after_a_repair_fails_loudly(
+    injector: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A repair that does not light the display is an error, not a slow mystery."""
+    _display_env(monkeypatch, injector, tmp_path)
+    monkeypatch.setattr(injector, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(injector, "probe_display", lambda path: False)
+    monkeypatch.setattr(injector, "spawn_xvfb", lambda display: None)
+
+    with pytest.raises(injector.DisplayError, match="stayed dark"):
+        injector.ensure_x_display(wait=0.05, poll=0.01)
+
+
+def test_a_live_owner_that_never_answers_is_not_stomped(
+    injector: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = _display_env(monkeypatch, injector, tmp_path)
+    (root / ".X99-lock").write_text("     4242", encoding="ascii")
+    monkeypatch.setattr(injector, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(injector, "probe_display", lambda path: False)
+    spawns: list[int] = []
+    monkeypatch.setattr(injector, "spawn_xvfb", spawns.append)
+
+    with pytest.raises(injector.DisplayError, match="lock"):
+        injector.ensure_x_display(wait=0.05, poll=0.01)
+    assert spawns == []
+    assert (root / ".X99-lock").exists()
+
+
+def test_without_a_local_display_there_is_nothing_to_repair(
+    injector: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No ``$DISPLAY`` — or a remote one, which is somebody else's X server."""
+    monkeypatch.setattr(injector, "X_RUNTIME_DIR", str(tmp_path))
+    spawns: list[int] = []
+    monkeypatch.setattr(injector, "spawn_xvfb", spawns.append)
+
+    assert injector.ensure_x_display() == "skipped"
+    monkeypatch.setenv("DISPLAY", "host.example:10.0")
+    assert injector.ensure_x_display() == "skipped"
+    assert spawns == []
+
+
+def test_xvfb_is_started_the_way_the_image_starts_it(
+    injector: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The repair replaces the image's own Xvfb line — same geometry, same flags."""
+    monkeypatch.setattr(injector, "X_RUNTIME_DIR", str(tmp_path))
+    commands: list[list[str]] = []
+
+    class Process:
+        pass
+
+    def popen(command: list[str], **kwargs: Any) -> Process:
+        commands.append(command)
+        return Process()
+
+    monkeypatch.setattr(injector.subprocess, "Popen", popen)
+    monkeypatch.setenv("XVFB_WHD", "1920x1080x24")
+
+    injector.spawn_xvfb(99)
+
+    monkeypatch.delenv("XVFB_WHD", raising=False)
+    injector.spawn_xvfb(98)
+
+    assert commands == [
+        ["Xvfb", ":99", "-ac", "-screen", "0", "1920x1080x24", "-nolisten", "tcp"],
+        ["Xvfb", ":98", "-ac", "-screen", "0", "1280x720x16", "-nolisten", "tcp"],
+    ]
+
+
+def test_a_live_pid_is_alive(injector: ModuleType) -> None:
+    assert injector._pid_alive(os.getpid()) is True
+
+
+def test_a_dead_pid_is_reported_dead(
+    injector: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The kernel is asked with ``os.kill(pid, 0)`` — posix only, because on
+    Windows that call would *terminate* the process instead of asking it."""
+    monkeypatch.setattr(injector, "IS_POSIX", True)
+
+    def kill(pid: int, sig: int) -> None:
+        raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(injector.os, "kill", kill)
+
+    assert injector._pid_alive(4242) is False
+
+
+# ---------------------------------------------------------------------------
+# Root-safe defaults on every launch
+# ---------------------------------------------------------------------------
+
+
+async def test_a_launch_is_hardened_for_a_root_container(
+    injector: ModuleType, monkeypatch: pytest.MonkeyPatch, report: Path
+) -> None:
+    """``no_sandbox=True`` (the error text's advice) is nodriver's *old* name —
+    0.32 takes ``sandbox=False``, and that is what lands ``--no-sandbox`` in the
+    launch. The two arguments are belt and braces beside it."""
+    module = _fake(monkeypatch, injector)
+    injector.install(module)
+
+    await module.start(headless=False)
+
+    assert module.calls[0]["sandbox"] is False
+    assert module.calls[0]["browser_args"] == [
+        "--proxy-server=socks5://127.0.0.1:1080",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+    ]
+
+
+async def test_an_explicit_sandbox_choice_is_kept(
+    injector: ModuleType, monkeypatch: pytest.MonkeyPatch, report: Path
+) -> None:
+    """Someone who set ``sandbox=`` meant it — this only fills the gap."""
+    module = _fake(monkeypatch, injector)
+    injector.install(module)
+
+    await module.start(sandbox=True)
+
+    assert module.calls[0]["sandbox"] is True
+
+
+async def test_the_report_says_which_display_the_launch_had(
+    injector: ModuleType, monkeypatch: pytest.MonkeyPatch, report: Path
+) -> None:
+    """``/doctor`` reads this file; a dark display is a fact it must be able to show."""
+    module = _fake(monkeypatch, injector)
+    injector.install(module)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(injector, "probe_display", lambda path: True)
+
+    await module.start(headless=False)
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["display"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# The display at startup, in every mode
+# ---------------------------------------------------------------------------
+
+
+def test_the_display_is_repaired_even_with_the_proxy_off(
+    injector: ModuleType, monkeypatch: pytest.MonkeyPatch, report: Path
+) -> None:
+    """``never`` turns off routing, not the X server — a dark display kills the
+    browser either way, so the repair runs before the mode is even read."""
+    monkeypatch.setenv("YT_SESSION_PROXY_MODE", "never")
+    monkeypatch.setenv("YT_SESSION_ROUTE_FILE", str(report))
+    asked: list[str] = []
+
+    def repair() -> str:
+        asked.append("display")
+        return "repaired"
+
+    monkeypatch.setattr(injector, "ensure_x_display", repair)
+
+    injector.main()
+
+    assert asked == ["display"]
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["display"] == "repaired"
+
+
+def test_a_display_that_cannot_be_repaired_stops_startup(
+    injector: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Better a loud exit than Chromium's misleading sandbox error ten seconds on."""
+
+    def repair() -> str:
+        raise injector.DisplayError("display :99 stayed dark")
+
+    monkeypatch.setattr(injector, "ensure_x_display", repair)
+
+    with pytest.raises(SystemExit):
+        injector.main()
