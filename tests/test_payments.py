@@ -20,7 +20,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.methods import SendMessage
-from aiogram.types import Chat, Message, PhotoSize, User
+from aiogram.types import CallbackQuery, Chat, Message, PhotoSize, User
 
 from core import database
 from core.config import Settings
@@ -65,8 +65,14 @@ def _message(bot: RecordingBot) -> Message:
 
 
 class FakeStrategy:
-    def __init__(self) -> None:
+    def __init__(self, pool: Any = None) -> None:
         self.attached: list[tuple[str, str]] = []
+        self.begins = 0
+        self._pool = pool
+
+    async def begin(self, user: Any, plan: Any) -> Any:
+        self.begins += 1
+        return self._pool.mint(int(plan["id"]), int(plan["price"]))
 
     async def attach_receipt(
         self, txn_id: Any, photo_file_id: str, telegram_id: int
@@ -229,3 +235,138 @@ async def test_a_receipt_only_attaches_to_its_senders_pending_transaction() -> N
     assert await database.attach_receipt(cast(Any, pool), TXN_A, "photo-1", OTHER_USER) is False
     assert await database.attach_receipt(cast(Any, pool), TXN_B, "photo-1", USER_ID) is False
     assert await database.attach_receipt(cast(Any, pool), TXN_A, "photo-1", USER_ID) is True
+
+
+# ---------------------------------------------------------------------------
+# One tap, one transaction
+# ---------------------------------------------------------------------------
+
+
+class _PlanPool:
+    """A transactions + plans table in memory: ``begin`` really stores rows."""
+
+    def __init__(self) -> None:
+        self.rows: dict[Any, dict[str, Any]] = {}
+        self._next = 0
+
+    def mint(self, plan_id: int, amount: int) -> dict[str, Any]:
+        self._next += 1
+        txn_id = uuid.UUID(int=self._next)
+        row = {
+            "id": txn_id,
+            "telegram_id": USER_ID,
+            "plan_id": plan_id,
+            "amount": amount,
+            "status": "pending",
+            "receipt_photo_id": None,
+        }
+        self.rows[txn_id] = row
+        return row
+
+    async def fetchrow(self, query: str, *args: Any) -> Any:
+        flat = " ".join(query.split())
+        if "FROM transactions WHERE id" in flat:
+            return self.rows.get(args[0])
+        if "FROM subscription_plans WHERE id" in flat:
+            return {"id": args[0], "name": "month", "price": 50000}
+        return None
+
+
+def _clean_settings() -> Settings:
+    return Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def _tap(bot: RecordingBot) -> CallbackQuery:
+    return CallbackQuery(
+        id="1",
+        from_user=User(id=USER_ID, is_bot=False, first_name="buyer"),
+        chat_instance="chat",
+        data="plan:1",
+        message=_message(bot),
+    ).as_(cast(Bot, bot))
+
+
+async def _tap_plan(
+    pool: _PlanPool, strategy: FakeStrategy, bot: RecordingBot, state: FSMContext
+) -> None:
+    await payment_module.on_plan_selected(
+        _tap(bot),
+        state,
+        cast(Any, pool),
+        cast(Any, SimpleNamespace(get=lambda _method: strategy)),
+        cast(Any, {"telegram_id": USER_ID}),
+        lang=EN,
+    )
+
+
+def _fsm() -> FSMContext:
+    return FSMContext(
+        storage=MemoryStorage(),
+        key=StorageKey(bot_id=1, chat_id=USER_ID, user_id=USER_ID),
+    )
+
+
+async def test_tapping_a_plan_twice_mints_one_transaction_not_two(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P4.3, pinned: every tap minted a fresh pending transaction and pointed
+    the FSM at it — the buyer read the first card, paid that amount, and the
+    receipt attached to the second transaction, orphaning the first. Selection
+    is idempotent now: the open card is re-sent, never duplicated."""
+    monkeypatch.setattr(payment_module, "get_settings", _clean_settings)
+    pool = _PlanPool()
+    strategy = FakeStrategy(pool)
+    bot = RecordingBot()
+    state = _fsm()
+
+    await _tap_plan(pool, strategy, bot, state)
+    await _tap_plan(pool, strategy, bot, state)
+
+    assert strategy.begins == 1, "the second tap mints nothing"
+    assert len(pool.rows) == 1, "one purchase, one transaction"
+    assert bot.texts and len(bot.texts) == 2 and bot.texts[0] == bot.texts[1], (
+        "the same card is re-sent — same plan, same amount"
+    )
+    data = await state.get_data()
+    assert data["txn_id"] == str(next(iter(pool.rows))), "and the FSM still points at it"
+
+
+async def test_a_decided_transaction_lets_the_next_tap_mint_a_fresh_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idempotence is for *open* purchases: once the admin decided, the next
+    tap is a new purchase and says so with its own transaction."""
+    monkeypatch.setattr(payment_module, "get_settings", _clean_settings)
+    pool = _PlanPool()
+    strategy = FakeStrategy(pool)
+    bot = RecordingBot()
+    state = _fsm()
+
+    await _tap_plan(pool, strategy, bot, state)
+    next(iter(pool.rows.values()))["status"] = "approved"
+    await _tap_plan(pool, strategy, bot, state)
+
+    assert strategy.begins == 2
+    assert len(pool.rows) == 2
+
+
+async def test_the_re_sent_card_names_the_open_transaction_not_the_tapped_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The re-sent card is the *purchase's* card: its amount is the one the
+    buyer would pay, even if the plan's price has changed since."""
+    monkeypatch.setattr(payment_module, "get_settings", _clean_settings)
+    pool = _PlanPool()
+    strategy = FakeStrategy(pool)
+    bot = RecordingBot()
+    state = _fsm()
+
+    await _tap_plan(pool, strategy, bot, state)
+    next(iter(pool.rows.values()))["amount"] = 10  # this purchase's price
+    await _tap_plan(pool, strategy, bot, state)
+
+    assert strategy.begins == 1
+    assert len(pool.rows) == 1
+    card = bot.texts[-1]
+    assert "10" in card, "the open transaction's amount"
+    assert "50,000" not in card, "not the tapped plan's current price"

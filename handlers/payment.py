@@ -101,6 +101,22 @@ def _parse_txn_id(cb: CallbackQuery) -> uuid.UUID | None:
         return None
 
 
+async def _pending_transaction(pool: asyncpg.Pool, state: FSMContext) -> asyncpg.Record | None:
+    """The transaction the buyer's FSM still points at, if it is still open.
+
+    Plan selection is idempotent through this: a second tap must re-send the
+    card the buyer already has, never mint a second pending transaction for
+    the same purchase (two cards, one receipt, one orphaned row).
+    """
+    data = await state.get_data()
+    try:
+        txn_id = uuid.UUID(str(data.get("txn_id", "")))
+    except (ValueError, TypeError):
+        return None
+    txn = await database.get_transaction(pool, txn_id)
+    return txn if txn is not None and txn["status"] == "pending" else None
+
+
 @router.message(Command("subscribe"))
 async def cmd_subscribe(message: Message, pool: asyncpg.Pool, lang: str = DEFAULT_LANG) -> None:
     await send_plans(message, pool, lang=lang)
@@ -129,11 +145,18 @@ async def on_plan_selected(
         await cb.answer(t("pay.plan_missing", lang), show_alert=True)
         return
 
-    strategy = payment_service.get(ManualPaymentStrategy.method)
-    txn = await strategy.begin(user, plan)
-
-    await state.set_state(PaymentStates.waiting_receipt)
-    await state.update_data(txn_id=str(txn["id"]))
+    txn = await _pending_transaction(pool, state)
+    if txn is None:
+        strategy = payment_service.get(ManualPaymentStrategy.method)
+        txn = await strategy.begin(user, plan)
+        await state.set_state(PaymentStates.waiting_receipt)
+        await state.update_data(txn_id=str(txn["id"]))
+    else:
+        # The buyer already has this purchase open: re-send its card, not a
+        # second transaction the receipt could then orphan.
+        plan_row = await database.get_plan(pool, txn["plan_id"])
+        if plan_row is not None:
+            plan = plan_row
 
     settings = get_settings()
     await message.answer(
@@ -141,7 +164,7 @@ async def on_plan_selected(
             "pay.card_title",
             lang,
             plan=escape_html(plan_name(plan["name"], lang)),
-            price=f"{int(plan['price']):,}",
+            price=f"{int(txn['amount']):,}",
             currency=t("pay.currency", lang),
             holder=escape_html(settings.manual_card_holder or "—"),
             card=escape_html(settings.manual_card_number or "—"),
