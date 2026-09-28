@@ -1018,6 +1018,16 @@ class CookieJarState:
     in_sync: bool | None
 
 
+class _DownloadAbandoned(Exception):
+    """The run was abandoned: its budget ran out, or its waiter went away.
+
+    Raised from the *progress hook* on purpose: a hook exception is the one
+    "stop" yt-dlp answers to (it fails the download), so the still-running
+    thread aborts at its next tick instead of writing into a job directory
+    nobody is watching anymore.
+    """
+
+
 class ExtractionError(Exception):
     """User-facing extraction failure with a stable machine-readable code."""
 
@@ -2562,15 +2572,28 @@ class ExtractorService:
                 "FFMPEG_REQUIRED",
                 "تبدیل صدا به این فرمت نیاز به نصب ffmpeg دارد؛ لطفاً بعداً دوباره تلاش کنید.",
             )
+        # An abandoned run must stop *writing*, and a progress hook that
+        # raises is the one "stop" yt-dlp answers to — so the hook watches a
+        # flag this method sets the moment nothing waits for these bytes.
+        abandoned = threading.Event()
+
+        def hook(data: dict[str, Any]) -> None:
+            if abandoned.is_set():
+                raise _DownloadAbandoned("download abandoned after its budget")
+            if progress_hook is not None:
+                progress_hook(data)
+
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._download_sync, url, media_format, tier, progress_hook
-                ),
+                asyncio.to_thread(self._download_sync, url, media_format, tier, hook),
                 timeout=self.download_timeout_s,
             )
         except asyncio.TimeoutError:
+            abandoned.set()
             raise ExtractionError("TIMEOUT", "دانلود بیش از حد طول کشید؛ دوباره تلاش کنید.") from None
+        except asyncio.CancelledError:
+            abandoned.set()
+            raise
 
     def _download_sync(
         self,
@@ -2621,6 +2644,11 @@ class ExtractorService:
         except DownloadError as exc:
             shutil.rmtree(target_dir, ignore_errors=True)
             raise self._translate(exc) from exc
+        except Exception:
+            # An abandoned run (its hook raised the stop) or any other
+            # crash cleans up after itself; the event loop has moved on.
+            shutil.rmtree(target_dir, ignore_errors=True)
+            raise
 
         if not info or info.get("_type") == "playlist":
             shutil.rmtree(target_dir, ignore_errors=True)

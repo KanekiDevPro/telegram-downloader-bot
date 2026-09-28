@@ -172,8 +172,15 @@ async def _settle(queue: TaskQueue, task: DownloadTask) -> None:
         logger.exception("could not settle the job claim for %s", task.url)
 
 
-async def _requeue_for_shutdown(queue: TaskQueue, task: DownloadTask) -> None:
-    """Hand an interrupted task back to the queue so a restart doesn't lose it."""
+async def _requeue_for_shutdown(
+    queue: TaskQueue, task: DownloadTask, pool: asyncpg.Pool
+) -> None:
+    """Hand an interrupted task back to the queue so a restart doesn't lose it.
+
+    The quota slot goes back first: an attempt nobody waited for bought the
+    user nothing, and the requeued job claims its own when it runs again.
+    """
+    await _refund_quota(pool, task)
     try:
         await queue.requeue(task)
         logger.info("requeued interrupted task %s", task.url)
@@ -218,7 +225,7 @@ async def _process_with_retry(
     last_failure: ExtractionError | None = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         if stop_event.is_set():
-            await _requeue_for_shutdown(queue, task)
+            await _requeue_for_shutdown(queue, task, pool)
             return
         try:
             await process_download_task(
@@ -230,6 +237,13 @@ async def _process_with_retry(
                 preflight.clear_anonymous_refusal()
             await _settle(queue, task)
             return
+        except asyncio.CancelledError:
+            # Shutdown landed mid-attempt: hand the job back whole (quota
+            # claim and all) or the restart inherits a locked, half-done job
+            # that nobody can retry until the lock's TTL expires. Shielded
+            # so even a second cancel cannot cut the hand-back short.
+            await asyncio.shield(_requeue_for_shutdown(queue, task, pool))
+            raise
         except ExtractionError as exc:
             # The *user's* text is chosen by code, in their language (see
             # ``error_message``); ``exc.message`` stays the engine's own Persian
@@ -253,7 +267,7 @@ async def _process_with_retry(
             last_failure = None
             logger.exception("attempt %s/%s crashed for %s", attempt, MAX_ATTEMPTS, task.url)
         if await _sleep_until(stop_event, min(2**attempt, 8)):
-            await _requeue_for_shutdown(queue, task)
+            await _requeue_for_shutdown(queue, task, pool)
             return
         # An internal retry is silent: the card's ⏳ already says "working", and
         # "attempt 2 of 3" is machinery — the log counts attempts, the chat waits.
