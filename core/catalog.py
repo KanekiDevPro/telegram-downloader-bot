@@ -654,6 +654,16 @@ MESSAGES: Final[Catalog] = {
         "en": "✅ Receipt received. Your subscription activates as soon as an admin approves it.",
         "fa": "✅ رسید دریافت شد. پس از تأیید ادمین، اشتراکت فعال می‌شه.",
     },
+    "pay.receipt_unreachable": {
+        "en": (
+            "⚠️ Your receipt was stored, but support could not be reached. "
+            "Try again later or contact support."
+        ),
+        "fa": (
+            "⚠️ رسیدت ذخیره شد، اما پشتیبانی مطلع نشد. "
+            "بعداً دوباره تلاش کن یا با پشتیبانی تماس بگیر."
+        ),
+    },
     "pay.receipt_caption": {
         "en": (
             "🧾 <b>New payment receipt</b>\n"

@@ -216,6 +216,10 @@ async def on_receipt_photo(
             logger.exception("failed to forward receipt to admin %s", admin_id)
     if notified == 0:
         logger.warning("receipt accepted but no admin notified — check ADMIN_IDS in .env")
+        # The receipt is stored and the transaction stays pending; being
+        # thanked here would bury a payment no admin will ever decide.
+        await message.answer(t("pay.receipt_unreachable", lang))
+        return
 
     await message.answer(t("pay.receipt_received", lang))
 
