@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yt_dlp
@@ -36,6 +37,9 @@ from services.extractor import (
     parse_browser_spec,
     pot_plugin_installed,
     pot_plugin_version,
+    quality_label_p,
+    selected_streams,
+    video_options,
 )
 
 
@@ -727,7 +731,8 @@ def test_the_cookie_authenticated_race_races_the_cookie_compatible_pair(
     jar = tmp_path / "cookies.txt"
     jar.write_text(
         "# Netscape HTTP Cookie File\n"
-        "#HttpOnly_.youtube.com\tTRUE\t/\tFALSE\t2147483647\tLOGIN_INFO\tv\n",
+        "#HttpOnly_.youtube.com\tTRUE\t/\tFALSE\t2147483647\tLOGIN_INFO\tv\n"
+        "#HttpOnly_.youtube.com\tTRUE\t/\tFALSE\t2147483647\tSAPISID\tv\n",
         encoding="utf-8",
     )
     extractor = _extractor(
@@ -750,3 +755,67 @@ def test_the_cookie_authenticated_race_races_the_cookie_compatible_pair(
     asyncio.run(extractor.extract("https://youtu.be/x"))
 
     assert set(seen) == {("mweb",), ("web",)}, "the cookie-compatible pair — no tv leg"
+
+
+def test_the_menu_never_advertises_a_rung_the_chain_would_trade_down() -> None:
+    """P0.1's second rule, pinned: the menu and the chain agree, forever.
+
+    A rung is advertised only when the production format chain delivers *that*
+    rung: 1440p/2160p that exist only as VP9/AV1 resolve to 1080p H.264 through
+    the chain's codec-first steps (MP4 is what Telegram streams inline), so the
+    menu must not promise them. Every advertised row is checked against the very
+    selector the download uses, and the hidden rows stay hidden for the honest
+    reason — the chain trades them down — not to be "fixed" by widening the
+    menu.
+    """
+
+    def video(fmt_id: str, height: int, vcodec: str, ext: str = "mp4") -> dict[str, Any]:
+        return {
+            "format_id": fmt_id,
+            "url": f"https://example.invalid/{fmt_id}",
+            "ext": ext,
+            "height": height,
+            "width": height * 16 // 9,
+            "vcodec": vcodec,
+            "acodec": "none",
+            "filesize": 1_000_000,
+        }
+
+    def audio(fmt_id: str, acodec: str, ext: str = "m4a") -> dict[str, Any]:
+        return {
+            "format_id": fmt_id,
+            "url": f"https://example.invalid/{fmt_id}",
+            "ext": ext,
+            "acodec": acodec,
+            "vcodec": "none",
+            "filesize": 500_000,
+        }
+
+    info: dict[str, Any] = {
+        "formats": [
+            audio("140", "mp4a.40.2"),
+            audio("251", "opus", "webm"),
+            *(video(f"avc{h}", h, "avc1.64002a") for h in (144, 240, 360, 480, 720, 1080)),
+            *(video(f"av01_{h}", h, "av01.0.13M.08") for h in (1440, 2160)),
+            *(video(f"vp9_{h}", h, "vp9", "webm") for h in (1440, 2160)),
+        ]
+    }
+
+    rungs = [option.label_p for option in video_options(info)]
+    assert rungs == [1080, 720, 480, 360, 240, 144], (
+        "the VP9/AV1-only upper rungs are not advertised"
+    )
+
+    for option in video_options(info):
+        streams = selected_streams(info, option.height)
+        picked = next(f for f in streams if f.get("vcodec") not in (None, "none"))
+        assert quality_label_p(picked.get("width"), picked.get("height")) == option.label_p, (
+            f"the {option.label_p}p row must land on {option.label_p}p"
+        )
+
+    for hidden in (2160, 1440):
+        streams = selected_streams(info, hidden)
+        picked = next(f for f in streams if f.get("vcodec") not in (None, "none"))
+        assert int(picked["height"]) < hidden, (
+            "hidden exactly because the chain trades the tap down"
+        )

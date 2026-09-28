@@ -1952,11 +1952,13 @@ class ExtractorService:
             # n-challenge solver script be fetched when the ``yt-dlp-ejs``
             # package is not installed.
             opts["remote_components"] = list(self.remote_components)
-        # The client list adapts to whether cookies go out with this request:
-        # a cookie-blind client would spend a player round-trip for nothing,
-        # and a cookie-incompatible one would poison the whole request.
+        # The client list adapts to whether cookies go out with this request
+        # *signed in*: a cookie-blind client would spend a player round-trip for
+        # nothing, and a cookie-incompatible one would poison the whole request
+        # — but only a session carries either hazard (see ``cookies_signed_in``;
+        # an anonymous request is immune to both).
         requested = youtube_clients if youtube_clients is not None else self.youtube_clients
-        cookies_active = allow_cookies and (self.using_cookies or self.using_browser_cookies)
+        cookies_active = allow_cookies and self.cookies_signed_in
         clients = effective_youtube_clients(requested, cookies_active=cookies_active)
         if cookies_active and requested and not clients:
             # Every configured client is cookie-blind or cookie-incompatible.
@@ -2078,6 +2080,21 @@ class ExtractorService:
         if not self.using_cookies:
             return False
         return not missing_youtube_login_cookies(self.cookie_file)
+
+    @property
+    def cookies_signed_in(self) -> bool:
+        """True when the cookies this service sends actually sign YouTube in.
+
+        The cookie-aware client rule is about what a *session* does to a player
+        response, and a jar that merely exists is no session: without
+        ``LOGIN_INFO`` and a SAPISID every request leaves anonymously (see
+        :attr:`youtube_login_ready`), and an anonymous request gains nothing
+        from dropping cookie-blind or cookie-incompatible clients. Filtering on
+        jar presence threw configured clients away — and whatever formats they
+        carry — for nothing. Browser cookies are a real browser session and
+        count as a login.
+        """
+        return self.using_browser_cookies or self.youtube_login_ready
 
     @property
     def using_cookies(self) -> bool:
@@ -2369,7 +2386,7 @@ class ExtractorService:
         """
         effective = effective_youtube_clients(
             self.youtube_clients,
-            cookies_active=self.using_cookies or self.using_browser_cookies,
+            cookies_active=self.cookies_signed_in,
         )
         eligible = [
             client for client in effective if client.split(".", 1)[0] in METADATA_CLIENT_PRIORITY

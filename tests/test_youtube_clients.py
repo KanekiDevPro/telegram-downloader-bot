@@ -174,11 +174,7 @@ def test_ipv4_only_is_yt_dlps_own_force_ipv4(tmp_path: Path) -> None:
 def test_the_proxy_and_the_cookies_are_untouched_by_the_evasion(tmp_path: Path) -> None:
     """The two options are additive: the tunnel and the jar are not disturbed."""
     jar = tmp_path / "cookies.txt"
-    jar.write_text(
-        "# Netscape HTTP Cookie File\n"
-        "#HttpOnly_.youtube.com\tTRUE\t/\tFALSE\t2147483647\tLOGIN_INFO\tv\n",
-        encoding="utf-8",
-    )
+    jar.write_text(VALID_JAR, encoding="utf-8")
     extractor = _extractor(
         tmp_path,
         proxy="socks5://user:pw@127.0.0.1:1080",
@@ -318,6 +314,7 @@ def test_the_row_sits_with_the_rest_of_the_engine_configuration(
 VALID_JAR = (
     "# Netscape HTTP Cookie File\n"
     "#HttpOnly_.youtube.com\tTRUE\t/\tFALSE\t2147483647\tLOGIN_INFO\tv\n"
+    "#HttpOnly_.youtube.com\tTRUE\t/\tFALSE\t2147483647\tSAPISID\tv\n"
 )
 
 
@@ -471,3 +468,33 @@ def test_a_signed_in_request_never_falls_back_to_yt_dlp_s_default_clients(
         "web_embedded",
         "web",
     ]
+
+
+def test_a_jar_without_a_login_keeps_the_whole_configured_list(tmp_path: Path) -> None:
+    """P0.1, pinned: a jar that merely *exists* is not a session.
+
+    The hierarchy drops cookie-blind/-incompatible clients from a *signed-in*
+    request — but a jar without a YouTube login (no LOGIN_INFO plus a SAPISID)
+    sends every request out anonymous, exactly like no jar at all. Filtering on
+    jar presence threw the configured clients away for nothing, and the format
+    list the quality menu is handed lost whatever those clients carry: fewer
+    rungs than the link offers. Only a jar that actually signs in may narrow
+    the list.
+    """
+    jar = tmp_path / "cookies.txt"
+    jar.write_text(
+        "# Netscape HTTP Cookie File\n"
+        "#HttpOnly_.youtube.com\tTRUE\t/\tFALSE\t2147483647\tLOGIN_INFO\tv\n",
+        encoding="utf-8",
+    )
+    extractor = _extractor(
+        tmp_path,
+        cookie_file=jar,
+        youtube_clients=("visionos", "web_embedded", "tv_downgraded", "web"),
+    )
+
+    assert extractor._base_opts(extract_only=True)["extractor_args"]["youtube"][
+        "player_client"
+    ] == ["visionos", "web_embedded", "tv_downgraded", "web"], (
+        "anonymous is anonymous — the whole configured list goes out"
+    )
