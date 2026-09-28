@@ -1127,6 +1127,30 @@ MESSAGES: Final[Catalog] = {
         "from before it stopped.",
         "fa": "⚠️ پیام همگانی نیمه‌کاره ماند — دلیلش در لاگ است؛ گزارش ناقص است.",
     },
+    "admin.broadcast_busy": {
+        "en": (
+            "📣 Another broadcast is already running — nothing was sent. "
+            "Try again when it finishes."
+        ),
+        "fa": (
+            "📣 یک پیام همگانی دیگر در حال ارسال است — چیزی فرستاده نشد. "
+            "پس از پایان دوباره تلاش کن."
+        ),
+    },
+    "admin.broadcast_aborted": {
+        "en": (
+            "⚠️ <b>Broadcast stopped early</b>\n"
+            "\n"
+            "Stopped at page {pages} — reached {sent} of {total}\n"
+            "The log has the reason."
+        ),
+        "fa": (
+            "⚠️ <b>پیام همگانی نیمه‌کاره ماند</b>\n"
+            "\n"
+            "در صفحه {pages} متوقف شد — {sent} از {total} رسید\n"
+            "دلیلش در لاگ است."
+        ),
+    },
     "admin.support_intro": {
         "en": (
             "💬 <b>Support button</b>\n"

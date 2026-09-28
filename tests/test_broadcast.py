@@ -12,6 +12,7 @@ list.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -237,3 +238,85 @@ async def test_an_empty_database_is_not_an_error(monkeypatch: pytest.MonkeyPatch
     report = await broadcast.deliver(bot, object(), "hi", interval_s=0)  # type: ignore[arg-type]
 
     assert report.total == 0 and bot.sent == []
+
+
+async def test_a_second_broadcast_is_turned_away_while_one_is_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P6.2, pinned: one broadcast at a time.
+
+    A mass send cannot be taken back, and two runs in parallel double every
+    message: whoever taps Send while one is already running must be turned
+    away — with a reason — instead of sending the world a second copy.
+    """
+    reached = asyncio.Event()
+    gate = asyncio.Event()
+    ids = [1, 2]
+
+    async def user_id_page(pool: Any, after: int = 0, limit: int = 500) -> list[int]:
+        if after == 0 and not reached.is_set():
+            reached.set()
+            await gate.wait()  # hold the first run mid-walk, lock in hand
+        return [value for value in ids if value > after][:limit]
+
+    monkeypatch.setattr(broadcast.database, "user_id_page", user_id_page)
+    bot = RecordingBot()
+
+    first = asyncio.create_task(
+        broadcast.deliver(bot, object(), "hi", interval_s=0)  # type: ignore[arg-type]
+    )
+    await reached.wait()
+
+    rejected: list[BaseException] = []
+    try:
+        await broadcast.deliver(bot, object(), "hi again", interval_s=0)  # type: ignore[arg-type]
+    except Exception as exc:  # noqa: BLE001 — the pin asserts *how* it says no
+        rejected.append(exc)
+
+    gate.set()
+    report = await first
+
+    assert [text for _, text in bot.sent] == ["hi", "hi"], (
+        "one run's two recipients — a second tap must not double the world"
+    )
+    assert report.sent == 2
+    assert rejected and "already running" in str(rejected[0]).lower(), (
+        "and the second attempt is turned away with a reason"
+    )
+    assert not broadcast.is_sending(), "the lock is not left held"
+
+
+async def test_a_mid_walk_failure_stops_cleanly_and_reports_the_partial_run(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """P6.2, pinned: the walk breaking is not the broadcast vanishing.
+
+    The database leaving mid-pages must stop the run where it stood — and what
+    was already sent is the one thing the admin needs afterwards. An unhandled
+    exception that just propagates loses exactly that.
+    """
+
+    async def user_id_page(pool: Any, after: int = 0, limit: int = 500) -> list[int]:
+        if after:
+            raise RuntimeError("the database went away")
+        return [1, 2]
+
+    monkeypatch.setattr(broadcast.database, "user_id_page", user_id_page)
+    bot = RecordingBot()
+
+    report = await broadcast.deliver(bot, object(), "hi", interval_s=0)  # type: ignore[arg-type]
+
+    assert (report.sent, report.total) == (2, 2), (
+        "what was done is reported, not thrown away"
+    )
+    assert report.pages == 2 and report.aborted, "and it says where it stopped"
+    assert not report.ok
+    assert "aborted at page" in caplog.text, "the reason is in the log"
+    assert not broadcast.is_sending(), "the lock is released — the next run is possible"
+
+    async def one_page(pool: Any, after: int = 0, limit: int = 500) -> list[int]:
+        return [value for value in (3,) if value > after][:limit]
+
+    monkeypatch.setattr(broadcast.database, "user_id_page", one_page)
+    again = await broadcast.deliver(bot, object(), "again", interval_s=0)  # type: ignore[arg-type]
+    assert (again.sent, again.aborted) == (1, False)

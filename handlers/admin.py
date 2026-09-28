@@ -1669,9 +1669,35 @@ async def on_broadcast_send(
 
     try:
         report = await broadcast.deliver(bot, pool, announcement, on_progress=progress)
+    except broadcast.BroadcastBusy:
+        # Another run is in flight and this one sent nothing — give the draft
+        # back untouched, so the same tap works when the other run is done.
+        await state.set_state(AdminStates.broadcast)
+        await state.update_data(announcement=announcement)
+        await _edit(
+            message,
+            t("admin.broadcast_busy", lang),
+            reply_markup=_broadcast_keyboard(lang),
+        )
+        return
     except Exception:
         logger.exception("broadcast failed")
         await _edit(message, t("admin.broadcast_failed", lang))
+        return
+    if report.aborted:
+        # The walk broke mid-pages: the partial count is the headline here,
+        # never a success report for a run that did not finish.
+        await _edit(
+            message,
+            t(
+                "admin.broadcast_aborted",
+                lang,
+                pages=report.pages,
+                sent=report.sent,
+                total=report.total,
+            ),
+            reply_markup=_done_keyboard(lang),
+        )
         return
     await _edit(
         message,

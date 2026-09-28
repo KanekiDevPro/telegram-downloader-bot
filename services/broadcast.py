@@ -60,14 +60,38 @@ class BroadcastReport:
     blocked: int = 0
     #: Anything else: counted, logged, and kept out of ``sent``.
     failed: int = 0
+    #: The walk broke mid-pages (the database left, say): the run stopped where
+    #: it stood instead of claiming a finish it did not have.
+    aborted: bool = False
+    #: How far the walk got — the page the run stopped at when ``aborted``.
+    pages: int = 0
 
     @property
     def ok(self) -> bool:
-        return self.failed == 0
+        return self.failed == 0 and not self.aborted
 
 
 #: What a caller may pass to watch the run: ``(sent, total)``.
 Progress = Callable[[int, int], Awaitable[None]]
+
+
+class BroadcastBusy(RuntimeError):
+    """A broadcast is already running; a second one must not start.
+
+    A mass send cannot be taken back, and two runs in parallel would double
+    every message — the second caller is turned away, not queued.
+    """
+
+
+#: One run at a time. Taken non-blocking at the top of ``deliver`` and held to
+#: the very end: there is no moment at which two broadcasts can both believe
+#: they own the send.
+_send_lock = asyncio.Lock()
+
+
+def is_sending() -> bool:
+    """Whether a broadcast is running right now (the lock, asked politely)."""
+    return _send_lock.locked()
 
 
 async def _send_one(bot: Bot, telegram_id: int, text: str) -> int:
@@ -115,39 +139,69 @@ async def deliver(
 ) -> BroadcastReport:
     """Send ``text`` to every user, one page at a time, and report what happened.
 
+    One run at a time: a mass send cannot be taken back, and two runs in
+    parallel would double every message — a caller who arrives while one is
+    running gets ``BroadcastBusy`` rather than a place in a queue.
+
     ``total`` is counted as the run goes (the pages are the source of truth, so the
-    report cannot claim to have reached more people than there were rows).
+    report cannot claim to have reached more people than there were rows). If the
+    walk itself breaks — the database leaves mid-pages — the run stops where it
+    stood and the report says so (``aborted``, ``pages``): what was already sent
+    is the one number the admin needs afterwards, and no exception gets to carry
+    it away.
     """
-    sent = blocked = failed = total = 0
-    after = 0
-    while True:
-        page = await database.user_id_page(pool, after, page_size)
-        if not page:
-            break
-        for telegram_id in page:
-            total += 1
-            outcome = await _send_one(bot, telegram_id, text)
-            if outcome == 0:
-                sent += 1
-            elif outcome < 0:
-                blocked += 1
-            else:
-                failed += 1
-            if on_progress is not None and total % PROGRESS_EVERY == 0:
-                await _progress(on_progress, sent, total)
-            if interval_s > 0:
-                await asyncio.sleep(interval_s)
-        after = page[-1]
-    if on_progress is not None:
-        await _progress(on_progress, sent, total)
-    logger.info(
-        "broadcast finished: %s sent, %s blocked the bot, %s failed (of %s)",
-        sent,
-        blocked,
-        failed,
-        total,
-    )
-    return BroadcastReport(total=total, sent=sent, blocked=blocked, failed=failed)
+    if _send_lock.locked():
+        raise BroadcastBusy("a broadcast is already running")
+    async with _send_lock:
+        sent = blocked = failed = total = 0
+        after = 0
+        pages = 0
+        aborted = False
+        try:
+            while True:
+                pages += 1
+                page = await database.user_id_page(pool, after, page_size)
+                if not page:
+                    break
+                for telegram_id in page:
+                    total += 1
+                    outcome = await _send_one(bot, telegram_id, text)
+                    if outcome == 0:
+                        sent += 1
+                    elif outcome < 0:
+                        blocked += 1
+                    else:
+                        failed += 1
+                    if on_progress is not None and total % PROGRESS_EVERY == 0:
+                        await _progress(on_progress, sent, total)
+                    if interval_s > 0:
+                        await asyncio.sleep(interval_s)
+                after = page[-1]
+        except Exception:
+            aborted = True
+            logger.exception(
+                "broadcast aborted at page %s after %s sends — reporting what was done",
+                pages,
+                sent,
+            )
+        if on_progress is not None:
+            await _progress(on_progress, sent, total)
+        logger.info(
+            "broadcast %s: %s sent, %s blocked the bot, %s failed (of %s)",
+            "aborted" if aborted else "finished",
+            sent,
+            blocked,
+            failed,
+            total,
+        )
+        return BroadcastReport(
+            total=total,
+            sent=sent,
+            blocked=blocked,
+            failed=failed,
+            aborted=aborted,
+            pages=pages,
+        )
 
 
 async def _progress(on_progress: Progress, sent: int, total: int) -> None:

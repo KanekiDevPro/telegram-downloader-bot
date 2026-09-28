@@ -1019,6 +1019,58 @@ async def test_a_stranger_cannot_broadcast(stored: dict[str, str], delivered: li
     assert await state.get_state() is None, "and no draft state is opened for them"
 
 
+async def test_a_second_tap_is_told_another_broadcast_is_running(
+    stored: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P6.2 at the panel: the second Send tap is turned away with a reason —
+    and its draft survives the rejection untouched, so the same tap works the
+    moment the other run is done."""
+    async def busy(
+        bot: Any, pool: Any, text: str, *, on_progress: Any = None, **kwargs: Any
+    ) -> BroadcastReport:
+        raise admin_module.broadcast.BroadcastBusy("a broadcast is already running")
+
+    monkeypatch.setattr(admin_module.broadcast, "deliver", busy)
+    bot = RecordingBot()
+    state = _fsm()
+    await state.set_state(admin_module.AdminStates.broadcast)
+    await state.update_data(announcement="hello everyone")
+
+    await admin_module.on_broadcast_send(
+        _callback(bot, admin_module.BC_SEND), state, bot, object(), lang="en"
+    )
+
+    assert "already running" in bot.screens[-1]
+    assert (await state.get_data()).get("announcement") == "hello everyone", (
+        "the draft is kept — this run sent nothing"
+    )
+
+
+async def test_a_run_that_stops_early_says_what_it_managed(
+    stored: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A walk that breaks mid-pages owes the admin the partial count and where
+    it stopped — not a success report for a run that never finished."""
+    async def aborted(
+        bot: Any, pool: Any, text: str, *, on_progress: Any = None, **kwargs: Any
+    ) -> BroadcastReport:
+        return BroadcastReport(total=50, sent=37, aborted=True, pages=8)
+
+    monkeypatch.setattr(admin_module.broadcast, "deliver", aborted)
+    bot = RecordingBot()
+    state = _fsm()
+    await state.set_state(admin_module.AdminStates.broadcast)
+    await state.update_data(announcement="hello everyone")
+
+    await admin_module.on_broadcast_send(
+        _callback(bot, admin_module.BC_SEND), state, bot, object(), lang="en"
+    )
+
+    screen = bot.screens[-1]
+    assert "page 8" in screen and "37" in screen, "where it stopped, and what it managed"
+    assert "finished" not in screen, "a stopped run must not report itself as finished"
+
+
 async def test_the_support_contact_is_stored_and_is_what_users_get(
     stored: dict[str, str]
 ) -> None:
