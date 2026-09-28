@@ -13,6 +13,7 @@ is refused where it is being set — but forgiven where it is being read.
 from __future__ import annotations
 
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,68 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # ---------------------------------------------------------------------------
 # The catalogue
 # ---------------------------------------------------------------------------
+
+
+def test_every_message_parses_under_telegram_html_rules() -> None:
+    """What the catalogue ships must be sendable: Telegram's HTML parser is
+    the gate every string eventually meets, and a bare "<" or "&" in one of
+    them is a 'can't parse entities' error that loses the whole message. The
+    checker is deliberately independent of ``core.texts``: it mirrors what
+    Telegram accepts, so it catches both a broken string and a weak gate.
+    """
+
+    class _TelegramHTML(HTMLParser):
+        """Known tags, balanced, and every "<"/"&" escaped or part of markup."""
+
+        _TAGS = {
+            "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+            "span", "tg-spoiler", "a", "code", "pre", "blockquote", "tg-emoji",
+        }
+
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=False)
+            self.problem = ""
+            self.stack: list[str] = []
+
+        def handle_starttag(
+            self, tag: str, attrs: list[tuple[str, str | None]]
+        ) -> None:
+            if tag not in self._TAGS:
+                self.problem = f"unknown tag <{tag}>"
+            else:
+                self.stack.append(tag)
+
+        def handle_endtag(self, tag: str) -> None:
+            if not self.stack or self.stack.pop() != tag:
+                self.problem = f"unbalanced </{tag}>"
+
+        def handle_data(self, data: str) -> None:
+            if not self.problem and ("<" in data or "&" in data):
+                self.problem = "a bare < or & that Telegram would refuse"
+
+        def handle_comment(self, data: str) -> None:
+            self.problem = "an HTML comment, which Telegram has no grammar for"
+
+        def handle_decl(self, decl: str) -> None:
+            self.problem = "a declaration"
+
+        def handle_pi(self, data: str) -> None:
+            self.problem = "a processing instruction"
+
+        def unknown_decl(self, data: str) -> None:
+            self.problem = "an unknown declaration"
+
+    broken: dict[str, str] = {}
+    for key, entry in MESSAGES.items():
+        for lang, value in entry.items():
+            if not isinstance(value, str):
+                continue
+            check = _TelegramHTML()
+            check.feed(value)
+            check.close()
+            if check.problem or check.stack:
+                broken[f"{key} ({lang})"] = check.problem or "unclosed tags"
+    assert broken == {}, f"unsendable catalogue strings: {broken}"
 
 
 def test_every_key_exists_in_every_language() -> None:

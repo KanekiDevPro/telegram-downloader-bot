@@ -153,7 +153,10 @@ class _MarkupCheck(HTMLParser):
     """Balanced, Telegram-supported tags and sane links — or ``problem`` is set."""
 
     def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
+        # Charrefs stay raw on purpose: with them converted, "&amp;" and a
+        # bare "&" both arrive as "&", and the difference Telegram cares
+        # about is gone before anything can check it.
+        super().__init__(convert_charrefs=False)
         self.stack: list[str] = []
         self.problem = False
 
@@ -182,6 +185,29 @@ class _MarkupCheck(HTMLParser):
             return
         if not self.stack or self.stack.pop() != tag:
             self.problem = True
+
+    def handle_data(self, data: str) -> None:
+        if self.problem:
+            return
+        # A "<" or "&" that parsed as *text* is bare: Telegram refuses the
+        # whole message at send time ("can't parse entities"), so it is
+        # refused here instead, while it can still name the problem.
+        if "<" in data or "&" in data:
+            self.problem = True
+
+    def handle_comment(self, data: str) -> None:
+        # "<!-- -->" is not a tag Telegram's HTML has a grammar for.
+        self.problem = True
+
+    def handle_decl(self, decl: str) -> None:
+        self.problem = True
+
+    def handle_pi(self, data: str) -> None:
+        self.problem = True
+
+    def unknown_decl(self, data: str) -> None:
+        self.problem = True
+
 
     def finish(self) -> bool:
         """``True`` when the markup is sound (checks the unclosed tags too)."""

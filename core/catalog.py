@@ -277,7 +277,7 @@ MESSAGES: Final[Catalog] = {
     },
     "intake.download_usage": {
         "en": "Usage: /download &lt;link&gt; — or just send the link.",
-        "fa": "استفاده: /download <لینک> — یا لینک رو مستقیم بفرست.",
+        "fa": "استفاده: /download &lt;لینک&gt; — یا لینک رو مستقیم بفرست.",
     },
     "intake.cancelled": {"en": "✅ Cancelled.", "fa": "✅ لغو شد."},
     # A video-capable link whose qualities could *not* be discovered says so and
@@ -969,22 +969,22 @@ MESSAGES: Final[Catalog] = {
         "fa": "طولانی‌تر از حد مجاز پیام‌های تلگرام است",
     },
     # The text categories — a menu of features, never a wall of keys.
-    "admin.textcat_start": {"en": "Start & menu", "fa": "شروع و منو"},
+    "admin.textcat_start": {"en": "Start &amp; menu", "fa": "شروع و منو"},
     "admin.textcat_language": {"en": "Language", "fa": "زبان"},
     "admin.textcat_intake": {"en": "Link intake", "fa": "دریافت لینک"},
     "admin.textcat_media": {
-        "en": "Media & quality menus",
+        "en": "Media &amp; quality menus",
         "fa": "منوهای رسانه و کیفیت",
     },
     "admin.textcat_download": {
-        "en": "Download & progress",
+        "en": "Download &amp; progress",
         "fa": "دانلود و پیشرفت",
     },
     "admin.textcat_errors": {
-        "en": "Errors & verification",
+        "en": "Errors &amp; verification",
         "fa": "خطاها و راستی‌آزمایی",
     },
-    "admin.textcat_profile": {"en": "Profile & premium", "fa": "پروفایل و ویژه"},
+    "admin.textcat_profile": {"en": "Profile &amp; premium", "fa": "پروفایل و ویژه"},
     "admin.textcat_pay": {"en": "Payments", "fa": "پرداخت‌ها"},
     "admin.btn_reload": {"en": "🔄 Refresh", "fa": "🔄 تازه‌سازی"},
     "admin.btn_search": {"en": "🔎 Search", "fa": "🔎 جستجو"},

@@ -200,6 +200,9 @@ async def test_a_locked_text_is_not_editable_even_by_an_admin(_desk: _TextDB) ->
         ("Hello <b>name</i>", "markup"),
         ("Hello <br/>name", "markup"),
         ('Click <a href="javascript:alert(1)">here</a>', "markup"),
+        ("Fish & chips", "markup"),
+        ("Use /download <link>", "markup"),
+        ("Numbers 1 < 2 and 3 > 2", "markup"),
     ),
 )
 def test_an_invalid_replacement_names_why_it_was_refused(value: str, reason: str) -> None:
@@ -210,6 +213,7 @@ def test_a_valid_replacement_is_accepted() -> None:
     assert text_store.validate_text("start.welcome", "Hi <b>{name}</b> 👋") is None
     assert text_store.validate_text("start.welcome", 'Read <a href="https://x.example">this</a>') is None
     assert text_store.validate_text("start.welcome", "No markup at all, no placeholders") is None
+    assert text_store.validate_text("start.welcome", "Fish &amp; chips &lt;3") is None
 
 
 async def test_a_refused_edit_is_not_stored_and_says_why(_desk: _TextDB) -> None:
