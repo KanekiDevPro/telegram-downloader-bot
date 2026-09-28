@@ -33,6 +33,18 @@ LIMIT = 10
 CLAIM = "daily_downloads = CASE"
 REFUND = "daily_downloads = daily_downloads - 1"
 
+#: The one quota day these tests live in — see tests/test_quota_refund.py: the
+#: seed and the claim read the same pinned day by construction, never the two
+#: calendars (system clock vs configured zone) that disagree near midnight.
+FROZEN_DAY = date(2026, 9, 29)
+
+
+@pytest.fixture(autouse=True)
+def _frozen_quota_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(worker, "today_local", lambda: FROZEN_DAY)
+    monkeypatch.setattr("core.database.today_local", lambda: FROZEN_DAY)
+
+
 
 class _Pool:
     """A users table in memory — the claim and refund statements really apply."""
@@ -45,7 +57,7 @@ class _Pool:
                 "premium_until": None,
                 "language": FA,
                 "daily_downloads": PRE_JOB,
-                "last_download_date": date.today(),
+                "last_download_date": FROZEN_DAY,
             }
         }
         self.statements: list[str] = []

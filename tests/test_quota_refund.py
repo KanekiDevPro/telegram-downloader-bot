@@ -40,6 +40,24 @@ LIMIT = 10
 CLAIM = "daily_downloads = CASE"
 REFUND = "daily_downloads = daily_downloads - 1"
 
+#: The one quota day these tests live in. The code claims with ``today_local()``
+#: — the *configured zone's* calendar — while the doubles used to be seeded
+#: with ``date.today()``, the system clock's calendar. Two calendars that
+#: disagree in a window around every midnight (and disagreed all night while
+#: the tz database was missing) made these pins flaky by construction. Both
+#: seams are frozen to this one day, so the seed and the claim can never
+#: disagree again.
+FROZEN_DAY = date(2026, 9, 29)
+
+
+@pytest.fixture(autouse=True)
+def _frozen_quota_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Freeze the quota day at the seam: the worker's claim clock and the
+    database's own refund clock read the same pinned day, by construction."""
+    monkeypatch.setattr(worker, "today_local", lambda: FROZEN_DAY)
+    monkeypatch.setattr(database, "today_local", lambda: FROZEN_DAY)
+
+
 
 def _bad_request() -> TelegramBadRequest:
     return TelegramBadRequest(
@@ -284,7 +302,7 @@ async def test_a_delivery_failure_gives_every_claimed_slot_back(
     exactly where it started. Each attempt claimed its own slot (that is what a
     retry costs the user), so each gets its own back — one bad link can no longer
     burn three slots and hand over nothing."""
-    pool = _QuotaPool(today=date.today())
+    pool = _QuotaPool(today=FROZEN_DAY)
     extractor = _Extractor(tmp_path)
 
     await _run(monkeypatch, pool, _Bot(refusing=True), extractor)
@@ -300,7 +318,7 @@ async def test_a_failure_before_the_quota_gate_steals_no_slot(
 ) -> None:
     """The refund is not a license to decrement: a probe failure never claimed a
     slot, and giving one "back" would hand the user somebody else's."""
-    pool = _QuotaPool(today=date.today())
+    pool = _QuotaPool(today=FROZEN_DAY)
 
     await _run(monkeypatch, pool, _Bot(), _ProbeRefusing(tmp_path))
 
@@ -320,7 +338,7 @@ async def test_a_cache_blip_after_a_delivery_keeps_the_slot_spent(
         raise RuntimeError("database blip")
 
     monkeypatch.setattr(worker.cache_service, "memorize", boom)
-    pool = _QuotaPool(today=date.today())
+    pool = _QuotaPool(today=FROZEN_DAY)
     bot = _Bot()
 
     await _run(monkeypatch, pool, bot, _Extractor(tmp_path))
@@ -343,7 +361,7 @@ async def test_a_cache_blip_after_delivery_never_re_runs_the_job(
         raise RuntimeError("database blip")
 
     monkeypatch.setattr(worker.cache_service, "memorize", boom)
-    pool = _QuotaPool(today=date.today())
+    pool = _QuotaPool(today=FROZEN_DAY)
     bot = _Bot()
     extractor = _Extractor(tmp_path)
     queue = _Queue()
@@ -365,7 +383,7 @@ async def test_a_send_without_a_file_id_still_counts_as_delivered(
     but returned no file_id. The file is in the chat — the job is DELIVERED — so
     nothing may re-run it (the chat would get the same file again) and its slot
     stays spent (a free retry would deliver twice for one payment)."""
-    pool = _QuotaPool(today=date.today())
+    pool = _QuotaPool(today=FROZEN_DAY)
     bot = _Bot(no_file_id=True)
     extractor = _Extractor(tmp_path)
     queue = _Queue()
@@ -385,7 +403,7 @@ async def test_the_final_size_ceiling_gives_the_slot_back(
 ) -> None:
     """A file the transport ceiling refuses settles quietly with no delivery —
     the slot must not survive the refusal."""
-    pool = _QuotaPool(today=date.today())
+    pool = _QuotaPool(today=FROZEN_DAY)
     bot = _Bot()
 
     await _run(
@@ -403,7 +421,7 @@ async def test_a_refund_never_crosses_into_the_new_day() -> None:
     is never taken out of today's counter — and the guard itself lives in the
     SQL, not only in the caller's good behaviour."""
     pool = _QuotaPool(
-        today=date.today(), daily=2, claimed_on=date.today() - timedelta(days=1)
+        today=FROZEN_DAY, daily=2, claimed_on=FROZEN_DAY - timedelta(days=1)
     )
 
     gave_back = await database.refund_download_claim(cast(Any, pool), USER_ID)
@@ -413,3 +431,34 @@ async def test_a_refund_never_crosses_into_the_new_day() -> None:
     refund_sql = next(s for s in pool.statements if REFUND in s)
     assert "last_download_date" in refund_sql, "the refund is bound to its day"
     assert "daily_downloads > 0" in refund_sql, "and can never underflow"
+
+
+
+async def test_a_job_that_crosses_midnight_keeps_its_claim_on_the_day_it_made_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The day guard end to end, through the real worker: a job that claims its
+    slot before midnight and fails after it must never take the refund out of
+    the new day's counter.
+
+    The claim runs on day one (the worker's clock); every refund runs on day
+    two (the database's own clock — this job spanned midnight). The guard in
+    the SQL — not the caller's good behaviour — refuses to decrement a counter
+    that no longer reads as that day: day one keeps its claims, day two's
+    counter is never touched. This is what
+    ``test_a_refund_never_crosses_into_the_new_day`` means when it is a whole
+    job, not one statement, that crosses midnight."""
+    day_one = date(2026, 9, 29)
+    day_two = date(2026, 9, 30)
+    monkeypatch.setattr(worker, "today_local", lambda: day_one)
+    monkeypatch.setattr(database, "today_local", lambda: day_two)
+    pool = _QuotaPool(today=day_one)
+
+    await _run(monkeypatch, pool, _Bot(refusing=True), _Extractor(tmp_path))
+
+    assert pool.count(CLAIM) == 3, "three attempts, three claims — all on day one"
+    assert pool.count(REFUND) == 3, "every attempt asked for its slot back"
+    assert pool.daily == PRE_JOB + 3, (
+        "the day-one counter keeps its claims: a refund never crosses midnight"
+    )
+    assert pool.users[USER_ID]["last_download_date"] == day_one
