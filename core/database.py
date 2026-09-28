@@ -1085,23 +1085,57 @@ async def count_users(pool: asyncpg.Pool) -> int:
 
 
 async def recent_users(
-    pool: asyncpg.Pool, *, offset: int = 0, limit: int = 6
+    pool: asyncpg.Pool,
+    *,
+    older_than: tuple[datetime, int] | None = None,
+    newer_than: tuple[datetime, int] | None = None,
+    limit: int = 6,
 ) -> list[asyncpg.Record]:
     """One page of accounts, newest first — the Users screen's listing.
 
-    Ordered by ``created_at`` (with the id as tie-break) so the pages are stable
-    while an operator flips through them: two rows created in the same
-    millisecond cannot swap places between one page and the next.
+    Keyset paging on ``(created_at, telegram_id)``: every page is keyed past the
+    row the operator last saw, so the page after a tap is the one after the rows
+    already shown — an account that signs up in between moves nothing. An
+    ``OFFSET`` walk cannot promise that: every insert shifts what the next skip
+    lands on, tie-break or not, and a deep skip makes the database count its way
+    past everything it skips. ``newer_than`` walks the other way — the "prev"
+    arrow — and hands its page back in display order.
     """
+    columns = "telegram_id, username, language, is_premium, created_at"
+    if newer_than is not None:
+        rows = await pool.fetch(
+            f"""
+            SELECT {columns} FROM users
+             WHERE (created_at, telegram_id) > ($1, $2)
+             ORDER BY created_at ASC, telegram_id ASC
+             LIMIT $3
+            """,
+            newer_than[0],
+            newer_than[1],
+            limit,
+        )
+        return list(reversed(rows))
+    if older_than is not None:
+        return list(
+            await pool.fetch(
+                f"""
+                SELECT {columns} FROM users
+                 WHERE (created_at, telegram_id) < ($1, $2)
+                 ORDER BY created_at DESC, telegram_id DESC
+                 LIMIT $3
+                """,
+                older_than[0],
+                older_than[1],
+                limit,
+            )
+        )
     return list(
         await pool.fetch(
-            """
-            SELECT telegram_id, username, language, is_premium, created_at
-              FROM users
+            f"""
+            SELECT {columns} FROM users
              ORDER BY created_at DESC, telegram_id DESC
-             OFFSET $1 LIMIT $2
+             LIMIT $1
             """,
-            offset,
             limit,
         )
     )

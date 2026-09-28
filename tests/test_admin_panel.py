@@ -10,7 +10,7 @@ else, including for a forwarded message whose buttons travel with it.
 from __future__ import annotations
 
 import inspect
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import pytest
@@ -422,7 +422,7 @@ def test_an_unknown_state_is_shown_as_it_is() -> None:
 
 def test_every_panel_button_has_somewhere_to_go() -> None:
     """Every destination any panel keyboard can produce must be answered in the
-    module — including the templated ones (``usr:page:<offset>``,
+    module — including the templated ones (``usr:page:<offset>:<direction>:<key>``,
     ``txt:key:<name>``), which appear in the source as an f-string prefix rather
     than as a literal. A stale button from an older keyboard is included on
     purpose: it must land on a *living* screen, never an unhandled callback."""
@@ -431,8 +431,26 @@ def test_every_panel_button_has_somewhere_to_go() -> None:
     offered |= {data for _, data in _buttons(admin_module._panel_keyboard("en"))}
     offered |= {data for _, data in _buttons(admin_module._section_keyboard("en", "stats"))}
     offered |= {data for _, data in _buttons(admin_module._system_keyboard("en"))}
-    offered |= {data for _, data in _buttons(admin_module._users_keyboard("en", offset=0, total=50))}
-    offered |= {data for _, data in _buttons(admin_module._users_keyboard("en", offset=6, total=50))}
+    page_rows = [
+        {
+            "created_at": datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
+            - timedelta(minutes=i),
+            "telegram_id": 4200 + i,
+        }
+        for i in range(6)
+    ]
+    offered |= {
+        data
+        for _, data in _buttons(
+            admin_module._users_keyboard("en", offset=0, total=50, rows=page_rows)
+        )
+    }
+    offered |= {
+        data
+        for _, data in _buttons(
+            admin_module._users_keyboard("en", offset=6, total=50, rows=page_rows)
+        )
+    }
     offered |= {data for _, data in _buttons(admin_module._broadcast_keyboard("en"))}
     offered |= {data for _, data in _buttons(admin_module._done_keyboard("en"))}
     offered |= {data for _, data in _buttons(admin_module._support_keyboard("en", configured=True))}
@@ -492,13 +510,34 @@ def users_db(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
             "username": "ali" if i == 0 else None,
             "language": "fa" if i % 2 else "en",
             "is_premium": i == 0,
-            "created_at": datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc),
+            "created_at": datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
+            - timedelta(minutes=i),
         }
         for i in range(8)
     ]
 
-    async def recent_users(pool: Any, *, offset: int = 0, limit: int = 6) -> list[dict[str, Any]]:
-        return rows[offset : offset + limit]
+    async def recent_users(
+        pool: Any,
+        *,
+        older_than: tuple[datetime, int] | None = None,
+        newer_than: tuple[datetime, int] | None = None,
+        limit: int = 6,
+    ) -> list[dict[str, Any]]:
+        if newer_than is not None:
+            above = [
+                row
+                for row in rows
+                if (row["created_at"], row["telegram_id"]) > newer_than
+            ]
+            return above[-limit:]
+        if older_than is not None:
+            below = [
+                row
+                for row in rows
+                if (row["created_at"], row["telegram_id"]) < older_than
+            ]
+            return below[:limit]
+        return rows[:limit]
 
     async def search_users(pool: Any, query: str, *, limit: int = 6) -> list[dict[str, Any]]:
         return rows[:1]
@@ -614,9 +653,174 @@ async def test_the_users_screen_counts_totals_and_never_dumps_the_table(
     assert "ali" in text, "the newest accounts, one page of them"
     destinations = dict(_buttons(keyboard))
     assert destinations["🔎 Search"] == "usr:search"
-    assert destinations["▶️ Next"] == "usr:page:6", "a next page while there is more"
+    last = users_db[5]
+    key = round(last["created_at"].timestamp() * 1_000_000)
+    assert destinations["▶️ Next"] == f"usr:page:6:older:{key}:{last['telegram_id']}", (
+        "a next page while there is more — keyed at the last row shown"
+    )
     assert destinations["⬅️ Back"] == "admin:cat_users", "back to its category"
     assert destinations["🏠 Home"] == "menu:home"
+
+
+# ---------------------------------------------------------------------------
+# The users listing: pages that don't shift underfoot
+# ---------------------------------------------------------------------------
+
+
+class _UsersPool:
+    """A users table in memory — the listing statements really apply.
+
+    Unlike the ``users_db`` seam above, ``recent_users`` stays itself here: a
+    page is *keyed* at a row, and this table is where that promise is kept —
+    or, before the keyset walk, quietly broken by an OFFSET that re-counts
+    whatever landed since the operator last tapped.
+    """
+
+    def __init__(self, size: int = 12) -> None:
+        base = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
+        self.rows: list[dict[str, Any]] = [
+            {
+                "telegram_id": 4200 + i,
+                "username": f"u{i:02d}",
+                "language": "en",
+                "is_premium": False,
+                "created_at": base - timedelta(minutes=i),
+            }
+            for i in range(size)
+        ]
+
+    def sign_up(self) -> None:
+        """A brand-new account — the newest row in the table."""
+        self.rows.insert(
+            0,
+            {
+                "telegram_id": 9000,
+                "username": "newcomer",
+                "language": "en",
+                "is_premium": False,
+                "created_at": self.rows[0]["created_at"] + timedelta(minutes=1),
+            },
+        )
+
+    async def fetch(self, query: str, *args: Any) -> list[Any]:
+        flat = " ".join(query.split())
+        rows = sorted(
+            self.rows,
+            key=lambda row: (row["created_at"], row["telegram_id"]),
+            reverse="DESC" in flat,
+        )
+        if "(created_at, telegram_id) <" in flat:  # the page keyed past a row
+            older = [
+                row
+                for row in rows
+                if (row["created_at"], row["telegram_id"]) < (args[0], args[1])
+            ]
+            return older[: args[2]]
+        if "(created_at, telegram_id) >" in flat:  # or walking back the other way
+            newer = [
+                row
+                for row in rows
+                if (row["created_at"], row["telegram_id"]) > (args[0], args[1])
+            ]
+            return newer[: args[2]]
+        if "OFFSET" in flat:  # the un-keyed walk: whatever is in the table now
+            return rows[args[0] : args[0] + args[1]]
+        return rows[: args[0]]
+
+
+@pytest.fixture
+def users_table(monkeypatch: pytest.MonkeyPatch) -> _UsersPool:
+    """The listing against a real in-memory table — ``recent_users`` stays
+    itself here; only the screen's side reads answer without a database."""
+    pool = _UsersPool()
+
+    async def admin_stats(pool: Any, today: Any) -> dict[str, Any]:
+        return {
+            "users": len(pool.rows),
+            "premium": 0,
+            "new_users": 0,
+            "active_today": 0,
+            "downloads_today": 0,
+            "cache_rows": 0,
+            "blocks_24h": 0,
+            "pending_txns": 0,
+        }
+
+    async def language_counts(pool: Any) -> list[Any]:
+        return []
+
+    async def count_users(pool: Any) -> int:
+        return len(pool.rows)
+
+    monkeypatch.setattr(panel_module.database, "admin_stats", admin_stats)
+    monkeypatch.setattr(panel_module.database, "language_counts", language_counts)
+    monkeypatch.setattr(panel_module.database, "count_users", count_users)
+    return pool
+
+
+async def test_a_sign_up_between_taps_does_not_shift_the_next_page(
+    users_table: _UsersPool,
+) -> None:
+    """P5.6, pinned: a page is keyed at the rows the operator last saw.
+
+    Twelve accounts, page one shown; between the taps a new account signs up —
+    the newest row, exactly the one an OFFSET walk slides *into* the window.
+    The page behind "Next" must still be the six rows that follow what was
+    shown: no second helping of page one, and nobody skipped over at the far
+    end.
+    """
+    pool = users_table
+    shown = [row["username"] for row in pool.rows[:6]]
+    coming = [row["username"] for row in pool.rows[6:12]]
+    _, keyboard = await admin_module.panel_screen(
+        "users", cast(Any, pool), cast(Any, object()), None, lang="en"
+    )
+    next_tap = dict(_buttons(keyboard))["▶️ Next"]
+
+    pool.sign_up()  # between the taps
+
+    bot = RecordingBot()
+    await admin_module.on_users_page(
+        _callback(bot, next_tap), cast(Any, pool), lang="en"
+    )
+
+    listing = bot.screens[-1]
+    for name in coming:
+        assert f"@{name}" in listing, f"{name} belongs to the page after this one"
+    for name in shown:
+        assert f"@{name}" not in listing, f"{name} was already on the previous page"
+    assert "@newcomer" not in listing, "and the newcomer is no business of this page"
+
+
+async def test_the_prev_arrow_walks_back_over_the_rows_it_came_from(
+    users_table: _UsersPool,
+) -> None:
+    """Back is not "offset zero": it is the page *above* the rows just shown —
+    still true when the table grew while the operator was reading."""
+    pool = users_table
+    shown = [row["username"] for row in pool.rows[:6]]
+    _, keyboard = await admin_module.panel_screen(
+        "users", cast(Any, pool), cast(Any, object()), None, lang="en"
+    )
+    bot = RecordingBot()
+    await admin_module.on_users_page(
+        _callback(bot, dict(_buttons(keyboard))["▶️ Next"]), cast(Any, pool), lang="en"
+    )
+    prev_tap = dict(_buttons(bot.keyboards[-1]))["◀️ Prev"]
+
+    pool.sign_up()  # between the taps
+
+    back = RecordingBot()
+    await admin_module.on_users_page(
+        _callback(back, prev_tap), cast(Any, pool), lang="en"
+    )
+
+    listing = back.screens[-1]
+    for name in shown:
+        assert f"@{name}" in listing, "the page the operator came from"
+    assert "@u06" not in listing, "the cursor row stays where it was"
+    assert "@newcomer" not in listing
+
 
 
 async def test_the_lookup_is_its_own_step_and_answers_with_a_screen(
@@ -639,7 +843,15 @@ async def test_the_lookup_is_its_own_step_and_answers_with_a_screen(
 
 @pytest.mark.parametrize(
     "data",
-    ("admin:users", "admin:failures", "admin:system", "admin:settings", "usr:search", "usr:page:0"),
+    (
+        "admin:users",
+        "admin:failures",
+        "admin:system",
+        "admin:settings",
+        "usr:search",
+        "usr:page:0",
+        "usr:page:6:older:1758638400000000:4205",
+    ),
 )
 async def test_a_crafted_admin_callback_still_needs_the_right_id(data: str) -> None:
     """Every route repeats the check server-side: a forwarded keyboard travels

@@ -15,7 +15,7 @@ something is broken is the one screen that must never break.
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import asyncpg
 
@@ -104,15 +104,28 @@ def _user_line(row: asyncpg.Record, lang: str) -> str:
     )
 
 
-async def users_text(pool: asyncpg.Pool, lang: str = DEFAULT_LANG, *, offset: int = 0) -> str:
+async def users_text(
+    pool: asyncpg.Pool,
+    lang: str = DEFAULT_LANG,
+    *,
+    offset: int = 0,
+    older_than: tuple[datetime, int] | None = None,
+    newer_than: tuple[datetime, int] | None = None,
+) -> tuple[str, list[asyncpg.Record]]:
     """Totals over everybody, then one page of the newest accounts.
 
     Two cheap reads rather than one clever one: the totals answer "how many",
     the page answers "who". Newest first — the accounts an operator looks up are
-    almost always the ones that just arrived.
+    almost always the ones that just arrived. The page is keyed at the row the
+    operator last saw (``older_than``/``newer_than``), so what answers is the
+    page after the rows already shown — an account that signs up between two
+    taps shifts nothing. The rows come back with the text because the paging
+    arrows are keyed at them.
     """
     stats = await database.admin_stats(pool, today_local())
-    rows = await database.recent_users(pool, offset=offset, limit=USERS_PAGE_SIZE)
+    rows = await database.recent_users(
+        pool, older_than=older_than, newer_than=newer_than, limit=USERS_PAGE_SIZE
+    )
     if rows:
         listing = "\n".join(
             (
@@ -127,7 +140,7 @@ async def users_text(pool: asyncpg.Pool, lang: str = DEFAULT_LANG, *, offset: in
         )
     else:
         listing = t("admin.users_empty", lang)
-    return t(
+    text = t(
         "admin.users",
         lang,
         users=stats["users"],
@@ -137,6 +150,7 @@ async def users_text(pool: asyncpg.Pool, lang: str = DEFAULT_LANG, *, offset: in
         languages=await _languages_line(pool, lang),
         listing=listing,
     )
+    return text, rows
 
 
 async def users_search_text(pool: asyncpg.Pool, query: str, lang: str = DEFAULT_LANG) -> str:

@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 import asyncpg
@@ -718,28 +719,42 @@ def _done_keyboard(lang: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def _users_keyboard(lang: str, *, offset: int, total: int) -> InlineKeyboardMarkup:
+def _page_token(offset: int, direction: str, row: Any) -> str:
+    """One paging arrow's callback: where the tap lands and the row it is keyed
+    at — the window follows the rows already seen, never a count of them."""
+    us = round(row["created_at"].timestamp() * 1_000_000)
+    return f"usr:page:{offset}:{direction}:{us}:{int(row['telegram_id'])}"
+
+
+def _users_keyboard(
+    lang: str, *, offset: int, total: int, rows: list[Any]
+) -> InlineKeyboardMarkup:
     """The Users screen: a lookup, paging while there is more, and the way back.
 
     The arrows appear only when they have somewhere to go — a disabled-looking
-    button that wraps around is how paging becomes a guessing game. Rows are
-    computed from what is actually drawn, so the layout stays honest when one
-    arrow is missing.
+    button that wraps around is how paging becomes a guessing game. Each arrow
+    is keyed at the edge row it walks past, so an account that signs up while
+    the operator reads shifts nothing. Rows are computed from what is actually
+    drawn, so the layout stays honest when one arrow is missing.
     """
     builder = InlineKeyboardBuilder()
     builder.button(text=t("admin.btn_search", lang), callback_data="usr:search")
     widths = [1]
     nav = 0
-    if offset > 0:
+    if offset > 0 and rows:
         builder.button(
             text=t("admin.btn_prev", lang),
-            callback_data=f"usr:page:{max(0, offset - panel.USERS_PAGE_SIZE)}",
+            callback_data=_page_token(
+                max(0, offset - panel.USERS_PAGE_SIZE), "newer", rows[0]
+            ),
         )
         nav += 1
-    if offset + panel.USERS_PAGE_SIZE < total:
+    if offset + panel.USERS_PAGE_SIZE < total and rows:
         builder.button(
             text=t("admin.btn_next", lang),
-            callback_data=f"usr:page:{offset + panel.USERS_PAGE_SIZE}",
+            callback_data=_page_token(
+                offset + panel.USERS_PAGE_SIZE, "older", rows[-1]
+            ),
         )
         nav += 1
     if nav:
@@ -814,11 +829,20 @@ async def panel_screen(
     return Screen(await panel.header(pool, lang), _panel_keyboard(lang))
 
 
-async def _users_screen(pool: asyncpg.Pool, lang: str, *, offset: int = 0) -> Screen:
+async def _users_screen(
+    pool: asyncpg.Pool,
+    lang: str,
+    *,
+    offset: int = 0,
+    older_than: tuple[datetime, int] | None = None,
+    newer_than: tuple[datetime, int] | None = None,
+) -> Screen:
     """Totals over everybody, then one page of the newest accounts."""
-    text = await panel.users_text(pool, lang, offset=offset)
+    text, rows = await panel.users_text(
+        pool, lang, offset=offset, older_than=older_than, newer_than=newer_than
+    )
     total = await database.count_users(pool)
-    return Screen(text, _users_keyboard(lang, offset=offset, total=total))
+    return Screen(text, _users_keyboard(lang, offset=offset, total=total, rows=rows))
 
 
 async def _broadcast_screen(pool: asyncpg.Pool, lang: str) -> Screen:
@@ -1272,7 +1296,14 @@ async def on_users_page(
     pool: asyncpg.Pool,
     lang: str = DEFAULT_LANG,
 ) -> None:
-    """A paging arrow: the Users screen again, one page further along."""
+    """A paging arrow: the Users screen again, one page further along.
+
+    The tap carries the page's offset (for the "shown N–M" line) and the row it
+    is keyed at, so the rows that answer are the ones after — or before — the
+    rows already shown: an account that signs up between two taps shifts
+    nothing. A button from an older keyboard carries no key; it lands on the top
+    page rather than nowhere.
+    """
     if not get_settings().is_admin(cb.from_user.id):
         await cb.answer(t("admin.only", lang), show_alert=True)
         return
@@ -1280,13 +1311,28 @@ async def on_users_page(
     if message is None:
         await cb.answer(t("admin.stale", lang), show_alert=True)
         return
-    raw = (cb.data or "").rsplit(":", 1)[-1]
-    try:
-        offset = max(0, int(raw))
-    except ValueError:
-        offset = 0
+    parts = (cb.data or "").split(":")
+    offset = 0
+    older_than: tuple[datetime, int] | None = None
+    newer_than: tuple[datetime, int] | None = None
+    if len(parts) == 6:
+        try:
+            offset = max(0, int(parts[2]))
+            key = (
+                datetime.fromtimestamp(int(parts[4]) / 1_000_000, tz=timezone.utc),
+                int(parts[5]),
+            )
+        except (ValueError, OSError, OverflowError):
+            offset = 0
+        else:
+            if parts[3] == "newer":
+                newer_than = key
+            else:
+                older_than = key
     await cb.answer()
-    screen = await _users_screen(pool, lang, offset=offset)
+    screen = await _users_screen(
+        pool, lang, offset=offset, older_than=older_than, newer_than=newer_than
+    )
     await _edit(message, screen.text, reply_markup=screen.keyboard)
 
 
