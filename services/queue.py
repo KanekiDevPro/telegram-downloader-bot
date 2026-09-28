@@ -125,6 +125,12 @@ class DownloadTask:
     is_live: Optional[bool] = None
     size_estimate: Optional[int] = None
 
+    #: Quota bookkeeping (worker-internal): the daily slot this run claimed
+    #: and has not yet either refunded (it failed before any delivery) or
+    #: spent (the user got their file). Transient accounting; it rides the
+    #: payload only so a requeued job's books survive the hand-back.
+    quota_held: bool = False
+
     def to_payload(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
 

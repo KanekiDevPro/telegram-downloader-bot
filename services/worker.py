@@ -181,6 +181,23 @@ async def _requeue_for_shutdown(queue: TaskQueue, task: DownloadTask) -> None:
         logger.exception("could not requeue interrupted task %s", task.url)
 
 
+async def _refund_quota(pool: asyncpg.Pool, task: DownloadTask) -> None:
+    """Hand back the daily slot this attempt claimed: it bought the user nothing.
+
+    A no-op when nothing was claimed (the job failed before the quota gate) and
+    when the slot already bought a delivery (a bookkeeping blip after the send
+    is not a delivery failure). Never raises: accounting must not add a second
+    failure to the first.
+    """
+    if not task.quota_held:
+        return
+    task.quota_held = False
+    try:
+        await database.refund_download_claim(pool, task.telegram_id)
+    except Exception:
+        logger.exception("could not refund the quota claim of %s", task.url)
+
+
 async def _process_with_retry(
     task: DownloadTask,
     bot: Bot,
@@ -217,6 +234,9 @@ async def _process_with_retry(
             # The *user's* text is chosen by code, in their language (see
             # ``error_message``); ``exc.message`` stays the engine's own Persian
             # wording, which is what the log and an admin reading it want.
+            # This attempt bought the user nothing: its slot comes back now,
+            # before the permanent-failure break below can skip past it.
+            await _refund_quota(pool, task)
             last_error = error_message(exc.code, task.lang, fallback=exc.message)
             last_failure = exc
             logger.warning("attempt %s/%s failed for %s (%s)", attempt, MAX_ATTEMPTS, task.url, exc.code)
@@ -226,6 +246,9 @@ async def _process_with_retry(
                 # another wait and cannot change the answer.
                 break
         except Exception as exc:
+            # Same rule as above; the no-op matters just as much here: a
+            # failure *after* the delivery keeps its slot spent.
+            await _refund_quota(pool, task)
             last_error = t("work.internal_error", task.lang, detail=str(exc))
             last_failure = None
             logger.exception("attempt %s/%s crashed for %s", attempt, MAX_ATTEMPTS, task.url)
@@ -566,6 +589,7 @@ async def _claim_quota(
     if not await database.can_claim_download(pool, task.telegram_id, limit, today_local()):
         await _edit(status, _on_card(card, t("work.quota_exhausted", lang, limit=limit)))
         return False
+    task.quota_held = True
     return True
 
 
@@ -597,6 +621,8 @@ async def _finish_upload(
         actual_size = sum(path.stat().st_size for path in files)
         if actual_size > settings.upload_limit_bytes:
             await _edit(status, _on_card(card, t("work.final_too_big", lang)))
+            # A ceiling refusal delivers nothing: the slot goes back.
+            await _refund_quota(pool, task)
             return 0.0
 
         # The produced file testifies before it is captioned: a "MP3 · 320 kbps"
@@ -637,6 +663,11 @@ async def _finish_upload(
                 delivered = await _upload(
                     bot, task.chat_id, result, lang, track=track, cover=cover, source_url=task.url
                 )
+            except _SentNoFileId:
+                # The bytes are with the user; only their file_id failed to
+                # come back. The slot bought a delivery and stays spent.
+                task.quota_held = False
+                raise
             except TelegramEntityTooLarge as exc:
                 # The transport's own ceiling refused the finished file (50 MB on
                 # the cloud — and on a local server without ``--local``). In its
@@ -649,6 +680,10 @@ async def _finish_upload(
                 # Telegram said no (bad file, revoked bot, full storage…) — a
                 # delivery failure, not an extraction one: the file itself is fine.
                 raise ExtractionError("DELIVERY_FAILED", str(exc)) from exc
+            # The send is confirmed: the slot is spent, never refunded, even
+            # if the bookkeeping below blips (a cache write after the bytes
+            # landed is not a delivery failure).
+            task.quota_held = False
         if delivered.cacheable:
             # The canonical name this file goes by — the song for a track, the
             # media's own title otherwise — so a replay's card is the first send's
@@ -801,6 +836,15 @@ async def _deliver_via_fallback(
     await _finish_upload(task, bot, pool, status, result, card=card, track=track)
 
 
+class _SentNoFileId(RuntimeError):
+    """A send that landed but carried no usable id back.
+
+    Raised *after* Telegram accepted the bytes (the file is in the chat), so
+    the failure that carries it is a bookkeeping one: the daily slot it spent
+    stays spent (see ``_refund_quota``).
+    """
+
+
 def _file_id(media: Any) -> str:
     """Extract the file_id from a sent media object.
 
@@ -809,7 +853,7 @@ def _file_id(media: Any) -> str:
     """
     file_id = getattr(media, "file_id", None)
     if not file_id:
-        raise RuntimeError("Telegram returned no file_id for the uploaded media")
+        raise _SentNoFileId("Telegram returned no file_id for the uploaded media")
     return str(file_id)
 
 
@@ -998,7 +1042,7 @@ def _photo_id(message: Any) -> str:
     """The largest size of a sent photo — the one worth caching."""
     sizes = getattr(message, "photo", None) or []
     if not sizes:
-        raise RuntimeError("Telegram returned no photo for the uploaded image")
+        raise _SentNoFileId("Telegram returned no photo for the uploaded image")
     return str(sizes[-1].file_id)
 
 

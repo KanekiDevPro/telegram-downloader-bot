@@ -12,7 +12,7 @@ from typing import Any, Optional
 import asyncpg
 
 from core.config import get_settings
-from core.utils import canonical_url, sha256_hex, utcnow
+from core.utils import canonical_url, sha256_hex, today_local, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -498,6 +498,29 @@ async def can_claim_download(pool: asyncpg.Pool, telegram_id: int, limit: int, t
         telegram_id,
         today,
         limit,
+    )
+    return row is not None
+
+
+async def refund_download_claim(pool: asyncpg.Pool, telegram_id: int) -> bool:
+    """Give back today's claimed slot when the job failed before any delivery.
+
+    The mirror of :func:`can_claim_download`: decrement only while the row still
+    counts *today*, so a claim made before midnight is never refunded against
+    the new day's counter, and never below zero. ``False`` = nothing to give
+    back (no claim was made, or the day has already rolled over).
+    """
+    row = await pool.fetchrow(
+        """
+        UPDATE users
+           SET daily_downloads = daily_downloads - 1
+         WHERE telegram_id = $1
+           AND last_download_date = $2::date
+           AND daily_downloads > 0
+        RETURNING daily_downloads
+        """,
+        telegram_id,
+        today_local(),
     )
     return row is not None
 
