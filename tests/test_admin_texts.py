@@ -217,6 +217,10 @@ def test_a_valid_replacement_is_accepted() -> None:
 
 
 async def test_a_refused_edit_is_not_stored_and_says_why(_desk: _TextDB) -> None:
+    """P4.4, pinned: a refused value is answered with «send it again» — so the
+    edit must stay *armed* for that retry. The flow used to clear its state
+    before validating, and the admin's next text matched no handler at all:
+    it fell through to the user router and was answered as a link."""
     bot = RecordingBot()
     state = _fsm()
     await _open_editor(bot, state, f"{admin_module.TXT_PREFIX}edit:en:{KEY}")
@@ -225,8 +229,26 @@ async def test_a_refused_edit_is_not_stored_and_says_why(_desk: _TextDB) -> None
     await admin_module.on_text_edit_value(_message("Hi {oops}", bot), state, object(), lang="en")
 
     assert _desk.rows == {} and _desk.audit == []
-    assert await state.get_state() is None, "the flow ends — no half-saved step"
+    assert await state.get_state() == admin_module.AdminStates.text_edit.state, (
+        "the re-prompt promised another try — the edit stays armed"
+    )
     assert any("Not saved" in text for text in bot.screens)
+
+
+async def test_an_empty_replacement_re_prompts_with_the_edit_still_armed(_desk: _TextDB) -> None:
+    """The empty-value branch, pinned the same way: it asks for the text again,
+    with the keyboard — the state that routes the retry must survive it."""
+    bot = RecordingBot()
+    state = _fsm()
+    await _open_editor(bot, state, f"{admin_module.TXT_PREFIX}edit:en:{KEY}")
+
+    await admin_module.on_text_edit_value(_message("   ", bot), state, object(), lang="en")
+
+    assert _desk.rows == {} and _desk.audit == []
+    assert await state.get_state() == admin_module.AdminStates.text_edit.state, (
+        "the prompt asked for the text again — the edit stays armed"
+    )
+    assert bot.keyboards, "the re-prompt carries its keyboard"
 
 
 # ---------------------------------------------------------------------------

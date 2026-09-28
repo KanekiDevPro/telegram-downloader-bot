@@ -1135,7 +1135,6 @@ async def on_text_edit_value(
     data = await state.get_data()
     key = str(data.get("txt_key") or "")
     code = str(data.get("txt_lang") or "")
-    await state.clear()
     if key not in MESSAGES or code not in LANGS or not text_store.editable(key):
         await message.answer(t("admin.stale", lang))
         return
@@ -1170,6 +1169,10 @@ async def on_text_edit_value(
         )
         return
     before = text_store.override_for(key, code)
+    # The edit is settled here: from this point the flow cannot re-prompt,
+    # so the state that armed it goes — every branch above keeps it for the
+    # retry its own message promises.
+    await state.clear()
     await database.set_text_override(pool, key, code, value, updated_by=int(admin_id or 0))
     await text_store.saved(key, code, value)
     await database.record_fix_event(
