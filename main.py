@@ -534,10 +534,6 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
     # held here until done (the create_task GC hazard) and drained at shutdown
     # like the rest. It serves the *first* request; the workers serve the rest.
     workers = [warmup]
-    # The rule the comment above promises, enforced: no worker dequeues against
-    # a cold extractor catalogue. Boot holds here until the warm-up lands —
-    # shielded, so a cancelled boot still leaves the warm-up its strong reference.
-    await asyncio.shield(warmup)
     workers += [
         asyncio.create_task(
             run_worker(i, stop_event, bot, pool, dp["queue"], extractor, cobalt),
