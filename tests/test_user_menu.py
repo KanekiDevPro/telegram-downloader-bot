@@ -1598,7 +1598,7 @@ async def test_the_same_tap_twice_is_one_download(
     )
     # The second tap lands where the router sends a tap on a consumed menu.
     await user_module.on_stale_media_tap(
-        _callback(bot, "fmt:video:720"), _user(), lang=FA
+        _callback(bot, "fmt:video:720"), state, _user(), lang=FA
     )
 
     assert len(queue.tasks) == 1, "one tap, one download"
@@ -1609,7 +1609,9 @@ async def test_a_tap_on_a_dead_menu_is_answered_not_run() -> None:
     """An old menu (or a forwarded one) still must not leave a spinner."""
     bot = RecordingBot()
 
-    await user_module.on_stale_media_tap(_callback(bot, "fmt:video:720"), _user(), lang=FA)
+    await user_module.on_stale_media_tap(
+        _callback(bot, "fmt:video:720"), _fresh_state(), _user(), lang=FA
+    )
 
     assert bot.answers[0].show_alert is True
 
@@ -2879,3 +2881,103 @@ async def test_a_cached_solo_link_still_sends_itself_instead_of_asking(
 
     assert await state.get_state() is None, "a solo link is never asked"
     assert len(replayed) == 1, "the stored file answered the auto-send at once"
+
+# ---------------------------------------------------------------------------
+# The double-tap guard knows which link a tap is for
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _queueing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cached menus, no cache replay, no preflight refusals — taps reach the queue."""
+
+    async def no_get_cached(pool: Any, url: str, media_format: str, quality: object) -> None:
+        return None
+
+    class _NoRefusal:
+        @staticmethod
+        def youtube_preflight(url: str, cookie_file: Any, **kwargs: Any) -> Any:
+            return SimpleNamespace(refused=False, message="")
+
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_get_cached)
+    monkeypatch.setattr(user_module, "preflight", _NoRefusal())
+
+
+async def _intake(bot: RecordingBot, state: FSMContext, queue: Any, url: str) -> None:
+    await user_module.on_text_with_url(
+        _message(url, bot), state, _user(), object(), queue, bot, lang=FA
+    )
+
+
+async def test_two_links_tapped_with_the_same_quality_are_two_downloads(
+    _queueing: None,
+) -> None:
+    """P5.2, pinned: the double-tap guard keyed on "format:tier" alone, so two
+    *different* links tapped with the same quality within the window collided —
+    the second tap was swallowed as a duplicate and nothing happened, however
+    often the user pressed it. The guard's key names the link too."""
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    state = _fresh_state()
+    queue = _fake_queue()
+
+    for url in ("https://youtu.be/abc", "https://youtu.be/xyz"):
+        await _intake(bot, state, queue, url)
+        await user_module.on_format_chosen(
+            _callback(bot, "fmt:video:720"), state, _user(), object(), queue, bot, lang=FA
+        )
+
+    assert [task.url for task in queue.tasks] == [
+        "https://youtu.be/abc",
+        "https://youtu.be/xyz",
+    ], "two links, two downloads — never one swallowed tap"
+
+
+async def test_the_impatient_re_tap_is_still_swallowed_for_the_same_link(
+    _queueing: None,
+) -> None:
+    """The quiet swallow survives where it belongs: a repeat tap for the very
+    request that just left for the queue *for the link the state still names*.
+    The guard is URL-keyed now, so the stale handler keys it the same way."""
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    state = _fresh_state()
+    queue = _fake_queue()
+
+    await _intake(bot, state, queue, "https://youtu.be/abc")
+    await user_module.on_format_chosen(
+        _callback(bot, "fmt:video:720"), state, _user(), object(), queue, bot, lang=FA
+    )
+    # The tapped menu is dead, but the state still names its link — a second
+    # screen for the same link, or a tap landing while the first is running.
+    await state.set_state(DownloadStates.waiting_format)
+    await state.update_data(url="https://youtu.be/abc", offered=["720", "best"])
+    await user_module.on_stale_media_tap(
+        _callback(bot, "fmt:video:720"), state, _user(), lang=FA
+    )
+
+    assert len(queue.tasks) == 1
+    assert not bot.answers[-1].show_alert, "the repeat tap for the same link is quiet"
+
+
+async def test_a_stale_tap_is_never_swallowed_across_links(_queueing: None) -> None:
+    """The other side of the same coin: a stale tap swallows only its *own*
+    link's in-flight request. Link A's 720p is on its way; a 720p tap on link
+    B's dead screen gets the honest answer, not silence."""
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    state = _fresh_state()
+    queue = _fake_queue()
+
+    await _intake(bot, state, queue, "https://youtu.be/abc")
+    await user_module.on_format_chosen(
+        _callback(bot, "fmt:video:720"), state, _user(), object(), queue, bot, lang=FA
+    )
+    await _intake(bot, state, queue, "https://youtu.be/xyz")
+    await user_module.on_stale_media_tap(
+        _callback(bot, "fmt:video:720"), state, _user(), lang=FA
+    )
+
+    assert [task.url for task in queue.tasks] == ["https://youtu.be/abc"]
+    assert bot.answers[-1].show_alert, "a tap for another link gets the honest answer"

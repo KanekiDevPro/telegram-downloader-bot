@@ -327,7 +327,7 @@ async def test_a_stale_media_tap_says_how_to_retry_and_changes_nothing() -> None
     queue = _FakeQueue()
 
     await user_module.on_stale_media_tap(
-        _callback(bot, "fmt:video:1080"), _user(), lang=FA,
+        _callback(bot, "fmt:video:1080"), _state(), _user(), lang=FA,
     )
 
     assert queue.tasks == []

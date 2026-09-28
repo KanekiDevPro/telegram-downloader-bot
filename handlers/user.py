@@ -161,25 +161,38 @@ def _fmt_callback(media_format: str, quality: str) -> str:
 #: impatient re-tap on the same keyboard), and the queue would happily run both.
 _DOUBLE_TAP_WINDOW_S = 5.0
 
-#: Per user: ``(when, which request)`` last accepted for the queue.
-_recent_requests: dict[int, tuple[float, str]] = {}
+#: Per user: ``(when, which request, which bare spelling)`` last accepted.
+_recent_requests: dict[int, tuple[float, str, str]] = {}
 
 
-def _double_tap(user_id: int, request: str, *, now: float | None = None) -> bool:
+def _double_tap(
+    user_id: int, request: str, *, bare: str = "", now: float | None = None
+) -> bool:
     """``True`` when this is the same tap arriving twice — acknowledge and drop.
 
     Server-side on purpose: removing the keyboard is UI, and the UI cannot promise
     "one tap, one download" against a client that sends callbacks faster than
     edits land. The first tap's timestamp is kept, so a third and fourth tap are
     swallowed for the same window.
+
+    ``bare`` is the tap's provenance-free spelling (``fmt:tier``), stored beside
+    the attributed key so a second press of a *consumed* menu — no link left
+    anywhere to attribute it by — is still swallowed as the duplicate it is.
+    Either spelling matches a query, and the shapes never collide (an
+    attributed key is a cache-key digest, a bare spelling never is), so a tap
+    that carries its link is only ever swallowed against that link's request.
     """
     moment = time.monotonic() if now is None else now
     seen = _recent_requests.get(user_id)
-    if seen is not None and seen[1] == request and moment - seen[0] < _DOUBLE_TAP_WINDOW_S:
+    if (
+        seen is not None
+        and request in seen[1:]
+        and moment - seen[0] < _DOUBLE_TAP_WINDOW_S
+    ):
         return True
-    _recent_requests[user_id] = (moment, request)
+    _recent_requests[user_id] = (moment, request, bare)
     if len(_recent_requests) > 4096:  # opportunistic pruning of silent users
-        for uid, (at, _) in list(_recent_requests.items()):
+        for uid, (at, _, _) in list(_recent_requests.items()):
             if moment - at >= _DOUBLE_TAP_WINDOW_S:
                 _recent_requests.pop(uid, None)
     return False
@@ -1996,7 +2009,9 @@ async def on_retry(
 
 
 @router.callback_query(F.data.startswith((FMT_PREFIX, AUDF_PREFIX)))
-async def on_stale_media_tap(cb: CallbackQuery, user: asyncpg.Record, lang: str = DEFAULT_LANG) -> None:
+async def on_stale_media_tap(
+    cb: CallbackQuery, state: FSMContext, user: asyncpg.Record, lang: str = DEFAULT_LANG
+) -> None:
     """A tap on a screen that is no longer up: answer it, change nothing.
 
     The state-scoped handlers above own every *live* menu; this is what a second
@@ -2007,8 +2022,13 @@ async def on_stale_media_tap(cb: CallbackQuery, user: asyncpg.Record, lang: str 
     """
     data = cb.data or ""
     media_format, quality = _parse_format(data)
-    request = f"{media_format}:{quality}" if media_format else data
-    if _double_tap(user["telegram_id"], request):
+    # The guard's key names the link too (see _submit) — the FSM is the only
+    # place this tap's link still lives. Without one, the bare spelling is all
+    # the tap has left, and it still swallows the duplicate it repeats.
+    url = str((await state.get_data()).get("url") or "")
+    bare = f"{media_format}:{quality}" if media_format else data
+    request = cache_service.cache_key(url, media_format, quality) if url and media_format else bare
+    if _double_tap(user["telegram_id"], request, bare=bare):
         await cb.answer()
         return
     await cb.answer(t("intake.stale", lang), show_alert=True)
@@ -2053,11 +2073,13 @@ async def _submit(
     button waiting to be acknowledged, when there is one.
     """
     chat_id = message.chat.id
-    request = f"{media_format}:{quality}"
+    # The guard's key names the *link* too: two different links tapped with
+    # the same quality are two downloads, never one swallowed tap.
+    request = cache_service.cache_key(url, media_format, quality)
 
     # 0) The same tap twice is one download — acknowledged quietly and dropped.
     #    The queue must never see the second copy; the UI alone cannot promise it.
-    if _double_tap(user["telegram_id"], request):
+    if _double_tap(user["telegram_id"], request, bare=f"{media_format}:{quality}"):
         if tap is not None:
             await _ack(tap)
         return

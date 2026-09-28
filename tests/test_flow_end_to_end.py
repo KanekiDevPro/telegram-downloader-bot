@@ -495,7 +495,9 @@ async def test_a_stale_or_expired_tap_is_answered_and_never_queues() -> None:
     queue = _fake_queue()
 
     # A menu predating the current state: the router's stale path answers it.
-    await user_module.on_stale_media_tap(_callback(bot, "fmt:video:720"), _user(), lang=EN)
+    await user_module.on_stale_media_tap(
+        _callback(bot, "fmt:video:720"), _fresh_state(), _user(), lang=EN
+    )
     assert bot.answers[-1].show_alert is True
     assert queue.tasks == []
 
