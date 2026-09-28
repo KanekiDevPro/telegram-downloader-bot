@@ -23,6 +23,7 @@ import pytest
 from test_shutdown_wiring import _offline_wiring as _offline_wiring  # noqa: F401
 
 import main as app_module
+from core.config import Settings
 
 
 async def test_warming_the_catalogue_never_runs_on_the_event_loop(
@@ -49,31 +50,61 @@ async def test_warming_the_catalogue_never_runs_on_the_event_loop(
     )
 
 
-async def test_boot_warms_the_catalogue_in_the_background(
+def _settings_with_workers() -> Settings:
+    """The offline wiring's settings with real workers to order — the shared
+    fixture boots zero of them, and this defect lives in the ordering."""
+    return Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        BOT_TOKEN="42:TESTTOKEN",
+        QUEUE_BACKEND="memory",
+        WORKER_COUNT=2,
+        COOKIE_WATCH_INTERVAL_S=0,
+        HELPER_WATCH_INTERVAL_S=0,
+    )
+
+
+async def test_boot_holds_until_the_catalogue_is_warm_and_only_then_starts_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``build_app`` starts the warm-up and keeps booting: awaiting it would
-    only move the wait into the boot log. And the task is held like every other
-    background task — one collected mid-flight warms nothing at all."""
+    """The warm-up "serves the first request" used to be a hope, not a rule: the
+    workers started in the same tick, so a job that dequeued during the cold
+    import paid it again in its own thread — two threads importing yt-dlp's
+    extractor catalogue at once. Boot holds until the warm-up lands now, so no
+    worker ever starts against a cold catalogue. The task is still held like
+    every other background task — one collected mid-flight warms nothing."""
     gate = asyncio.Event()
     started = asyncio.Event()
+    warm: list[bool] = []
+    done = False
 
     async def slow_warm() -> None:
+        nonlocal done
         started.set()
         await gate.wait()
+        done = True
+
+    async def fake_worker(*args: Any) -> None:
+        warm.append(done)
 
     monkeypatch.setattr(app_module, "warm_extractor_catalogue", slow_warm)
+    monkeypatch.setattr(app_module, "run_worker", fake_worker)
+    monkeypatch.setattr(app_module, "get_settings", _settings_with_workers)
 
+    boot = asyncio.create_task(app_module.build_app(send_digest=False))
     app: dict[str, Any] | None = None
     try:
-        # The timeout is the assertion: build_app must return while the warm-up
-        # is still held behind the gate.
-        app = await asyncio.wait_for(app_module.build_app(send_digest=False), timeout=5)
         await asyncio.wait_for(started.wait(), timeout=5)
+        await asyncio.sleep(0)
+        assert not boot.done(), "boot must wait for the warm-up before the workers start"
+        gate.set()
+        app = await asyncio.wait_for(boot, timeout=5)
+        await asyncio.sleep(0)
+        assert warm and all(warm), "no worker may ever start against a cold catalogue"
         assert any(
             task.get_name() == "extractor-warmup" for task in app["workers"]
         ), "the warm-up is held — and drained at shutdown — like every other task"
     finally:
         gate.set()
+        await asyncio.gather(boot, return_exceptions=True)
         if app is not None:
             await asyncio.gather(*app["workers"], return_exceptions=True)
