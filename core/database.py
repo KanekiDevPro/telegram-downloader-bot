@@ -71,6 +71,10 @@ CREATE TABLE IF NOT EXISTS transactions (
 
 CREATE INDEX IF NOT EXISTS ix_transactions_telegram_id ON transactions (telegram_id);
 CREATE INDEX IF NOT EXISTS ix_transactions_status     ON transactions (status);
+-- One receipt photo is one decision: it may never ride N transactions
+-- (N forwards, N Approve buttons, one payment approved twice).
+CREATE UNIQUE INDEX IF NOT EXISTS ix_transactions_receipt ON transactions
+    (receipt_photo_id) WHERE receipt_photo_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS smart_cache (
     url_hash         CHAR(64) PRIMARY KEY,
@@ -403,13 +407,38 @@ async def get_transaction(pool: asyncpg.Pool, txn_id: uuid.UUID) -> Optional[asy
     return await pool.fetchrow("SELECT * FROM transactions WHERE id = $1", txn_id)
 
 
-async def attach_receipt(pool: asyncpg.Pool, txn_id: uuid.UUID, photo_file_id: str) -> bool:
-    """Attach a receipt photo to a *pending* transaction. False if already processed."""
-    result = await pool.execute(
-        "UPDATE transactions SET receipt_photo_id = $2 WHERE id = $1 AND status = 'pending'",
-        txn_id,
-        photo_file_id,
-    )
+async def attach_receipt(
+    pool: asyncpg.Pool, txn_id: uuid.UUID, photo_file_id: str, telegram_id: int
+) -> bool:
+    """Attach a receipt photo to one's own *pending* transaction.
+
+    False when there is no such pending transaction of that user, or when
+    the photo is already attached to a *different* one: one payment is one
+    decision, never N forwards with N live Approve buttons. The unique index
+    on ``receipt_photo_id`` is the backstop for the race this check cannot
+    see — that race lands as ``False`` too.
+    """
+    try:
+        result = await pool.execute(
+            """
+            UPDATE transactions
+               SET receipt_photo_id = $2
+             WHERE id = $1
+               AND telegram_id = $3
+               AND status = 'pending'
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM transactions t2
+                    WHERE t2.receipt_photo_id = $2
+                      AND t2.id <> $1
+               )
+            """,
+            txn_id,
+            photo_file_id,
+            telegram_id,
+        )
+    except asyncpg.UniqueViolationError:
+        return False
     return result == "UPDATE 1"
 
 

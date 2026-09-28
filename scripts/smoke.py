@@ -144,7 +144,7 @@ async def main() -> int:
     txn = await strategy.begin(row, plan)
     ok &= verdict("transaction begin (pending)", txn["status"] == "pending" and txn["method"] == "manual")
 
-    attached = await strategy.attach_receipt(txn["id"], "AgAC_TEST_RECEIPT_PHOTO_ID")
+    attached = await strategy.attach_receipt(txn["id"], "AgAC_TEST_RECEIPT_PHOTO_ID", TEST_USER_A)
     ok &= verdict("receipt attach", attached)
     stored = await database.get_transaction(pool, txn["id"])
     assert stored is not None
@@ -165,7 +165,7 @@ async def main() -> int:
     ok &= verdict("double-approve blocked", again is None)
 
     txn2 = await strategy.begin(row, plans[1])
-    await strategy.attach_receipt(txn2["id"], "AgAC_TEST_RECEIPT_2")
+    await strategy.attach_receipt(txn2["id"], "AgAC_TEST_RECEIPT_2", TEST_USER_A)
     outcome2 = await strategy.decide(txn2["id"], approved=False)
     ok &= verdict("reject flow", outcome2 is not None and outcome2["status"] == "rejected")
 

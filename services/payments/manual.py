@@ -33,8 +33,12 @@ class ManualPaymentStrategy(PaymentStrategy):
             method=self.method,
         )
 
-    async def attach_receipt(self, txn_id: uuid.UUID, photo_file_id: str) -> bool:
-        return await database.attach_receipt(self._pool, txn_id, photo_file_id)
+    async def attach_receipt(
+        self, txn_id: uuid.UUID, photo_file_id: str, telegram_id: int
+    ) -> bool:
+        return await database.attach_receipt(
+            self._pool, txn_id, photo_file_id, telegram_id
+        )
 
     async def decide(self, txn_id: uuid.UUID, approved: bool) -> Optional[dict[str, Any]]:
         return await database.decide_transaction(self._pool, txn_id, approved)

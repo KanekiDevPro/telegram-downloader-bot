@@ -25,7 +25,9 @@ class PaymentStrategy(ABC):
         """Open a pending transaction for ``user`` + ``plan`` and return it."""
 
     @abstractmethod
-    async def attach_receipt(self, txn_id: uuid.UUID, photo_file_id: str) -> bool:
+    async def attach_receipt(
+        self, txn_id: uuid.UUID, photo_file_id: str, telegram_id: int
+    ) -> bool:
         """Attach proof (receipt) to a transaction; False if it isn't pending."""
 
     @abstractmethod

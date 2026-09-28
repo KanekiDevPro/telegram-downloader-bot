@@ -24,6 +24,7 @@ _COMMENT = re.compile(r"--[^\n]*")
 _DO_BLOCK = re.compile(r"DO \$\$.*?\$\$;", re.S)
 _CREATE_TABLE = re.compile(r"CREATE TABLE IF NOT EXISTS (\w+)\s*\((.*)\)\s*", re.S)
 _CREATE_INDEX = re.compile(r"CREATE INDEX IF NOT EXISTS (\w+)\s+ON (\w+)")
+_CREATE_UNIQUE_INDEX = re.compile(r"CREATE UNIQUE INDEX IF NOT EXISTS (\w+)\s+ON (\w+)")
 _ADD_COLUMN = re.compile(r"ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+)")
 _CREATE_TYPE = re.compile(r"CREATE TYPE (\w+)")
 
@@ -69,6 +70,7 @@ class Catalog:
     def __init__(self) -> None:
         self.tables: dict[str, set[str]] = {}
         self.indexes: set[str] = set()
+        self.unique_indexes: set[str] = set()
         self.types: set[str] = set()
 
     def apply(self, sql: str) -> None:
@@ -84,6 +86,11 @@ class Catalog:
                 name, body = match.group(1), match.group(2)
                 if name not in self.tables:  # IF NOT EXISTS on a table is a no-op
                     self.tables[name] = _columns(body)
+                continue
+            if stmt.startswith("CREATE UNIQUE INDEX"):
+                match = _CREATE_UNIQUE_INDEX.match(stmt)
+                assert match is not None, stmt[:80]
+                self.unique_indexes.add(match.group(1))
                 continue
             if stmt.startswith("CREATE INDEX"):
                 match = _CREATE_INDEX.match(stmt)
@@ -141,6 +148,24 @@ def test_a_fresh_database_gets_every_table() -> None:
         "updated_at",
     }
     assert {"transaction_status", "payment_method"} <= catalog.types
+
+
+def test_a_receipt_photo_belongs_to_one_transaction_only() -> None:
+    """P4.2: the check in ``attach_receipt`` cannot see a race, so the
+    database promises it too — one photo id, one transaction, ever.
+    """
+    catalog = Catalog()
+    catalog.apply(SCHEMA_SQL)
+    assert "ix_transactions_receipt" in catalog.unique_indexes
+    statement = next(
+        stmt
+        for stmt in _statements(SCHEMA_SQL)
+        if "ix_transactions_receipt" in stmt
+    )
+    assert "(receipt_photo_id)" in statement, "on the photo id"
+    assert "WHERE receipt_photo_id IS NOT NULL" in statement, (
+        "and it is partial — NULLs must not collide"
+    )
 
 
 # ---------------------------------------------------------------------------

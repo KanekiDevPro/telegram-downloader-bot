@@ -173,7 +173,7 @@ async def on_receipt_photo(
 
     photo_file_id = photos[-1].file_id
     strategy = payment_service.get(ManualPaymentStrategy.method)
-    attached = await strategy.attach_receipt(txn_id, photo_file_id)
+    attached = await strategy.attach_receipt(txn_id, photo_file_id, from_user.id)
     if not attached:
         await message.answer(t("pay.txn_missing", lang))
         return

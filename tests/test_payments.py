@@ -9,6 +9,7 @@ and abandoned with a transaction nobody will ever decide.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -21,6 +22,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.methods import SendMessage
 from aiogram.types import Chat, Message, PhotoSize, User
 
+from core import database
 from core.config import Settings
 from core.i18n import t
 from handlers import payment as payment_module
@@ -66,7 +68,9 @@ class FakeStrategy:
     def __init__(self) -> None:
         self.attached: list[tuple[str, str]] = []
 
-    async def attach_receipt(self, txn_id: Any, photo_file_id: str) -> bool:
+    async def attach_receipt(
+        self, txn_id: Any, photo_file_id: str, telegram_id: int
+    ) -> bool:
         self.attached.append((str(txn_id), photo_file_id))
         return True
 
@@ -146,3 +150,82 @@ async def test_a_receipt_that_reached_an_admin_is_reported_received(
 
     assert bot.forwards == [ADMIN_ID]
     assert bot.texts == [t("pay.receipt_received", EN)]
+
+
+# ---------------------------------------------------------------------------
+# One receipt photo, one decision
+# ---------------------------------------------------------------------------
+
+TXN_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
+TXN_B = uuid.UUID("22222222-2222-2222-2222-222222222222")
+OTHER_USER = 999
+
+
+class _TxnPool:
+    """A transactions table in memory — the attach statement really applies.
+
+    The dispatch also refuses any statement missing its guards (owner, pending,
+    one-photo), so these tests fail if the SQL ever loses one.
+    """
+
+    def __init__(self) -> None:
+        self.rows: dict[Any, dict[str, Any]] = {}
+        self.statements: list[str] = []
+
+    def add_txn(
+        self, txn_id: Any, *, status: str = "pending", owner: int = USER_ID
+    ) -> None:
+        self.rows[txn_id] = {
+            "id": txn_id,
+            "telegram_id": owner,
+            "status": status,
+            "receipt_photo_id": None,
+        }
+
+    async def execute(self, query: str, *args: Any) -> str:
+        flat = " ".join(query.split())
+        self.statements.append(flat)
+        if "SET receipt_photo_id" not in flat:
+            return "UPDATE 0"
+        assert "telegram_id = $3" in flat, "the owner guard vanished from attach_receipt"
+        assert "status = 'pending'" in flat, "the pending guard vanished from attach_receipt"
+        assert "NOT EXISTS" in flat, "the one-photo guard vanished from attach_receipt"
+        txn_id, photo, owner = args
+        row = self.rows.get(txn_id)
+        if row is None or row["telegram_id"] != owner or row["status"] != "pending":
+            return "UPDATE 0"
+        taken = any(
+            other["receipt_photo_id"] == photo and other["id"] != txn_id
+            for other in self.rows.values()
+        )
+        if taken:
+            return "UPDATE 0"
+        row["receipt_photo_id"] = photo
+        return "UPDATE 1"
+
+
+async def test_one_receipt_photo_gets_one_decision_not_n() -> None:
+    """P4.2, pinned: N pending transactions could each take the same receipt
+    photo — N forwards, N live Approve buttons, and one payment approved twice
+    grants the plan twice. One photo now belongs to one transaction."""
+    pool = _TxnPool()
+    pool.add_txn(TXN_A)
+    pool.add_txn(TXN_B)
+
+    assert await database.attach_receipt(cast(Any, pool), TXN_A, "photo-1", USER_ID) is True
+    assert await database.attach_receipt(cast(Any, pool), TXN_B, "photo-1", USER_ID) is False
+    assert pool.rows[TXN_B]["receipt_photo_id"] is None, "the second one stays empty"
+    assert await database.attach_receipt(cast(Any, pool), TXN_B, "photo-2", USER_ID) is True
+    assert await database.attach_receipt(cast(Any, pool), TXN_A, "photo-1b", USER_ID) is True
+
+
+async def test_a_receipt_only_attaches_to_its_senders_pending_transaction() -> None:
+    """The owner and pending guards: a stranger's receipt call, or one against
+    a decided transaction, changes nothing."""
+    pool = _TxnPool()
+    pool.add_txn(TXN_A, owner=USER_ID)
+    pool.add_txn(TXN_B, status="approved")
+
+    assert await database.attach_receipt(cast(Any, pool), TXN_A, "photo-1", OTHER_USER) is False
+    assert await database.attach_receipt(cast(Any, pool), TXN_B, "photo-1", USER_ID) is False
+    assert await database.attach_receipt(cast(Any, pool), TXN_A, "photo-1", USER_ID) is True
