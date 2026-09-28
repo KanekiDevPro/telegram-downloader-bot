@@ -16,3 +16,11 @@ cookies.txt
 # The cobalt-format cookie file generated from the jar above (`cobalt/`): a
 # login in another shape is still a login.
 cobalt/
+
+# The operator's own evidence: install.sh writes a timestamped log beside the
+# project on every install, update, start and restart. Report material, never
+# repository content — kept on disk, kept out of git status.
+*.log
+# A stray shell redirect that keeps landing here as a file literally named
+# `user)`; ignored like the logs above, never deleted.
+user)

@@ -88,3 +88,19 @@ def test_the_example_and_the_installers_seed_the_secret() -> None:
     deploy = DEPLOY_INSTALLER.read_text(encoding="utf-8")
     assert "POSTGRES_PASSWORD" in deploy
     assert 'set_env_key POSTGRES_PASSWORD' in deploy
+
+
+def test_the_operator_s_log_files_stay_out_of_git_status() -> None:
+    """``install.sh`` writes a timestamped log beside the project on every
+    install, update, start and restart (``install-*.log``, ``update-*.log``,
+    ``start-*.log``, ``restart-*.log``) — operator evidence, never repository
+    content. A stray shell redirect also keeps landing here as a file
+    literally named ``user)``. The noise is *ignored*, never deleted: git
+    status should show what the operator did to the code, not what the
+    installer did to the directory."""
+    ignore = (BASE_DIR / ".gitignore").read_text(encoding="utf-8")
+
+    assert "*.log" in ignore or all(
+        f"{name}-*.log" in ignore for name in ("install", "update", "start", "restart")
+    )
+    assert "user)" in ignore
