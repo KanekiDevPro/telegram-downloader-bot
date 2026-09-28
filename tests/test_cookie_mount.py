@@ -16,6 +16,7 @@ import os
 import stat
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yt_dlp
@@ -229,6 +230,50 @@ def test_concurrent_runs_never_share_a_cookie_file(tmp_path: Path) -> None:
     assert source.read_text(encoding="utf-8") == before
     assert snapshot.read_text(encoding="utf-8") == before
     assert [path.name for path in (tmp_path / ".cookies").iterdir()] == ["cookies.txt"]
+
+
+def test_the_jar_is_parsed_once_per_change_not_once_per_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P5.5, pinned: the jar's parse is whole-file work and it ran on *every*
+    lookup — the per-run ``_base_opts`` alone asks twice (``using_cookies`` and
+    ``_writable_cookie_file``), and every extract, download and search asks
+    again. The answer only changes when the file does, so both parses are cached
+    behind the same mtime+size stamp the writable copy is keyed on: one parse
+    per jar version — and a re-exported jar is still picked up at once."""
+    source = _jar(tmp_path / "cookies.txt", _row("LOGIN_INFO"), _row("SAPISID", "new"))
+    extractor = _service(tmp_path, source)
+    loads: list[str] = []
+
+    class _CountingJar(extractor_module.http.cookiejar.MozillaCookieJar):
+        def load(self, *args: Any, **kwargs: Any) -> None:
+            loads.append(str(self.filename))
+            super().load(*args, **kwargs)
+
+    monkeypatch.setattr(extractor_module.http.cookiejar, "MozillaCookieJar", _CountingJar)
+    reads: list[str] = []
+    real_read_text = Path.read_text
+
+    def counting_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == source:
+            reads.append(self.name)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+    for _ in range(3):
+        assert extractor_module.cookie_jar_is_usable(source) is True
+        assert extractor_module.count_netscape_cookies(source) == 2
+        assert extractor_module.missing_youtube_login_cookies(source) == ()
+        assert "cookiefile" in extractor._base_opts(extract_only=True), "the per-run path too"
+
+    assert len(loads) == 1, "one MozillaCookieJar parse per jar version — not one per lookup"
+    assert len(reads) == 1, "one row read per jar version"
+
+    _jar(source, _row("LOGIN_INFO"), _row("SAPISID", "new"), _row("OTHER", "more"))
+    assert extractor_module.cookie_jar_is_usable(source) is True
+    assert extractor_module.count_netscape_cookies(source) == 3
+    assert len(loads) == 2 and len(reads) == 2, "a changed jar is re-read — once"
 
 
 def test_a_fresh_export_reaches_yt_dlp_without_a_restart(

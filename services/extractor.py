@@ -714,6 +714,27 @@ def browser_cookie_jar_is_usable(spec: str) -> bool:
 logger = logging.getLogger(__name__)
 
 
+#: The jar's two parsed faces, each cached behind its mtime+size stamp: both
+#: are whole-file reads whose answers change only when the file does (the
+#: same stamp ``ExtractorService._writable_cookie_file`` keys its writable
+#: copy on). One entry per path — a changed jar replaces its own entry.
+_jar_usable_cache: dict[str, tuple[tuple[int, int], bool]] = {}
+_jar_rows_cache: dict[str, tuple[tuple[int, int], list[list[str]]]] = {}
+
+
+def _jar_stamp(path: Path) -> tuple[int, int] | None:
+    """``(mtime_ns, size)`` — the stamp the jar's parses are cached behind.
+
+    Taken fresh on every lookup: freshness lives in the stat, not the clock,
+    so a jar re-exported while the bot runs is re-parsed on the very next one.
+    """
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_mtime_ns, info.st_size)
+
+
 def cookie_jar_is_usable(path: Path | None) -> bool:
     """True when yt-dlp would actually load cookies from ``path``.
 
@@ -726,15 +747,28 @@ def cookie_jar_is_usable(path: Path | None) -> bool:
     where a bind-mounted *file* was expected (and an older revision of
     docker-compose.yml mounted the jar that way), and paths that do not exist are
     not jars either.
+
+    The parse is whole-file work, so it is cached behind the jar's mtime+size
+    stamp (see :func:`_jar_stamp`): the per-run lookups cost one stat each,
+    while a jar re-exported while the bot runs is picked up at once.
     """
-    if path is None or not path.is_file() or path.stat().st_size == 0:
+    if path is None or not path.is_file():
         return False
+    stamp = _jar_stamp(path)
+    if stamp is None or stamp[1] == 0:
+        return False
+    cached = _jar_usable_cache.get(str(path))
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
     jar = http.cookiejar.MozillaCookieJar(str(path))
     try:
         jar.load(ignore_discard=True, ignore_expires=True)
     except (OSError, http.cookiejar.LoadError):
-        return False
-    return len(jar) > 0
+        usable = False
+    else:
+        usable = len(jar) > 0
+    _jar_usable_cache[str(path)] = (stamp, usable)
+    return usable
 
 
 #: Cookies yt-dlp itself demands before it treats a YouTube session as signed in.
@@ -755,9 +789,18 @@ def read_netscape_cookie_rows(path: Path | None) -> list[list[str]]:
     rows removes the whole login while still producing a file that loads fine.
     Reading the rows directly keeps them visible. Header and comment lines are
     skipped, expired rows are not.
+
+    The read is whole-file work too, cached behind the jar's stamp (see
+    :func:`_jar_stamp`); the rows are only ever read, never edited.
     """
     if path is None or not path.is_file():
         return []
+    stamp = _jar_stamp(path)
+    if stamp is None:
+        return []
+    cached = _jar_rows_cache.get(str(path))
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
     rows: list[list[str]] = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         row = line
@@ -768,6 +811,7 @@ def read_netscape_cookie_rows(path: Path | None) -> list[list[str]]:
         fields = row.split("\t")
         if len(fields) >= 7:
             rows.append(fields)
+    _jar_rows_cache[str(path)] = (stamp, rows)
     return rows
 
 
