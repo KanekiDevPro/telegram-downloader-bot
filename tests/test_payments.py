@@ -19,7 +19,7 @@ from aiogram import Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.methods import SendMessage
+from aiogram.methods import EditMessageCaption, SendMessage
 from aiogram.types import CallbackQuery, Chat, Message, PhotoSize, User
 
 from core import database
@@ -41,10 +41,16 @@ class RecordingBot:
         self.deliverable = deliverable
         self.forwards: list[int] = []
         self.texts: list[str] = []
+        self.methods: list[Any] = []
 
     async def __call__(self, method: Any) -> Any:
+        self.methods.append(method)
         if isinstance(method, SendMessage):
             self.texts.append(method.text or "")
+        return True
+
+    async def send_message(self, chat_id: int, text: str, **kwargs: Any) -> Any:
+        self.texts.append(text)
         return True
 
     async def send_photo(self, admin_id: int, photo: str, **kwargs: Any) -> Any:
@@ -68,6 +74,7 @@ class FakeStrategy:
     def __init__(self, pool: Any = None) -> None:
         self.attached: list[tuple[str, str]] = []
         self.begins = 0
+        self.decisions: list[tuple[str, bool]] = []
         self._pool = pool
 
     async def begin(self, user: Any, plan: Any) -> Any:
@@ -79,6 +86,10 @@ class FakeStrategy:
     ) -> bool:
         self.attached.append((str(txn_id), photo_file_id))
         return True
+
+    async def decide(self, txn_id: Any, approved: bool) -> Any:
+        self.decisions.append((str(txn_id), approved))
+        return {"telegram_id": USER_ID}
 
 
 async def _waiting_state() -> FSMContext:
@@ -370,3 +381,60 @@ async def test_the_re_sent_card_names_the_open_transaction_not_the_tapped_plan(
     card = bot.texts[-1]
     assert "10" in card, "the open transaction's amount"
     assert "50,000" not in card, "not the tapped plan's current price"
+
+
+# ---------------------------------------------------------------------------
+# The decision ends the receipt's interactivity
+# ---------------------------------------------------------------------------
+
+
+def _admin_settings() -> Settings:
+    return Settings(_env_file=None, ADMIN_IDS=str(ADMIN_ID))  # type: ignore[call-arg, arg-type]
+
+
+def _captioned_message(bot: RecordingBot) -> Message:
+    """The admin's receipt card — a photo message, so it has a caption to edit."""
+    return Message(
+        message_id=10,
+        date=datetime.now(timezone.utc),
+        chat=Chat(id=ADMIN_ID, type=cast(Any, "private")),
+        from_user=User(id=ADMIN_ID, is_bot=False, first_name="admin"),
+        caption="Receipt #1",
+    ).as_(cast(Bot, bot))
+
+
+async def test_a_decision_strips_the_approval_keyboard_from_the_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    _offline: FakeStrategy,
+) -> None:
+    """P4.1, pinned: the verdict's caption edit carried no ``reply_markup``, and
+    the Bot API keeps the existing keyboard when it is omitted — so every admin
+    kept live Approve/Reject buttons on a transaction that refuses any second
+    decision, and a stray tap could only be answered with a confusing alert.
+    The decision empties the keyboard the moment it lands."""
+    monkeypatch.setattr(payment_module, "get_settings", _admin_settings)
+    strategy = _offline
+    bot = RecordingBot()
+    cb = CallbackQuery(
+        id="1",
+        from_user=User(id=ADMIN_ID, is_bot=False, first_name="admin"),
+        chat_instance="chat",
+        data=f"txn_approve:{TXN_ID}",
+        message=_captioned_message(bot),
+    ).as_(cast(Bot, bot))
+
+    await payment_module.on_admin_approve(
+        cb,
+        cast(Bot, bot),
+        cast(Any, object()),
+        cast(Any, SimpleNamespace(get=lambda _method: strategy)),
+        lang=EN,
+    )
+
+    assert strategy.decisions == [(TXN_ID, True)], "the transaction was decided once"
+    edits = [m for m in bot.methods if isinstance(m, EditMessageCaption)]
+    assert edits, "the receipt card was rewritten with the verdict"
+    markup = edits[0].reply_markup
+    assert markup is not None and markup.inline_keyboard == [], (
+        "the Approve/Reject keyboard must not survive the decision"
+    )

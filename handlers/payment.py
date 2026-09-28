@@ -291,7 +291,12 @@ async def _admin_decide(
                 status=status,
                 admin=escape_html(cb.from_user.full_name),
             )
-            await message.edit_caption(caption=f"{caption}\n\n{decided}")
+            await message.edit_caption(
+                caption=f"{caption}\n\n{decided}",
+                # Omitting reply_markup would keep the live Approve/Reject
+                # buttons on a transaction this verdict just closed.
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+            )
         except Exception:
             logger.debug("could not edit admin caption", exc_info=True)
 
