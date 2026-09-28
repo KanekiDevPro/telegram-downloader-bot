@@ -41,7 +41,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from core import database
 from core import texts as text_store
 from core.catalog import MESSAGES
-from core.config import get_settings
+from core.config import get_settings, reload_settings
 from core.i18n import DEFAULT_LANG, LANGS, t
 from core.ui import Screen, edit_quietly
 from core.utils import escape_html
@@ -1220,6 +1220,10 @@ async def cmd_admin(
     lang: str = DEFAULT_LANG,
 ) -> None:
     """``/admin`` — the panel, for admins only."""
+    # The settings cache is re-read here on purpose: an edit to ADMIN_IDS (or
+    # anything else in the environment) lands the same minute it is made — no
+    # container restart, no stale roster. See core.config.reload_settings.
+    reload_settings()
     settings = get_settings()
     user = message.from_user
     if not settings.is_admin(user.id if user else None):
@@ -1243,6 +1247,10 @@ async def on_menu_admin(
     button is drawn from the *stored* admin list, but a message can be forwarded and
     a keyboard travels with it.
     """
+    # The settings cache is re-read here on purpose: an edit to ADMIN_IDS (or
+    # anything else in the environment) lands the same minute it is made — no
+    # container restart, no stale roster. See core.config.reload_settings.
+    reload_settings()
     if not get_settings().is_admin(cb.from_user.id):
         await cb.answer(t("admin.only", lang), show_alert=True)
         return
@@ -1268,6 +1276,10 @@ async def on_panel_button(
     the keyboard: a forwarded message carries the buttons with it, and a panel anyone
     can open is a panel whose numbers are not private.
     """
+    # The settings cache is re-read here on purpose: an edit to ADMIN_IDS (or
+    # anything else in the environment) lands the same minute it is made — no
+    # container restart, no stale roster. See core.config.reload_settings.
+    reload_settings()
     settings = get_settings()
     if not settings.is_admin(cb.from_user.id):
         await cb.answer(t("admin.only", lang), show_alert=True)

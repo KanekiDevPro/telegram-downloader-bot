@@ -21,6 +21,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
 from aiogram.types import CallbackQuery, Chat, Message, User
 
+from core import config as config_module
 from core.config import Settings
 from handlers import admin as admin_module
 from services import panel as panel_module
@@ -868,6 +869,33 @@ async def test_a_crafted_admin_callback_still_needs_the_right_id(data: str) -> N
 
     assert bot.answers and bot.answers[0].show_alert is True
     assert bot.screens == [], "nothing is rendered"
+
+
+async def test_a_panel_tap_sees_an_admin_change_without_a_restart(
+    stats: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P6.1, pinned through the panel: the admin roster is cached at first use,
+    and an edit to ``ADMIN_IDS`` changes nothing until the cache is told.
+
+    The operator's answer used to be "restart the container". The panel's taps
+    (the Reload button included) re-read the settings first, so the new admin
+    gets in and the old one loses the panel the same minute the roster is
+    edited.
+    """
+    monkeypatch.setattr(admin_module, "get_settings", config_module.get_settings)
+    monkeypatch.setenv("ADMIN_IDS", str(ADMIN_ID))
+    config_module.get_settings.cache_clear()
+    assert config_module.get_settings().is_admin(ADMIN_ID)
+
+    monkeypatch.setenv("ADMIN_IDS", str(STRANGER_ID))  # edited while the bot runs
+
+    bot = RecordingBot()
+    await admin_module.on_panel_button(
+        _callback(bot, "admin:stats", STRANGER_ID), object(), _queue(), None, lang="en"
+    )
+
+    assert bot.screens, "the new admin opens the panel without a restart"
+
 
 
 # ---------------------------------------------------------------------------

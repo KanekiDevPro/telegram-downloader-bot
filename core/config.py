@@ -995,3 +995,16 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Cached settings accessor — safe to call from any module."""
     return Settings()
+
+
+def reload_settings() -> Settings:
+    """Drop the cached configuration and read the world again.
+
+    The cache is what keeps ``get_settings`` cheap on every handler's hot
+    path — and it is exactly why an edit to ``ADMIN_IDS`` (or anything else
+    in the environment) used to need a container restart to be believed. One
+    rule keeps both: whoever *changes* the environment calls this. The
+    panel's taps do, so a roster edit lands the same minute it is made.
+    """
+    get_settings.cache_clear()
+    return get_settings()

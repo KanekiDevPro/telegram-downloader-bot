@@ -714,3 +714,31 @@ def test_committed_env_fragments_parse_cleanly_through_the_settings_layer(
 
         for key in values:
             monkeypatch.delenv(key, raising=False)
+
+
+# ---------------------------------------------------------------------------
+# the cached accessor
+# ---------------------------------------------------------------------------
+
+
+def test_the_cache_serves_the_first_settings_until_it_is_invalidated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P6.1, pinned: ``get_settings`` caches the configuration once and serves
+    the first answer forever — the stale-``ADMIN_IDS`` defect an operator hits
+    when the roster is edited while the bot runs. The cache is legitimate; what
+    it needs is an explicit way to be told the world changed, and after that
+    call every module reads the new answer.
+    """
+    monkeypatch.setenv("ADMIN_IDS", "111")
+    config_module.get_settings.cache_clear()
+    assert config_module.get_settings().admin_ids == [111]
+
+    monkeypatch.setenv("ADMIN_IDS", "222")  # edited while the bot runs
+    assert config_module.get_settings().admin_ids == [111], (
+        "the cached copy outlives the edit — the defect being pinned"
+    )
+
+    fresh = config_module.reload_settings()
+    assert fresh.admin_ids == [222], "invalidation re-reads the world"
+    assert config_module.get_settings().admin_ids == [222], "and the new copy is what sticks"
