@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import datetime as _dt
+import importlib.util
 from datetime import date, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -122,3 +125,56 @@ def test_a_broken_timezone_setting_degrades_to_utc_never_to_a_crash(
     monkeypatch.setattr("core.utils.get_settings", lambda: SimpleNamespace(timezone=raw))
     assert isinstance(today_local(), date)
     assert local_midnight(date(2026, 9, 28)).utcoffset() == timezone.utc.utcoffset(None)
+
+
+def test_tzdata_ships_so_zoneinfo_resolves_on_every_platform() -> None:
+    """``ZoneInfo`` needs a tz database and Windows has none: without the
+    ``tzdata`` package the configured TIMEZONE cannot resolve, every lookup
+    silently falls back to UTC (see :func:`today_local`) and the daily quota
+    boundary moves from local midnight to 03:30. The package is a
+    *dependency*, not a platform accident — a Linux container ships the
+    system database and hides the gap entirely, which is why it went
+    unnoticed. Pinned by importability: this is what the quota boundary
+    rests on."""
+    assert importlib.util.find_spec("tzdata") is not None, (
+        "tzdata must be importable on every platform — it is a declared "
+        "dependency, and today_local() silently degrades to UTC without it"
+    )
+
+
+def test_the_daily_boundary_follows_the_configured_timezone_not_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The quota boundary is the *configured* zone's midnight, pinned on a
+    clock deliberately frozen where UTC and that zone disagree about the
+    date.
+
+    21:30 UTC on January 1st is already 01:00 on January 2nd in Tehran
+    (UTC+3:30): a boundary computed in UTC calls that still "yesterday",
+    so a user's daily quota resets at 03:30 local instead of midnight.
+    The clock is seeded at exactly that instant and the expectation is the
+    zone's own date — never ``date.today()``, which is a different
+    timezone's opinion of the day and the reason this bug hid behind a
+    "midnight flake" diagnosis."""
+    frozen = _dt.datetime(2026, 1, 1, 21, 30, tzinfo=_dt.timezone.utc)
+
+    class _FrozenClock(_dt.datetime):
+        @classmethod
+        def now(cls, tz: _dt.tzinfo | None = None) -> "_FrozenClock":
+            return cls.fromtimestamp(frozen.timestamp(), tz)
+
+    monkeypatch.setattr("core.utils.datetime", _FrozenClock)
+    monkeypatch.setattr(
+        "core.utils.get_settings", lambda: SimpleNamespace(timezone="Asia/Tehran")
+    )
+
+    tehran_day = frozen.astimezone(_dt.timezone(_dt.timedelta(hours=3, minutes=30))).date()
+    assert tehran_day == date(2026, 1, 2), "the seed is really a different day"
+    assert today_local() == tehran_day, (
+        "the boundary is Tehran's midnight — the configured zone's own date"
+    )
+    assert today_local() != frozen.date(), "never the UTC day"
+    assert today_local() == frozen.astimezone(ZoneInfo("Asia/Tehran")).date(), (
+        "and the configured zone's own calendar agrees — the expectation is "
+        "datetime.now(ZoneInfo(settings.timezone)), never date.today()"
+    )

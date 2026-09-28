@@ -203,7 +203,13 @@ def today_local() -> date:
     """Today's date in the configured timezone (used for daily quotas)."""
     try:
         tz: tzinfo = ZoneInfo(get_settings().timezone)
-    except (ZoneInfoNotFoundError, ValueError):  # misconfigured/unknown TIMEZONE → fall back to UTC
+    # A misconfigured, unknown or *OS-refused* TIMEZONE degrades to UTC and
+    # never to a crash: the key may be garbage (ValueError), name no zone
+    # (ZoneInfoNotFoundError), or make the platform refuse the lookup
+    # outright — on Windows a whitespace key raises PermissionError (an
+    # OSError) from the file lookup itself. The quota path runs this per
+    # message, so every one of those is a caught day boundary, not a 500.
+    except (ZoneInfoNotFoundError, ValueError, OSError, TypeError):
         tz = timezone.utc
     return datetime.now(tz).date()
 
@@ -216,7 +222,7 @@ def local_midnight(day: date) -> datetime:
     """
     try:
         tz: tzinfo = ZoneInfo(get_settings().timezone)
-    except (ZoneInfoNotFoundError, ValueError):
+    except (ZoneInfoNotFoundError, ValueError, OSError, TypeError):
         tz = timezone.utc
     return datetime(day.year, day.month, day.day, tzinfo=tz)
 

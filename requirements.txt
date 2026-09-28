@@ -21,3 +21,9 @@ yt-dlp-ejs>=0.8.0
 # is a legitimate choice — and yt-dlp needs this for it. Missing it fails every
 # download with an unhelpful proxy error, so it is a dependency rather than a note.
 PySocks>=1.7.1
+# Timezone database as a package: a host without the system tz database
+# (Windows) resolves ZoneInfo names through this. Without it, today_local()
+# silently degrades to UTC and the daily quota boundary is wrong for every
+# user — a Linux container ships its own database and hides the gap, which
+# is exactly why the dependency is pinned here.
+tzdata>=2024.1
