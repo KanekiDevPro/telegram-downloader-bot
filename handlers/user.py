@@ -1160,6 +1160,16 @@ async def _intake_flow(
     # (resolving, probing, routing) that would otherwise keep the loop to itself
     # while the user's link is still sitting in the chat.
     await asyncio.sleep(0)
+    # The zero-wait path sits *in front of* the slow ones: a link the cache
+    # already knows answers from its rows — no resolve, no probe, no extraction
+    # (see _ask_from_cache). Only a link that would be *asked* about takes it; a
+    # solo link keeps its own faster answer below (the auto-send), never a menu
+    # of one button.
+    if content.routing_for(url).solo is None:
+        rows = await _cached_rows(pool, url)
+        if rows:
+            await _ask_from_cache(message, state, url, lang, rows, edit=False)
+            return
     # Share/short links and media *viewer* wrappers name their content somewhere
     # else: resolve them once, here — routing, the engines and the direct-download
     # path all see the real thing afterwards (see _canonical_url).

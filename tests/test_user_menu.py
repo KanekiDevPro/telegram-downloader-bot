@@ -2745,3 +2745,137 @@ async def test_the_intake_flow_logs_how_long_it_took(
         "intake flow for https://youtu.be/abc completed in" in record.getMessage()
         for record in caplog.records
     ), "link arrival → menu, measured and logged"
+
+# ---------------------------------------------------------------------------
+# The fast path is in front of the slow path
+# ---------------------------------------------------------------------------
+
+
+async def test_a_cached_link_is_never_sent_through_the_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P5.1, pinned: the instant menu is the intake's zero-wait path and it sat
+    *behind* the canonicalisation — every already-cached link paid the full
+    share-link resolve (with the catalogue probe inside it) before taking the
+    branch that needs neither. A hit answers first now; only a miss resolves."""
+    resolved: list[str] = []
+
+    async def record(url: str) -> str:
+        resolved.append(url)
+        return url
+
+    async def supported(url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(user_module, "_canonical_url", record)
+    monkeypatch.setattr(user_module, "_probe_supported", supported)
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    state = _fresh_state()
+
+    await user_module.on_text_with_url(
+        _message("https://youtu.be/abc", bot),
+        state,
+        _user(),
+        object(),
+        _fake_queue(),
+        bot,
+        lang=FA,
+    )
+
+    assert resolved == [], "the resolve ran on a link the cache already knew"
+    assert "720p" in dict(_buttons(bot.keyboards[-1])), "the instant menu is what answered"
+
+
+async def test_a_cache_miss_still_resolves_the_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the bargain: the resolve is skipped on a *hit*, never
+    dropped — a link the cache does not know still gets its real content found,
+    and the probe still runs on what the resolve returned."""
+    resolved: list[str] = []
+
+    async def record(url: str) -> str:
+        resolved.append(url)
+        return url
+
+    async def supported(url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(user_module, "_canonical_url", record)
+    monkeypatch.setattr(user_module, "_probe_supported", supported)
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", no_cached_rows)
+    bot = RecordingBot()
+    probe = _RecordingProbe()
+    bot.state = SimpleNamespace(extractor=probe)
+
+    await user_module.on_text_with_url(
+        _message("https://youtu.be/abc", bot),
+        _fresh_state(),
+        _user(),
+        object(),
+        _fake_queue(),
+        bot,
+        lang=FA,
+    )
+
+    assert resolved == ["https://youtu.be/abc"], "a miss resolves, as it always did"
+    assert probe.calls == ["https://youtu.be/abc"], "and the probe runs on the result"
+
+
+async def test_a_cached_solo_link_still_sends_itself_instead_of_asking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The instant menu is for links that would be *asked* about. A photo post
+    has exactly one answer and takes it — a cache that knows it must not turn
+    the auto-send into a question, only make the send instant."""
+    replayed: list[Any] = []
+
+    async def same(url: str) -> str:
+        return url
+
+    async def supported(url: str) -> bool:
+        return True
+
+    async def media_rows(pool: Any, url: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "quality": "video:best",
+                "label": "Send media",
+                "title": "A Photo",
+                "kind": "photo",
+                "telegram_file_id": "p-1",
+            }
+        ]
+
+    async def no_get_cached(pool: Any, url: str, media_format: str, quality: object) -> None:
+        return None
+
+    async def replay(
+        bot: Any, chat_id: int, cached: Any, caption: str | None = None, **kwargs: Any
+    ) -> bool:
+        replayed.append(cached)
+        return True
+
+    monkeypatch.setattr(user_module, "_canonical_url", same)
+    monkeypatch.setattr(user_module, "_probe_supported", supported)
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", media_rows)
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_get_cached)
+    monkeypatch.setattr(user_module, "send_cached_file", replay)
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    state = _fresh_state()
+
+    await user_module.on_text_with_url(
+        _message("https://www.instagram.com/p/abc/", bot),
+        state,
+        _user(),
+        object(),
+        _fake_queue(),
+        bot,
+        lang=FA,
+    )
+
+    assert await state.get_state() is None, "a solo link is never asked"
+    assert len(replayed) == 1, "the stored file answered the auto-send at once"
