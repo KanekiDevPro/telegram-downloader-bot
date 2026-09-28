@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,7 @@ from core.utils import (
     escape_html,
     extract_url,
     format_size,
+    local_midnight,
     sanitize_filename,
     sha256_hex,
     today_local,
@@ -106,3 +108,17 @@ def test_escape_html() -> None:
 
 def test_today_local_returns_a_date() -> None:
     assert isinstance(today_local(), date)
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "Not/AZone"])
+def test_a_broken_timezone_setting_degrades_to_utc_never_to_a_crash(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """The quota path reads the timezone on every message: a misconfigured
+    TIMEZONE must cost a UTC day boundary, not a 500 per message. An empty
+    key raises ValueError inside ZoneInfo, an unknown name raises
+    ZoneInfoNotFoundError; both fall back the same way.
+    """
+    monkeypatch.setattr("core.utils.get_settings", lambda: SimpleNamespace(timezone=raw))
+    assert isinstance(today_local(), date)
+    assert local_midnight(date(2026, 9, 28)).utcoffset() == timezone.utc.utcoffset(None)

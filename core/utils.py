@@ -203,7 +203,7 @@ def today_local() -> date:
     """Today's date in the configured timezone (used for daily quotas)."""
     try:
         tz: tzinfo = ZoneInfo(get_settings().timezone)
-    except ZoneInfoNotFoundError:  # misconfigured/unknown TIMEZONE → fall back to UTC
+    except (ZoneInfoNotFoundError, ValueError):  # misconfigured/unknown TIMEZONE → fall back to UTC
         tz = timezone.utc
     return datetime.now(tz).date()
 
@@ -216,7 +216,7 @@ def local_midnight(day: date) -> datetime:
     """
     try:
         tz: tzinfo = ZoneInfo(get_settings().timezone)
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ValueError):
         tz = timezone.utc
     return datetime(day.year, day.month, day.day, tzinfo=tz)
 

@@ -310,6 +310,12 @@ def test_every_bool_flag_survives_a_blank_value(
     assert getattr(settings, attribute) is expected
 
 
+@pytest.mark.parametrize("raw", ["", "   "])
+def test_blank_timezone_is_utc(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    """`TIMEZONE=` must construct — and mean UTC, not a per-message 500."""
+    assert _settings(monkeypatch, TIMEZONE=raw).timezone == "UTC"
+
+
 def test_blank_api_files_dir_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _settings(monkeypatch, TELEGRAM_API_FILES_DIR="").telegram_api_files_dir is None
 

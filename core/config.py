@@ -729,6 +729,14 @@ class Settings(BaseSettings):
             return 0
         return value
 
+    @field_validator("timezone", mode="before")
+    @classmethod
+    def _blank_timezone_is_utc(cls, value: object) -> object:
+        """``TIMEZONE=`` means UTC: ``ZoneInfo("")`` would raise on every message."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return "UTC"
+        return value
+
     @field_validator(
         "telegram_api_local",
         "ytdlp_force_ipv4",
