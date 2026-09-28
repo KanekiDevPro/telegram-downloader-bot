@@ -729,7 +729,15 @@ class Settings(BaseSettings):
             return 0
         return value
 
-    @field_validator("telegram_api_local", "ytdlp_force_ipv4", "menu_auto_best", mode="before")
+    @field_validator(
+        "telegram_api_local",
+        "ytdlp_force_ipv4",
+        "menu_auto_best",
+        "cloud_api_fallback",
+        "ytdlp_use_oauth2",
+        "cobalt_try_public_instances",
+        mode="before",
+    )
     @classmethod
     def _parse_bool_flag(cls, value: object) -> object:
         """Accept 1/0, true/false, yes/no — and a blank value meaning "off"."""

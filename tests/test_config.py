@@ -287,6 +287,29 @@ def test_bool_flags_reject_garbage(monkeypatch: pytest.MonkeyPatch) -> None:
         _settings(monkeypatch, TELEGRAM_API_LOCAL="maybe")
 
 
+@pytest.mark.parametrize(
+    ("env", "attribute", "expected"),
+    (
+        ("CLOUD_API_FALLBACK", "cloud_api_fallback", False),
+        ("YTDLP_USE_OAUTH2", "ytdlp_use_oauth2", False),
+        ("COBALT_TRY_PUBLIC_INSTANCES", "cobalt_try_public_instances", False),
+    ),
+)
+def test_every_bool_flag_survives_a_blank_value(
+    monkeypatch: pytest.MonkeyPatch, env: str, attribute: str, expected: bool
+) -> None:
+    """A blank value must mean "off" for *every* bool flag.
+
+    ``KEY=   # why I left this off`` is the documented way to disable one of
+    these settings (the comment-safe dotenv source reads it as ""), and it used
+    to make the bot unbootable with a ValidationError at startup. Off is the
+    answer even where the field's default is on — the ``YTDLP_FORCE_IPV4``
+    precedent: a value the operator blanked was turned off on purpose.
+    """
+    settings = _settings(monkeypatch, **{env: ""})
+    assert getattr(settings, attribute) is expected
+
+
 def test_blank_api_files_dir_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _settings(monkeypatch, TELEGRAM_API_FILES_DIR="").telegram_api_files_dir is None
 
