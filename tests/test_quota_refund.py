@@ -5,8 +5,10 @@ it, so one bad link can never burn three slots and hand the user nothing. A
 failure before the quota gate steals nothing (there is no claim to give back).
 And a slot that already bought a delivery stays spent even when the bookkeeping
 after the send fails: a cache write blipping after the bytes landed is not a
-delivery failure. The refund also keeps to its own day — a claim that crossed
-midnight is never taken out of the new day's counter.
+delivery failure. And a delivered job is *finished*: a bookkeeping blip after
+the send never re-runs the download or the upload. The refund also keeps to its
+own day — a claim that crossed midnight is never taken out of the new day's
+counter.
 """
 
 from __future__ import annotations
@@ -133,15 +135,18 @@ class _QuotaPool:
 class _Bot:
     """Telegram at the worker seam: uploads land unless the bot refuses them."""
 
-    def __init__(self, *, refusing: bool = False) -> None:
+    def __init__(self, *, refusing: bool = False, no_file_id: bool = False) -> None:
         self.refusing = refusing
+        self.no_file_id = no_file_id
         self.uploads: list[str] = []
 
     def _send(self, kind: str) -> Any:
         if self.refusing:
             raise _bad_request()
         self.uploads.append(kind)
-        return SimpleNamespace(**{kind: SimpleNamespace(file_id=f"{kind}-1")})
+        # ``no_file_id``: Telegram accepted the bytes but answered with no id.
+        file_id = "" if self.no_file_id else f"{kind}-1"
+        return SimpleNamespace(**{kind: SimpleNamespace(file_id=file_id)})
 
     async def send_message(self, chat_id: int, text: str, **kwargs: Any) -> Any:
         return SimpleNamespace(edit_text=self._edit, delete=self._delete)
@@ -211,11 +216,16 @@ class _Settings:
 
 
 class _Queue:
+    """The queue at the settle seam: every job that settled, in order."""
+
+    def __init__(self) -> None:
+        self.released: list[DownloadTask] = []
+
     async def requeue(self, task: DownloadTask) -> None:
         return None
 
     async def release(self, task: DownloadTask) -> None:
-        return None
+        self.released.append(task)
 
 
 class _NeverStopping:
@@ -245,7 +255,8 @@ async def _run(
     extractor: _Extractor,
     *,
     upload_limit: int = 10**9,
-) -> None:
+    queue: _Queue | None = None,
+) -> DownloadTask:
     """One job through the real retry wrapper — with no real sleeping between attempts."""
 
     async def _no_sleep(stop_event: Any, seconds: float) -> bool:
@@ -254,14 +265,16 @@ async def _run(
     monkeypatch.setattr(worker, "get_settings", lambda: _Settings(upload_limit))
     monkeypatch.setattr(worker, "effective_daily_limit", lambda user: LIMIT)
     monkeypatch.setattr(worker, "_sleep_until", _no_sleep)
+    task = _task()
     await worker._process_with_retry(
-        _task(),
+        task,
         cast(Bot, bot),
         cast(Any, pool),
-        cast(Any, _Queue()),
+        cast(Any, queue if queue is not None else _Queue()),
         cast(Any, extractor),
         cast(Any, _NeverStopping()),
     )
+    return task
 
 
 async def test_a_delivery_failure_gives_every_claimed_slot_back(
@@ -315,6 +328,56 @@ async def test_a_cache_blip_after_a_delivery_keeps_the_slot_spent(
     assert bot.uploads, "the file really was delivered"
     assert pool.count(REFUND) == 0, "a delivered slot is never refunded"
     assert pool.daily > PRE_JOB, "and the day's counter keeps what it earned"
+
+
+async def test_a_cache_blip_after_delivery_never_re_runs_the_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """P1.3, pinned: caching is best-effort bookkeeping *after* the bytes are in
+    the chat. A memorize failure used to bubble to the retry loop as an internal
+    crash, and the whole job — download and upload — ran again: the user got the
+    same file up to three times and paid up to three slots for it. A delivered
+    job is finished: one download, one send, the spent slot kept, one settle."""
+
+    async def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("database blip")
+
+    monkeypatch.setattr(worker.cache_service, "memorize", boom)
+    pool = _QuotaPool(today=date.today())
+    bot = _Bot()
+    extractor = _Extractor(tmp_path)
+    queue = _Queue()
+
+    task = await _run(monkeypatch, pool, bot, extractor, queue=queue)
+
+    assert extractor.downloads == 1, "the extraction ran exactly once — no retry"
+    assert len(bot.uploads) == 1, "and the file was sent exactly once"
+    assert pool.count(CLAIM) == 1, "one delivery consumes one slot, never three"
+    assert pool.count(REFUND) == 0, "a delivered slot is never refunded"
+    assert task.quota_held is False, "the slot is spent, not held"
+    assert queue.released == [task], "the job settles — it does not bubble"
+
+
+async def test_a_send_without_a_file_id_still_counts_as_delivered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The other post-send blip, pinned the same way: Telegram accepted the bytes
+    but returned no file_id. The file is in the chat — the job is DELIVERED — so
+    nothing may re-run it (the chat would get the same file again) and its slot
+    stays spent (a free retry would deliver twice for one payment)."""
+    pool = _QuotaPool(today=date.today())
+    bot = _Bot(no_file_id=True)
+    extractor = _Extractor(tmp_path)
+    queue = _Queue()
+
+    task = await _run(monkeypatch, pool, bot, extractor, queue=queue)
+
+    assert extractor.downloads == 1
+    assert len(bot.uploads) == 1, "the send happened exactly once"
+    assert pool.count(CLAIM) == 1
+    assert pool.count(REFUND) == 0, "the delivered slot stays spent"
+    assert task.quota_held is False
+    assert queue.released == [task], "delivered is finished — no retry, no re-send"
 
 
 async def test_the_final_size_ceiling_gives_the_slot_back(

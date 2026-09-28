@@ -673,15 +673,17 @@ async def _finish_upload(
         async with ActionPulse(
             bot, task.chat_id, upload_action(_delivery_kind(files[0], result.media_format))
         ):
+            delivered: Delivered | None = None
             try:
                 delivered = await _upload(
                     bot, task.chat_id, result, lang, track=track, cover=cover, source_url=task.url
                 )
             except _SentNoFileId:
                 # The bytes are with the user; only their file_id failed to
-                # come back. The slot bought a delivery and stays spent.
-                task.quota_held = False
-                raise
+                # come back. The job is *delivered* — it just cannot be
+                # cached — so this ends in success below, never a retry
+                # that would send the same file into the chat again.
+                pass
             except TelegramEntityTooLarge as exc:
                 # The transport's own ceiling refused the finished file (50 MB on
                 # the cloud — and on a local server without ``--local``). In its
@@ -698,30 +700,36 @@ async def _finish_upload(
             # if the bookkeeping below blips (a cache write after the bytes
             # landed is not a delivery failure).
             task.quota_held = False
-        if delivered.cacheable:
+        if delivered is not None and delivered.cacheable:
             # The canonical name this file goes by — the song for a track, the
             # media's own title otherwise — so a replay's card is the first send's
             # card. Never a URL dressed up as one.
             media_title = (track.title if track else "") or result.info.title or task.title
             if media_title == task.url:
                 media_title = ""
-            await cache_service.memorize(
-                pool,
-                url=task.url,
-                platform=result.info.platform,
-                telegram_file_id=delivered.file_id,
-                request=cache_service.request_key(task.media_format, task.quality),
-                kind=delivered.kind,
-                title=media_title,
-                label=produced_quality_label(
-                    result.media_format,
-                    result.quality,
-                    result.file_path.suffix,
-                    lang,
-                    produced_p=result.info.label_p or result.info.height,
-                    source_kbps=result.info.audio_kbps,
-                ),
-            )
+            try:
+                await cache_service.memorize(
+                    pool,
+                    url=task.url,
+                    platform=result.info.platform,
+                    telegram_file_id=delivered.file_id,
+                    request=cache_service.request_key(task.media_format, task.quality),
+                    kind=delivered.kind,
+                    title=media_title,
+                    label=produced_quality_label(
+                        result.media_format,
+                        result.quality,
+                        result.file_path.suffix,
+                        lang,
+                        produced_p=result.info.label_p or result.info.height,
+                        source_kbps=result.info.audio_kbps,
+                    ),
+                )
+            except Exception:
+                # Caching is best-effort: the bytes are already in the chat,
+                # and a cache blip must never fail a delivered job — a retry
+                # would send the very same file into the chat again.
+                logger.warning("could not cache the delivered file for %.80s", task.url, exc_info=True)
         await _note_group_download(pool, task, ok=True)
         # The scaffolding goes the moment the file lands: the status message (the
         # tapped menu, then the ⏳ card) would only sit next to the delivered
@@ -744,13 +752,18 @@ async def _note_group_download(
     """
     if task.chat_id >= 0:
         return
-    await database.record_group_download(
-        pool,
-        chat_id=task.chat_id,
-        chat_title=task.chat_title,
-        ok=ok,
-        code=code,
-    )
+    try:
+        await database.record_group_download(
+            pool,
+            chat_id=task.chat_id,
+            chat_title=task.chat_title,
+            ok=ok,
+            code=code,
+        )
+    except Exception:
+        # Bookkeeping, never a second failure to the first: this runs after
+        # a delivery, where a raise would re-run a job the user already has.
+        logger.exception("could not record the group download for %.80s", task.url)
 
 
 async def _note_fallback_skip(
@@ -854,16 +867,18 @@ class _SentNoFileId(RuntimeError):
     """A send that landed but carried no usable id back.
 
     Raised *after* Telegram accepted the bytes (the file is in the chat), so
-    the failure that carries it is a bookkeeping one: the daily slot it spent
-    stays spent (see ``_refund_quota``).
+    the job is delivered and only its caching is lost: the daily slot it spent
+    stays spent (see ``_refund_quota``) and the caller finishes the job in
+    success rather than re-sending the file (see ``_finish_upload``).
     """
 
 
 def _file_id(media: Any) -> str:
     """Extract the file_id from a sent media object.
 
-    Telegram practically always returns it; a missing one means the upload is
-    unusable, so treat it as a failure and let the retry wrapper report it.
+    Telegram practically always returns it; a missing one means the delivered
+    file cannot be cached. The send still landed — the caller treats it as
+    delivered with no cache entry (see ``_finish_upload``).
     """
     file_id = getattr(media, "file_id", None)
     if not file_id:
