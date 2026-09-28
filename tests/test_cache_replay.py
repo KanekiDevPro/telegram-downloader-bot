@@ -18,6 +18,8 @@ keyed (``tests/test_cache_key.py``) and what its caption says
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,7 +34,7 @@ from aiogram.types import Chat, Message, User
 from core import database
 from handlers import user as user_module
 from services import worker
-from services.extractor import DownloadResult, MediaInfo
+from services.extractor import DownloadResult, MediaInfo, VideoOption
 from services.queue import DownloadTask
 
 URL = "https://youtu.be/abc"
@@ -432,3 +434,55 @@ def test_the_schema_has_a_place_for_the_file_id() -> None:
     assert "CREATE TABLE IF NOT EXISTS smart_cache" in schema
     assert "telegram_file_id" in schema
     assert "ADD COLUMN IF NOT EXISTS" in schema, "later columns arrive as safe migrations"
+
+
+def _ladder_info() -> MediaInfo:
+    return replace(
+        _info(),
+        video_options=(
+            VideoOption(1080, 22_000_000, True, 1920),
+            VideoOption(720, 12_000_000, True, 1280),
+            VideoOption(480, 7_000_000, True, 854),
+            VideoOption(360, 4_000_000, True, 640),
+        ),
+    )
+
+
+class _LadderExtractor(_WorkerExtractor):
+    """The same double, carrying the full option ladder on its MediaInfo."""
+
+    async def download(
+        self, url: str, media_format: str, quality: str, **kwargs: Any
+    ) -> DownloadResult:
+        result = await super().download(url, media_format, quality, **kwargs)
+        return replace(result, info=_ladder_info())
+
+
+async def test_a_delivery_remembers_the_ladder_next_to_the_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The instant menu's completeness is bought at write time: a delivery stores
+    the whole option ladder (``MediaInfo.video_options`` — the chain-filtered rungs
+    the fresh question drew) next to the file_id, so a repeat link can offer every
+    rung with zero network."""
+    monkeypatch.setattr(worker, "get_settings", lambda: _Settings())
+    bot = WorkerBot()
+    pool = _Pool(cache_row=None)
+    await worker._process_with_retry(
+        _task(),
+        cast(Any, bot),
+        cast(Any, pool),
+        cast(Any, _WorkerQueue()),
+        cast(Any, _LadderExtractor(download_dir=tmp_path, extract_log=[])),
+        cast(Any, _NeverStopping()),
+    )
+
+    stored = pool.writes("INSERT INTO smart_cache")
+    assert stored, "the delivery is remembered as always"
+    _, args = stored[0]
+    assert json.loads(args[9]) == [
+        [1080, 22_000_000, True, 1920],
+        [720, 12_000_000, True, 1280],
+        [480, 7_000_000, True, 854],
+        [360, 4_000_000, True, 640],
+    ], "the whole ladder rides next to the file_id"

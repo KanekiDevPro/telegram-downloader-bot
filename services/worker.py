@@ -733,6 +733,7 @@ async def _finish_upload(
                         produced_p=result.info.label_p or result.info.height,
                         source_kbps=result.info.audio_kbps,
                     ),
+                    ladder=result.info.video_options,
                 )
             except Exception:
                 # Caching is best-effort: the bytes are already in the chat,

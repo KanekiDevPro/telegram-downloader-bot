@@ -107,6 +107,14 @@ ALTER TABLE smart_cache ADD COLUMN IF NOT EXISTS title TEXT;
 -- to describing its request.
 ALTER TABLE smart_cache ADD COLUMN IF NOT EXISTS label TEXT;
 
+-- The full option ladder the fresh menu drew, captured with the send: one
+-- ``[height, size_bytes, size_exact, width]`` entry per rung (see
+-- ``services.cache.serialize_ladder``). A repeat link draws every rung from
+-- here with zero network. Nullable like the columns above: a row from before
+-- this column existed simply has no ladder, and its menu stays the rows-only
+-- one.
+ALTER TABLE smart_cache ADD COLUMN IF NOT EXISTS ladder TEXT;
+
 -- The key that names a *URL* across every request it has ever served: sha256 of
 -- its canonical form. The intake fast path asks "what has this link already
 -- produced?" by this column — ``url_hash`` folds the request in too, so it
@@ -574,17 +582,19 @@ async def store_cached_file(
     title: str = "",
     label: str = "",
     url_key: str = "",
+    ladder: str = "",
 ) -> None:
     """Remember an upload. ``quality`` is the requested format (part of the key);
     ``kind`` is how to send it again (``photo_group``, ``audio``, …); ``title``
     is the media's own name and ``label`` the quality line the fresh caption
     used, so the replay's card reads like the fresh send. ``url_key`` names the
-    URL across requests — the intake fast path's lookup."""
+    URL across requests — the intake fast path's lookup. ``ladder`` is the full option ladder (JSON)
+    the send was chosen from — the instant menu's material for the next ask."""
     await pool.execute(
         """
         INSERT INTO smart_cache
-            (url_hash, original_url, platform, telegram_file_id, quality, kind, title, label, url_key)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            (url_hash, original_url, platform, telegram_file_id, quality, kind, title, label, url_key, ladder)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (url_hash) DO NOTHING
         """,
         url_hash,
@@ -596,6 +606,7 @@ async def store_cached_file(
         title or None,
         label or None,
         url_key or None,
+        ladder or None,
     )
 
 

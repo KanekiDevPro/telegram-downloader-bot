@@ -2981,3 +2981,167 @@ async def test_a_stale_tap_is_never_swallowed_across_links(_queueing: None) -> N
 
     assert [task.url for task in queue.tasks] == ["https://youtu.be/abc"]
     assert bot.answers[-1].show_alert, "a tap for another link gets the honest answer"
+
+
+# ---------------------------------------------------------------------------
+# The instant menu is the whole ladder (repeat links, zero network)
+# ---------------------------------------------------------------------------
+
+
+#: The full option ladder, as the worker stores it next to a file_id: one
+#: ``[height, size_bytes, size_exact, width]`` per rung — ``MediaInfo.video_options``,
+#: the chain-filtered rungs the fresh question drew.
+_LADDER = (
+    "[[1080, 22000000, true, 1920], [720, 12000000, true, 1280], "
+    "[480, 7000000, true, 854], [360, 4000000, true, 640]]"
+)
+
+
+def _ladder_rows(*, with_stale: bool = False) -> list[dict[str, Any]]:
+    """Two stored files — and the whole ladder their rows carry next to them."""
+    rows = [
+        {
+            "quality": "video:720",
+            "label": "720p",
+            "title": "A Clip",
+            "kind": "video",
+            "telegram_file_id": "v-1",
+            "ladder": _LADDER,
+        },
+        {
+            "quality": "video:1080",
+            "label": "1080p",
+            "title": "A Clip",
+            "kind": "video",
+            "telegram_file_id": "v-2",
+            "ladder": _LADDER,
+        },
+    ]
+    if with_stale:
+        rows.append(
+            {
+                "quality": "video:1440",
+                "label": "1440p",
+                "title": "A Clip",
+                "kind": "video",
+                "telegram_file_id": "v-old",
+                "ladder": _LADDER,
+            }
+        )
+    return rows
+
+
+def _rows_returning(rows: list[dict[str, Any]]) -> Any:
+    async def rows_for(pool: Any, url: str) -> list[dict[str, Any]]:
+        return rows
+
+    return rows_for
+
+
+async def test_a_cached_link_offers_every_rung_the_ladder_has(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repeat link's instant menu is the link's *whole* ladder — every rung the
+    production chain can deliver — not only the rungs somebody already took.
+
+    The ladder rides next to the stored file_ids (captured from the very
+    ``video_options`` the fresh question drew), so completeness costs zero
+    network: the extractor still never runs.
+    """
+    monkeypatch.setattr(
+        user_module.cache_service, "get_cached_rows", _rows_returning(_ladder_rows())
+    )
+    probe = _RecordingProbe()
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=probe)
+    state = _fresh_state()
+
+    await user_module.on_text_with_url(
+        _message("https://youtu.be/abc", bot), state, _user(), object(), _fake_queue(), bot, lang=FA
+    )
+
+    assert probe.calls == [], "zero network — the ladder was already cached"
+    taps = {cb for _, cb in _buttons(bot.keyboards[-1]) if cb.startswith("fmt:video:")}
+    assert taps == {"fmt:video:1080", "fmt:video:720", "fmt:video:480", "fmt:video:360"}, (
+        "two stored files must still show all four rungs the link offers"
+    )
+    data = await state.get_data()
+    assert set(data["offered"]) == {"1080", "720", "480", "360"}, (
+        "a tap on any rung is judged by what the menu drew"
+    )
+
+
+async def test_the_cached_menu_never_advertises_a_rung_the_ladder_does_not_have(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stored row is not a licence to widen the menu. The ladder is the chain's
+    own verdict — ``video_options`` is what ``_chain_reaches_rung`` cleared — so a
+    stale row from an older ladder is never advertised: its rung is one the
+    download would trade down, and promising it would be the bug.
+    """
+    monkeypatch.setattr(
+        user_module.cache_service,
+        "get_cached_rows",
+        _rows_returning(_ladder_rows(with_stale=True)),
+    )
+    probe = _RecordingProbe()
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=probe)
+    state = _fresh_state()
+
+    await user_module.on_text_with_url(
+        _message("https://youtu.be/abc", bot), state, _user(), object(), _fake_queue(), bot, lang=FA
+    )
+
+    taps = {cb for _, cb in _buttons(bot.keyboards[-1]) if cb.startswith("fmt:video:")}
+    assert taps == {"fmt:video:1080", "fmt:video:720", "fmt:video:480", "fmt:video:360"}, (
+        "the ladder is the contract — a stale rung outside it is never drawn"
+    )
+    data = await state.get_data()
+    assert "1440" not in [str(item) for item in data["offered"]], (
+        "and a crafted tap on the missing rung buys nothing"
+    )
+
+
+async def test_a_dead_cached_rung_still_delivers_by_downloading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ladder button whose stored file is gone must not fail: the tap verifies
+    the id at send time, drops the dead row, and downloads the rung for real —
+    the button promised a rung, and the rung arrives.
+    """
+    user_module._recent_requests.clear()
+    monkeypatch.setattr(
+        user_module.cache_service, "get_cached_rows", _rows_returning(_ladder_rows())
+    )
+
+    async def get_cached(pool: Any, url: str, media_format: str, quality: object) -> Any:
+        return {"telegram_file_id": "v-1", "kind": "video", "quality": "video:720"}
+
+    forgotten: list[tuple[str, str]] = []
+
+    async def forget(pool: Any, url: str, media_format: str, quality: object) -> None:
+        forgotten.append((media_format, str(quality)))
+
+    async def dead(
+        bot: Any, chat_id: int, cached: Any, caption: str | None = None, **kwargs: Any
+    ) -> bool:
+        return False
+
+    monkeypatch.setattr(user_module.cache_service, "get_cached", get_cached)
+    monkeypatch.setattr(user_module.cache_service, "forget", forget)
+    monkeypatch.setattr(user_module, "send_cached_file", dead)
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_RecordingProbe())
+    state = _fresh_state()
+    queue = _fake_queue()
+    await user_module.on_text_with_url(
+        _message("https://youtu.be/abc", bot), state, _user(), object(), queue, bot, lang=FA
+    )
+
+    await user_module.on_format_chosen(
+        _callback(bot, "fmt:video:720"), state, _user(), object(), queue, bot, lang=FA
+    )
+
+    assert ("video", "720") in forgotten, "the dead row is dropped, not retried forever"
+    assert len(queue.tasks) == 1, "and the rung downloads for real — the button never fails"

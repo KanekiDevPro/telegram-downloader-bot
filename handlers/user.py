@@ -1452,6 +1452,89 @@ def _cached_question_keyboard(rows: Sequence[Any], lang: str) -> InlineKeyboardM
     return builder.as_markup()
 
 
+def _cached_ladder(rows: Sequence[Any]) -> tuple[VideoOption, ...]:
+    """The full option ladder a stored row carries next to its file_id — or none.
+
+    The ladder is ``MediaInfo.video_options`` as the worker stored it: the very
+    rungs the fresh question drew, already cleared by the chain contract
+    (``_chain_reaches_rung``). Rows from before the column existed carry none,
+    and their menu stays the rows-only one.
+    """
+    for row in rows:
+        try:
+            raw = row["ladder"]
+        except (KeyError, IndexError):  # a row from before the column
+            continue
+        rungs = cache_service.parse_ladder(raw)
+        if rungs:
+            return rungs
+    return ()
+
+
+def _ladder_question(
+    rows: Sequence[Any], rungs: Sequence[VideoOption], lang: str
+) -> tuple[list[str], list[str], InlineKeyboardMarkup]:
+    """The instant menu's true shape: the *whole* ladder, the files folded in.
+
+    One button per rung, drawn exactly as a fresh question draws them
+    (``_sized_quality_rows``) — the ladder came from ``video_options``, so every
+    rung here is one the production chain delivers, and none is ever added. A
+    stored request claims its rung so its tap stays the request the row remembers
+    and replays at once; a stored request outside the ladder is *not* drawn — the
+    ladder is the contract, and a stale row never widens the menu past it. What
+    is neither a rung nor the default tier (an audio request, the router's own
+    vocabulary) is drawn as it always was.
+    """
+    heights = {str(option.height) for option in rungs}
+    top = max(rungs, key=lambda option: option.label_p)
+    claimed: dict[str, str] = {}
+    audio_rows: list[Any] = []
+    extra_rows: list[Any] = []
+    for row in rows:
+        request = str(row["quality"] or "")
+        media_format, tier = _request_parts(request)
+        if media_format == "audio":
+            audio_rows.append(row)
+            continue
+        if media_format != "video":
+            extra_rows.append(row)
+            continue
+        height = tier[:-1] if tier.endswith("p") and tier[:-1].isdigit() else tier
+        if height.isdigit():
+            if height in heights:
+                claimed.setdefault(height, tier)
+            # else: a stale rung outside the ladder — never advertised
+        elif tier == str(default_quality("video")):
+            # "best" is the top rung, whatever it was named — its row keeps the
+            # replay key its button must tap.
+            claimed.setdefault(str(top.height), tier)
+        else:
+            extra_rows.append(row)  # the router's own vocabulary, not a rung
+    builder = InlineKeyboardBuilder()
+    offered: list[str] = []
+    for label, data in _sized_quality_rows(rungs, lang):
+        height = data.rsplit(":", 1)[1]
+        tier = claimed.get(height, height)
+        builder.button(text=label, callback_data=_fmt_callback("video", tier))
+        offered.append(tier)
+    audio_offered: list[str] = []
+    for row in [*audio_rows, *extra_rows]:
+        request = str(row["quality"] or "")
+        media_format, tier = _request_parts(request)
+        if media_format == "audio":
+            codec = tier.split(".", 1)[0]
+            if codec not in audio_offered:
+                audio_offered.append(codec)
+        builder.button(
+            text=str(row["label"] or "") or label_for_request(request, lang),
+            callback_data=_fmt_callback(media_format, tier),
+        )
+    builder.button(text=t("intake.full_menu_btn", lang), callback_data=PROBE_CALLBACK)
+    builder.button(text=t("menu.back", lang), callback_data="menu:download")
+    builder.adjust(1)
+    return offered, audio_offered, builder.as_markup()
+
+
 async def _ask_from_cache(
     message: Message,
     state: FSMContext,
@@ -1463,6 +1546,10 @@ async def _ask_from_cache(
 ) -> None:
     """The question built from what the link already produced — no probe, no wait.
 
+    When a stored row carries the full option ladder (see ``_ladder_question``),
+    the menu is the link's *whole* ladder with the stored files folded in —
+    every rung the chain delivers, not only the taken ones.
+
     Each row is a request that has been served once and stored, so its button is
     the same tap a fresh menu would draw and its press replays the file instantly
     instead of downloading again. What the rows know (the title) is shown; what
@@ -1473,24 +1560,34 @@ async def _ask_from_cache(
     title = str(rows[0]["title"] or "").strip()
     if title == url.strip():
         title = ""
-    offered: list[str] = []
-    audio_offered: list[str] = []
-    for row in rows:
-        media_format, tier = _request_parts(str(row["quality"] or ""))
-        if media_format == "video":
-            offered.append(tier)
-        elif media_format == "audio":
-            codec = tier.split(".", 1)[0]
-            if codec not in audio_offered:
-                audio_offered.append(codec)
+    rungs = _cached_ladder(rows)
     text = _question_text(url, lang, title=title)
-    keyboard = _cached_question_keyboard(rows, lang)
+    if rungs:
+        # The link's whole ladder is stored next to its files, so the instant
+        # menu offers every rung the chain can deliver — not only the ones
+        # somebody already downloaded (still zero network).
+        offered, audio_offered, keyboard = _ladder_question(rows, rungs, lang)
+    else:
+        offered = []
+        audio_offered = []
+        for row in rows:
+            media_format, tier = _request_parts(str(row["quality"] or ""))
+            if media_format == "video":
+                offered.append(tier)
+            elif media_format == "audio":
+                codec = tier.split(".", 1)[0]
+                if codec not in audio_offered:
+                    audio_offered.append(codec)
+        keyboard = _cached_question_keyboard(rows, lang)
     await state.set_state(DownloadStates.waiting_format)
     await state.update_data(
         url=url,
         title=title,
         duration=0.0,
-        options=[],
+        options=[
+            (option.height, option.label_p, option.size_bytes, option.size_exact)
+            for option in rungs
+        ],
         offered=offered,
         audio_offered=audio_offered,
     )

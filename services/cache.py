@@ -16,10 +16,14 @@ what the user asked for (``audio``) next to how it was actually delivered (``kin
 
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence
+
 import asyncpg
 
 from core import database
 from core.utils import canonical_url, quality_key, sha256_hex
+from services.extractor import VideoOption
 
 __all__ = [
     "cache_key",
@@ -27,7 +31,9 @@ __all__ = [
     "get_cached",
     "get_cached_rows",
     "memorize",
+    "parse_ladder",
     "request_key",
+    "serialize_ladder",
     "url_key",
 ]
 
@@ -50,6 +56,47 @@ def url_key(url: str) -> str:
 def cache_key(url: str, media_format: str = "video", quality: object = "") -> str:
     """Stable cache key for ``url`` + the requested format and quality tier."""
     return sha256_hex(f"{canonical_url(url)}|{request_key(media_format, quality)}")
+
+
+def serialize_ladder(options: Sequence[VideoOption]) -> str:
+    """The full option ladder as stored JSON — ``height, size_bytes,
+    size_exact, width`` per rung, the four fields a fresh menu's button is
+    drawn from.
+
+    Empty input stores nothing: a row with no ladder is exactly what a row
+    from before the column existed looks like, and both keep the rows-only
+    menu.
+    """
+    if not options:
+        return ""
+    return json.dumps([[o.height, o.size_bytes, o.size_exact, o.width] for o in options])
+
+
+def parse_ladder(raw: object) -> tuple[VideoOption, ...]:
+    """A stored ladder back into options — or ``()`` when there is none.
+
+    A missing column, an empty cell and a foreign blob all read the same
+    way: "this row carries no ladder", which is all the instant menu needs
+    from a row it cannot draw a rung from.
+    """
+    if not isinstance(raw, str) or not raw:
+        return ()
+    try:
+        rows = json.loads(raw)
+    except ValueError:
+        return ()
+    if not isinstance(rows, list):
+        return ()
+    rungs: list[VideoOption] = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) != 4:
+            return ()
+        try:
+            height, size_bytes, size_exact, width = row
+            rungs.append(VideoOption(int(height), int(size_bytes), bool(size_exact), int(width)))
+        except (TypeError, ValueError):
+            return ()
+    return tuple(rungs)
 
 
 async def get_cached_rows(pool: asyncpg.Pool, url: str) -> list[asyncpg.Record]:
@@ -80,6 +127,7 @@ async def memorize(
     kind: str = "",
     title: str = "",
     label: str = "",
+    ladder: Sequence[VideoOption] = (),
 ) -> None:
     """Store a fresh file_id for a URL after a successful upload.
 
@@ -90,7 +138,9 @@ async def memorize(
     to send it as a photo again. For a gallery, ``telegram_file_id`` holds a JSON
     list of ids. ``title`` is the media's own name and ``label`` the quality line
     the fresh caption used, kept so a replay's card is byte-for-byte the card the
-    first send had.
+    first send had. ``ladder`` is the full option ladder the send was chosen
+    from — stored so the next ask can draw every rung with zero network
+    (see :func:`serialize_ladder`).
     """
     await database.store_cached_file(
         pool,
@@ -103,6 +153,7 @@ async def memorize(
         title=title,
         label=label,
         url_key=url_key(url),
+        ladder=serialize_ladder(ladder),
     )
 
 
