@@ -21,10 +21,16 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: downloader
-      POSTGRES_PASSWORD: downloader
+      # Deployment material, never a shared default: compose refuses to start
+      # until .env carries it, and the bot's DATABASE_URL below sends the very
+      # same value. (On a volume initialized with an older password Postgres
+      # keeps that one — this only decides a *new* database.)
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: downloader
     ports:
-      - "5432:5432"
+      # The host port exists for a host-run bot and the operator's own psql —
+      # nothing outside this machine has any business on the database.
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -36,10 +42,17 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # REDIS_PASSWORD is the optional lock on the queue and FSM store: set it in
+    # .env and Redis demands AUTH (the bot's REDIS_URL below authenticates with
+    # the same secret); leave it empty and the default deployment runs exactly
+    # as before.
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    command: ["sh", "-c", "if [ -n \"$${REDIS_PASSWORD}\" ]; then exec redis-server --requirepass \"$${REDIS_PASSWORD}\"; else exec redis-server; fi"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "if [ -n \"$${REDIS_PASSWORD}\" ]; then redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG; else redis-cli ping | grep -q PONG; fi"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -241,7 +254,8 @@ services:
       # socket. Read-only: the server only ever opens these files.
       - downloads:/app/downloads:ro
     ports:
-      - "8081:8081"
+      # Loopback only: the server reads local files and authenticates nobody.
+      - "127.0.0.1:8081:8081"
     healthcheck:
       # The server binds IPv4 only, so probe 127.0.0.1 (busybox wget resolves
       # `localhost` to ::1 first and reports a bogus "connection refused").
@@ -464,8 +478,8 @@ services:
         required: false
     environment:
       # Service names beat the localhost defaults from .env inside the network.
-      DATABASE_URL: postgresql://downloader:downloader@postgres:5432/downloader
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://downloader:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/downloader
+      REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/0
       DOWNLOAD_DIR: /app/downloads
       # Zero-copy uploads: the same volume the telegram-api service mounts at
       # this very path (see its `downloads` mount). Files under it are delivered

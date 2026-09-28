@@ -400,7 +400,7 @@ write_env() {
         ok "Keeping the existing .env (delete it and re-run to write a new one)."
         return 0
     fi
-    local token="${BOT_TOKEN:-}" admins="${ADMIN_IDS:-}" card="" lang=""
+    local token="${BOT_TOKEN:-}" admins="${ADMIN_IDS:-}" card="" lang="" pg_password=""
     # Read silently, like a password prompt: the token is typed once and must
     # not end up in the terminal's scrollback.
     [ -z "$token" ] && ask_secret "Bot token from @BotFather (BOT_TOKEN, input hidden):"
@@ -411,6 +411,16 @@ write_env() {
     card="$ASK_REPLY"
     ask "Default language for new users [en/fa] (Enter = en):" "en"
     lang="$ASK_REPLY"
+    ask_secret "PostgreSQL password (POSTGRES_PASSWORD, Enter = generate one):"
+    pg_password="$ASK_REPLY"
+    if [ -z "$pg_password" ]; then
+        # Generated once and kept where only this deployment reads it: a
+        # default shared by every install is exactly the credential this
+        # prompt replaces, and docker-compose.yml refuses to boot without it.
+        pg_password="$(openssl rand -hex 16 2>/dev/null)" || pg_password=""
+        [ -n "$pg_password" ] || pg_password="$(head -c 18 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+        [ -n "$pg_password" ] || pg_password="change-me-$RANDOM$RANDOM"
+    fi
 
     if [ -z "$token" ]; then
         fail "A bot token is required (from @BotFather). Nothing was written."
@@ -423,6 +433,7 @@ BOT_TOKEN=$token
 ADMIN_IDS=$admins
 MANUAL_CARD_NUMBER=$card
 DEFAULT_LANGUAGE=$lang
+POSTGRES_PASSWORD=$pg_password
 EOF
     chmod 600 .env 2>/dev/null || true
     ok "Wrote .env (only the settings that have no safe default; see .env.example)."

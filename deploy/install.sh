@@ -55,9 +55,34 @@ echo "==> installing dependencies"
 if [ ! -f .env ]; then
     cp .env.example .env
     echo "==> created .env from .env.example"
-    echo "    Edit it now: BOT_TOKEN, ADMIN_IDS, DATABASE_URL, REDIS_URL"
+    echo "    Edit it now: BOT_TOKEN, ADMIN_IDS, DATABASE_URL, POSTGRES_PASSWORD, REDIS_URL"
 else
     echo "==> .env already exists, leaving it untouched"
+fi
+
+# Fill one .env key in place when .env carries it, append it when it does not
+# (a blind append would leave duplicate lines — one filled, one still empty).
+set_env_key() {
+    if grep -q "^$1=" .env; then
+        sed "s|^$1=.*|$1=$2|" .env > .env.tmp && mv .env.tmp .env
+    else
+        printf '%s=%s\n' "$1" "$2" >> .env
+    fi
+}
+
+# --- Optional: database password ------------------------------------------
+# .env.example documents POSTGRES_PASSWORD for the docker-compose stack (which
+# refuses to start without it); a host-run bot keeps its password inline in
+# DATABASE_URL instead. Prompted only on a terminal — a piped or unattended
+# run leaves .env exactly as it was seeded.
+if [ -t 0 ]; then
+    printf 'PostgreSQL password for the downloader role (POSTGRES_PASSWORD, Enter = skip): '
+    pg_password=""
+    read -r pg_password || true
+    if [ -n "$pg_password" ]; then
+        set_env_key POSTGRES_PASSWORD "$pg_password"
+        echo "==> POSTGRES_PASSWORD written into .env"
+    fi
 fi
 
 # --- Optional: Local Telegram Bot API -------------------------------------
@@ -82,17 +107,6 @@ if [ -t 0 ]; then
             api_hash=""
             read -r api_hash || true
             if [ -n "$api_id" ] && [ -n "$api_hash" ]; then
-                # .env already carries these keys (it is seeded from
-                # .env.example), so a blind append would leave duplicate lines
-                # — one filled, one still empty. Fill the key in place when it
-                # is there, and append it only when it is not.
-                set_env_key() {
-                    if grep -q "^$1=" .env; then
-                        sed "s|^$1=.*|$1=$2|" .env > .env.tmp && mv .env.tmp .env
-                    else
-                        printf '%s=%s\n' "$1" "$2" >> .env
-                    fi
-                }
                 set_env_key TELEGRAM_API_ID "$api_id"
                 set_env_key TELEGRAM_API_HASH "$api_hash"
                 set_env_key TELEGRAM_API_BASE_URL "http://telegram-api:8081"
