@@ -175,6 +175,15 @@ class TaskQueue(ABC):
         """
 
     @abstractmethod
+    async def requeue_orphans(self) -> int:
+        """Move every task a dead worker left in flight back to the queue.
+
+        Called once at worker startup, before any dequeue: whatever the
+        processing shelf holds was popped by a worker that never settled
+        it (kill -9, an OOM, a container restart). Returns how many.
+        """
+
+    @abstractmethod
     async def depth(self) -> int:
         """Current number of pending tasks."""
 
@@ -193,9 +202,18 @@ class RedisTaskQueue(TaskQueue):
     def __init__(self, redis: Any, name: str) -> None:
         self.redis = redis
         self.name = name
+        #: The raw payloads this instance popped and has not settled yet,
+        #: keyed by job — the shelf is emptied with these exact bytes (the
+        #: task may well have been rewritten by the time it settles).
+        self._inflight: dict[str, str] = {}
 
     def _claim_name(self, task: DownloadTask) -> str:
         return f"{self.name}:job:{job_key(task)}"
+
+    @property
+    def _processing_name(self) -> str:
+        """The two-step pop's shelf: popped, but not yet finished."""
+        return f"{self.name}:processing"
 
     async def enqueue(self, task: DownloadTask) -> int:
         fresh = await self.redis.set(self._claim_name(task), "1", nx=True, ex=claim_ttl())
@@ -210,6 +228,8 @@ class RedisTaskQueue(TaskQueue):
 
     async def release(self, task: DownloadTask) -> None:
         try:
+            raw = self._inflight.pop(job_key(task), task.to_payload())
+            await self.redis.lrem(self._processing_name, 0, raw)
             await self.redis.delete(self._claim_name(task))
         except Exception:
             logger.debug("could not release the claim for %s", task.url, exc_info=True)
@@ -219,16 +239,41 @@ class RedisTaskQueue(TaskQueue):
         if item is None:
             return None
         _, payload = item
-        return DownloadTask.from_payload(payload)
+        # The two-step pop: the raw item hits the shelf the moment it
+        # leaves the queue, so a worker that dies leaves the task
+        # recoverable instead of gone with its BRPOP. A payload that then
+        # will not parse stays shelved — parked for the next
+        # requeue_orphans, never silently destroyed.
+        await self.redis.lpush(self._processing_name, payload)
+        task = DownloadTask.from_payload(payload)
+        self._inflight[job_key(task)] = payload
+        return task
 
     async def requeue(self, task: DownloadTask) -> int:
         # Producers LPUSH, consumers BRPOP (FIFO) — so a requeue goes to the
         # right end to be picked up next instead of after the whole backlog.
-        await self.redis.rpush(self.name, task.to_payload())
+        raw = self._inflight.pop(job_key(task), task.to_payload())
+        await self.redis.lrem(self._processing_name, 0, raw)
+        await self.redis.rpush(self.name, raw)
         return await self.depth()
 
     async def depth(self) -> int:
         return int(await self.redis.llen(self.name) or 0)
+
+    async def requeue_orphans(self) -> int:
+        """Return everything a dead worker left on the shelf to the queue.
+
+        Oldest first, to the head of the queue (the end the workers pop):
+        the requests already waiting on these are the oldest of all.
+        """
+        moved = 0
+        while True:
+            payload = await self.redis.rpop(self._processing_name)
+            if payload is None:
+                break
+            await self.redis.rpush(self.name, payload)
+            moved += 1
+        return moved
 
 
 class MemoryTaskQueue(TaskQueue):
@@ -259,6 +304,12 @@ class MemoryTaskQueue(TaskQueue):
 
     async def depth(self) -> int:
         return self._items.qsize()
+
+    async def requeue_orphans(self) -> int:
+        """Nothing to recover: a dead worker takes this queue with it —
+        there is no shelf that outlives the process.
+        """
+        return 0
 
 
 def create_queue(settings: Settings, redis: Any | None) -> TaskQueue:

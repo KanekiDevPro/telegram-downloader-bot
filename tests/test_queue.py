@@ -23,12 +23,16 @@ from services.queue import (
 
 
 class FakeRedis:
-    """Just enough Redis for the queue: a list (LPUSH/BRPOP/RPUSH/LLEN) and the
-    key/value pair the single-flight claim rides on (SET NX / DELETE)."""
+    """Just enough Redis for the queue: named lists (LPUSH/BRPOP/RPUSH/RPOP/
+    LREM/LLEN) and the key/value pair the single-flight claim rides on
+    (SET NX / DELETE)."""
 
     def __init__(self) -> None:
-        self.items: list[str] = []
+        self.lists: dict[str, list[str]] = {}
         self.kv: dict[str, str] = {}
+
+    def _list(self, name: str) -> list[str]:
+        return self.lists.setdefault(name, [])
 
     async def set(
         self, name: str, value: str, nx: bool = False, ex: int | None = None
@@ -41,21 +45,35 @@ class FakeRedis:
     async def delete(self, name: str) -> int:
         return 1 if self.kv.pop(name, None) is not None else 0
 
-    async def lpush(self, _name: str, value: str) -> int:
-        self.items.insert(0, value)
-        return len(self.items)
+    async def lpush(self, name: str, value: str) -> int:
+        items = self._list(name)
+        items.insert(0, value)
+        return len(items)
 
-    async def rpush(self, _name: str, value: str) -> int:
-        self.items.append(value)
-        return len(self.items)
+    async def rpush(self, name: str, value: str) -> int:
+        items = self._list(name)
+        items.append(value)
+        return len(items)
 
     async def brpop(self, name: str, timeout: int = 0) -> tuple[str, str] | None:
-        if not self.items:
+        items = self._list(name)
+        if not items:
             return None
-        return name, self.items.pop()
+        return name, items.pop()
 
-    async def llen(self, _name: str) -> int:
-        return len(self.items)
+    async def rpop(self, name: str) -> str | None:
+        items = self._list(name)
+        return items.pop() if items else None
+
+    async def lrem(self, name: str, count: int, value: str) -> int:
+        items = self._list(name)
+        if value in items:
+            items.remove(value)
+            return 1
+        return 0
+
+    async def llen(self, name: str) -> int:
+        return len(self._list(name))
 
 
 def _task(url: str = "https://youtu.be/abc", media_format: MediaFormat = "video") -> DownloadTask:
@@ -115,6 +133,59 @@ async def test_redis_queue_is_fifo_and_supports_requeue() -> None:
 
 async def test_redis_dequeue_returns_none_when_empty() -> None:
     assert await RedisTaskQueue(FakeRedis(), "test:queue").dequeue() is None
+
+
+# ---------------------------------------------------------------------------
+# Durability: a worker that dies must not take the job with it
+# ---------------------------------------------------------------------------
+
+
+async def test_a_task_whose_worker_dies_is_processed_by_the_next_one() -> None:
+    """P1.5, pinned: the pop itself used to be the loss. ``brpop`` removed the
+    payload, so kill -9, an OOM or a container restart mid-download destroyed
+    the job and the user's card sat on ⏳ forever. The two-step pop shelves the
+    raw item the moment it leaves the queue; a new worker's ``requeue_orphans``
+    brings every orphan home — and a settled task leaves the shelf for good."""
+    redis = FakeRedis()
+    first = RedisTaskQueue(redis, "test:queue")
+    task = _task()
+    await first.enqueue(task)
+
+    popped = await first.dequeue()
+    assert popped == task
+    # ...and the worker dies here: no release, no requeue, nothing at all.
+    second = RedisTaskQueue(redis, "test:queue")
+    assert await second.requeue_orphans() == 1, "the orphan is found on the shelf"
+    assert await second.dequeue() == task, "and processed after all"
+    await second.release(task)
+    assert await second.depth() == 0
+    assert redis._list("test:queue:processing") == [], "a settled task leaves the shelf"
+
+
+async def test_a_settled_task_never_runs_twice_from_the_shelf() -> None:
+    """The shelf is emptied by finishing, not only by recovery: a job that ran
+    to its end is not an orphan and must never be handed out again."""
+    redis = FakeRedis()
+    queue = RedisTaskQueue(redis, "test:queue")
+    task = _task()
+    await queue.enqueue(task)
+    await queue.dequeue()
+    await queue.release(task)
+
+    assert await queue.requeue_orphans() == 0, "a finished job is not an orphan"
+    assert await queue.dequeue() is None
+
+
+async def test_a_payload_that_cannot_parse_is_kept_recoverable() -> None:
+    """A shelf, not a shredder: an item that will not parse stays parked for
+    the next ``requeue_orphans`` instead of being silently destroyed."""
+    redis = FakeRedis()
+    queue = RedisTaskQueue(redis, "test:queue")
+    await redis.rpush("test:queue", "{not json")
+
+    with pytest.raises(ValueError):
+        await queue.dequeue()
+    assert await queue.requeue_orphans() == 1, "parked, not destroyed"
 
 
 def test_block_timeout_stays_snappy_for_shutdown() -> None:

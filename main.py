@@ -527,6 +527,9 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         )
 
     stop_event = asyncio.Event()
+    # What a dead worker left mid-flight comes back before anyone dequeues:
+    # one drain, once, before the consumers start (see services/queue).
+    await dp["queue"].requeue_orphans()
     # The warm-up is not a consumer, but it is this app's task all the same:
     # held here until done (the create_task GC hazard) and drained at shutdown
     # like the rest. It serves the *first* request; the workers serve the rest.
