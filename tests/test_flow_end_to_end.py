@@ -19,6 +19,7 @@ own rate named when the target exceeds it).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -43,6 +44,7 @@ from services.extractor import (
     MediaInfo,
     VideoOption,
 )
+from services.queue import DownloadTask
 from services.verify import MediaFacts
 
 USER_ID = 4242
@@ -549,6 +551,73 @@ async def test_selected_720p_delivered_480p_fails_before_anything_is_sent(
 
     assert caught.value.code == "CONVERSION_MISMATCH"
     assert recorder.calls == [], "nothing was sent — and nothing was captioned 720p"
+
+
+async def test_the_probe_runs_under_the_send_prep_and_still_gates_the_send(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """P5.4, pinned: the ffprobe verification used to sit serialized in front of
+    the send's preparation — download done, then probe, then the status edit and
+    the cover fetch, then the upload — stretching the quiet gap the user waits
+    through. It runs *under* the preparation now (overlapping the edit and the
+    cover fetch) and still lands its verdict before a single byte is sent: an
+    honest file keeps one probe under the prep, a dishonest one sends nothing."""
+    order: list[str] = []
+    probe = SimpleNamespace(running=False)
+
+    async def slow_probe(path: Any) -> MediaFacts:
+        order.append("probe:start")
+        probe.running = True
+        await asyncio.sleep(0.05)
+        probe.running = False
+        order.append("probe:end")
+        return MediaFacts(
+            format_name="mp4", codec="h264", width=1280, height=720, media_streams=1
+        )
+
+    saw_probe_running: list[bool] = []
+
+    async def prep_edit(text: str = "", **kwargs: Any) -> Any:
+        await asyncio.sleep(0)  # a real edit is I/O — the loop gets a turn first
+        order.append("prep")
+        saw_probe_running.append(probe.running)
+        return None
+
+    async def prep_delete() -> Any:
+        return None
+
+    class _SendingBot(RecordingBot):
+        async def send_video(self, chat_id: int, video: Any, **kwargs: Any) -> Any:
+            order.append("upload")
+            return SimpleNamespace(video=SimpleNamespace(file_id="v-1"))
+
+    monkeypatch.setattr(verify, "probe_media", slow_probe)
+    status = SimpleNamespace(edit_text=prep_edit, delete=prep_delete)
+    task = DownloadTask(
+        url=YOUTUBE_URL,
+        telegram_id=USER_ID,
+        chat_id=USER_ID,
+        media_format="video",
+        quality="720",
+        lang=EN,
+        title="A Clip",
+    )
+    recorder = _SendingBot()
+
+    await worker._finish_upload(
+        task,
+        cast(Bot, recorder),
+        object(),
+        cast(Any, status),
+        _video_result(tmp_path, height=720, quality="720"),
+        card="A Clip",
+    )
+
+    assert saw_probe_running == [True], "the send prep runs while the probe is in flight"
+    assert order.index("probe:end") < order.index("upload"), (
+        "the verdict still lands before anything is sent"
+    )
+    assert order[-1] == "upload", "and the file went out"
 
 
 # ---------------------------------------------------------------------------

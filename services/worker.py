@@ -630,6 +630,7 @@ async def _finish_upload(
     settings = get_settings()
     lang = task.lang or DEFAULT_LANG
     upload_started = time.monotonic()
+    verify_task: asyncio.Task[str | None] | None = None
     try:
         files = (result.file_path, *result.extra_paths)
         actual_size = sum(path.stat().st_size for path in files)
@@ -644,7 +645,7 @@ async def _finish_upload(
         # Only the captioned media is checked (an album is named by its first
         # file); see services/verify.py for the policy and its tolerances.
         if _delivery_kind(files[0], result.media_format) in ("audio", "video"):
-            mismatch = await verify.verify_produced(
+            verification = verify.verify_produced(
                 result.file_path,
                 media_format=result.media_format,
                 quality=result.quality,
@@ -659,8 +660,8 @@ async def _finish_upload(
                 # services/verify.py (delivered-as-requested is never a failure).
                 source_kbps=result.info.audio_kbps,
             )
-            if mismatch:
-                raise ExtractionError("CONVERSION_MISMATCH", mismatch)
+            verify_task = asyncio.create_task(verification)
+            verify_task.add_done_callback(_log_task_failure)
 
         # Upload to Telegram and remember the file_id (and how to send it again).
         # The card's ⏳ covers the upload too — one compact state for the whole
@@ -670,6 +671,14 @@ async def _finish_upload(
         # Inside the job directory on purpose: the artwork is part of this job and
         # goes away with it, in the ``finally`` below.
         cover = await spotify.download_cover(track, result.file_path.parent) if track else None
+        # The verdict lands here, before the send: verification moved *under*
+        # the preparation (the edit, the cover fetch), never past the promise
+        # it protects.
+        if verify_task is not None:
+            mismatch = await verify_task
+            verify_task = None
+            if mismatch:
+                raise ExtractionError("CONVERSION_MISMATCH", mismatch)
         async with ActionPulse(
             bot, task.chat_id, upload_action(_delivery_kind(files[0], result.media_format))
         ):
@@ -738,6 +747,8 @@ async def _finish_upload(
         await _retire_status(status, card=card)
         return time.monotonic() - upload_started
     finally:
+        if verify_task is not None:  # prep failed: no orphaned probe task
+            verify_task.cancel()
         shutil.rmtree(result.file_path.parent, ignore_errors=True)  # per-job dir
 
 
