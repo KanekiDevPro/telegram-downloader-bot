@@ -1247,6 +1247,17 @@ def classify_block(error: ExtractionError, url: str, cookie_file: Path | None) -
         return "session"
     if error.code in BLOCK_EXTRACTION_CODES:
         return "login" if login_looking_block(error, url, cookie_file) else "ip"
+    if error.code == "YOUTUBE_BLOCKED":
+        # The fleet condition means no usable session anywhere — the jar if it
+        # cannot sign in, otherwise the flagged egress. Either way a block for
+        # the record, never a content problem that would hide a fleet outage.
+        if (
+            cookie_file is None
+            or not cookie_jar_is_usable(cookie_file)
+            or missing_youtube_login_cookies(cookie_file)
+        ):
+            return "login"
+        return "ip"
     return "site"
 
 

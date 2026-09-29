@@ -902,13 +902,19 @@ async def test_without_a_configured_fallback_a_block_is_just_a_block(
 async def test_a_quarantined_instance_is_not_asked_again(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """An instance that just failed as an instance must not cost another wait."""
+    """An instance that just failed as an instance must not cost another wait.
+
+    A Vimeo link on purpose: on a YouTube link a quarantined pool *is* the fleet
+    condition and converts to the fleet code (see tests/test_fleet_blocked.py) —
+    this test pins the skip itself, not that conversion.
+    """
     error = ExtractionError("EXTRACTOR_BLOCKED", "blocked")
     env = _install(monkeypatch, extract_error=error, download_dir=tmp_path)
     env.cobalt = _fake_cobalt(available=False)
+    task = replace(TASK, url="https://vimeo.com/123456")
 
     with pytest.raises(ExtractionError) as caught:
-        await _run(env)
+        await worker.process_download_task(task, env.bot, env.pool, env.extractor, env.cobalt)
 
     assert caught.value is error
     assert env.cobalt.resolved == [], "no doomed round trip while it is quarantined"

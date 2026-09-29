@@ -522,6 +522,16 @@ MESSAGES: Final[Catalog] = {
         "en": "The site blocked the download request; try again in a little while.",
         "fa": "سایت مبدأ دانلود را مسدود کرد؛ کمی بعد دوباره تلاش کنید.",
     },
+    "err.YOUTUBE_BLOCKED": {
+        "en": (
+            "YouTube is temporarily blocking downloads right now — your link is fine. "
+            "Please try again in a few minutes."
+        ),
+        "fa": (
+            "یوتیوب فعلاً دانلود را موقتاً مسدود کرده — لینک شما سالم است. "
+            "چند دقیقهٔ دیگر دوباره تلاش کنید."
+        ),
+    },
     "err.SESSION_STALE": {
         "en": "YouTube refused this request (stale session); try again in a moment.",
         "fa": "یوتیوب این درخواست را نپذیرفت (سشن کهنه است)؛ چند لحظه بعد دوباره تلاش کنید.",

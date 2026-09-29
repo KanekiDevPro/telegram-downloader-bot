@@ -246,3 +246,9 @@ ffmpeg -version | head -1 && ffprobe -version | head -1
 5. `/doctor` (admin) — one verdict, including the helper/toolchain rows.
 6. A stale keyboard tap (a menu left over from before the deploy) — a short
    stale-menu answer, never an error.
+7. A blocked YouTube link while the fleet is down (yt-dlp bot-wall +
+   quarantined cobalt, or a sessionless cobalt) — the user hears the temporary
+   YouTube-block sentence on attempt 1 (EN + FA), never three silent retries
+   ending in a generic failure; `/doctor` shows the session row as
+   off / warming / ok from one bounded 3 s probe. The durable fix is a human
+   action — a signed-in jar via `scripts/export_cookies.py`.

@@ -57,6 +57,7 @@ from services.delivery import (
     upload_action,
 )
 from services.extractor import (
+    BLOCK_EXTRACTION_CODES,
     IMAGE_ONLY,
     DownloadResult,
     ExtractionError,
@@ -79,6 +80,13 @@ MAX_ATTEMPTS = 3
 #: cause and long enough to stay silent through a burst of retries.
 LOGIN_BLOCK_ALERT_INTERVAL_S = 600.0
 
+#: The fleet condition: yt-dlp hit YouTube's bot-wall *and* the fallback pool
+#: has nothing left (every node quarantined, or cobalt itself answered
+#: no-session). Retrying cannot change either half, so the job ends on attempt 1
+#: with one honest sentence instead of three attempts ending in a generic failure.
+YOUTUBE_BLOCKED = "YOUTUBE_BLOCKED"
+
+
 # Error codes that retrying can never fix — fail fast and tell the user.
 _PERMANENT_ERROR_CODES = {
     "UNSUPPORTED_URL",
@@ -93,7 +101,36 @@ _PERMANENT_ERROR_CODES = {
     # The fallback (which serves the photos) runs before this list is consulted, so
     # this only saves the pointless retries when there is nobody to serve them.
     IMAGE_ONLY,
+    YOUTUBE_BLOCKED,
 }
+
+def _fleet_block_error(
+    error: ExtractionError, cobalt: CobaltService | None, url: str
+) -> ExtractionError | None:
+    """The fleet-blocked error when a skipped fallback *is* the fleet condition.
+
+    ``should_use_fallback`` saying no means two different things, and only one
+    of them converts here (read, never guessed): a service the operator switched
+    off — or never configured — keeps the original diagnosis, because that link
+    never had a second engine to lose. A pool that exists but is entirely
+    quarantined has refused too (inside ``QUARANTINE_S``), so a YouTube block on
+    top of it is a *fleet* condition: no retry can move either half.
+
+    Returns the converted error (the bot-wall text kept as its message, so the
+    log loses nothing), or ``None`` when the original stands. Deliberately *not*
+    marked fallback-attempted: this link never reached the fallback, and the
+    mark would say it did.
+    """
+    if error.code not in BLOCK_EXTRACTION_CODES:
+        return None
+    if not is_youtube_url(url):
+        return None
+    if cobalt is None or not cobalt.enabled:
+        return None
+    if cobalt.available:
+        return None
+    return ExtractionError(YOUTUBE_BLOCKED, error.message)
+
 
 #: Extensions Telegram has a *photo* method for. The produced file decides, not the
 #: request that asked for it: an image-only post answered as «video» still arrives as
@@ -514,6 +551,9 @@ async def process_download_task(
     except ExtractionError as exc:
         if not fallback.should_use_fallback(exc, cobalt):
             await _note_fallback_skip(pool, exc, cobalt)
+            fleet = _fleet_block_error(exc, cobalt, target_url)
+            if fleet is not None:
+                raise fleet from exc
             raise
         await _deliver_via_fallback(
             task,
@@ -564,6 +604,9 @@ async def process_download_task(
     except ExtractionError as exc:
         if not fallback.should_use_fallback(exc, cobalt):
             await _note_fallback_skip(pool, exc, cobalt)
+            fleet = _fleet_block_error(exc, cobalt, target_url)
+            if fleet is not None:
+                raise fleet from exc
             raise
         await _deliver_via_fallback(
             task,
@@ -887,6 +930,17 @@ async def _deliver_via_fallback(
         await fallback.remember_use(
             pool, fallback.USE_FAILED, fallback.describe(exc)
         )
+        if (
+            exc.youtube_session_missing
+            and error.code in BLOCK_EXTRACTION_CODES
+            and is_youtube_url(source_url)
+        ):
+            # Both engines refused the same YouTube link for the same underlying
+            # lack of session: the fleet condition, marked attempted because both
+            # engines genuinely had this link — unlike the skip path above.
+            raise fallback.mark_fallback_attempted(
+                ExtractionError(YOUTUBE_BLOCKED, error.message)
+            ) from exc
         raise fallback.mark_fallback_attempted(error) from exc
 
     # Recorded *after* the fallback saved it and before the upload: the file is

@@ -800,11 +800,19 @@ async def probe_pot_provider(url: str, timeout: float = 5.0) -> PotProvider:
     return PotProvider(reachable=True, version=version)
 
 
-async def probe_session_server(url: str, timeout: float = 5.0) -> SessionServer:
+#: The session probe's own ceiling: a slow-but-healthy generator answers in well
+#: under a second, so 3 s says "unresponsive" without calling it broken — and a
+#: dead one can never hang /doctor (or the helper watch) past this.
+SESSION_PROBE_TIMEOUT_S = 3.0
+
+
+async def probe_session_server(url: str, timeout: float = SESSION_PROBE_TIMEOUT_S) -> SessionServer:
     """Ask the session server for the token cobalt would load, without waiting.
 
     ``/token`` answers immediately either way (the browser is what takes minutes),
-    so a probe never blocks on a generation in progress.
+    so a probe never blocks on a generation in progress — and the whole exchange
+    (connect, answer, body) is bounded by the ceiling above, so an unresponsive
+    service reads as unreachable instead of hanging the caller.
     """
     status, payload = await _fetch_json(f"{url}{SESSION_TOKEN_PATH}", timeout)
     if status == 0:
