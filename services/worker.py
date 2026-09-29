@@ -630,7 +630,10 @@ async def _finish_upload(
     settings = get_settings()
     lang = task.lang or DEFAULT_LANG
     upload_started = time.monotonic()
-    verify_task: asyncio.Task[str | None] | None = None
+    verify_task: asyncio.Task[tuple[str | None, verify.MediaFacts | None]] | None = None
+    #: What the delivery probe measured (the inline player's metadata, F2) —
+    #: ``None`` when verification was unavailable, which sends exactly as before.
+    facts: verify.MediaFacts | None = None
     try:
         files = (result.file_path, *result.extra_paths)
         actual_size = sum(path.stat().st_size for path in files)
@@ -645,7 +648,7 @@ async def _finish_upload(
         # Only the captioned media is checked (an album is named by its first
         # file); see services/verify.py for the policy and its tolerances.
         if _delivery_kind(files[0], result.media_format) in ("audio", "video"):
-            verification = verify.verify_produced(
+            verification = verify.verify_produced_with_facts(
                 result.file_path,
                 media_format=result.media_format,
                 quality=result.quality,
@@ -675,7 +678,7 @@ async def _finish_upload(
         # the preparation (the edit, the cover fetch), never past the promise
         # it protects.
         if verify_task is not None:
-            mismatch = await verify_task
+            mismatch, facts = await verify_task
             verify_task = None
             if mismatch:
                 raise ExtractionError("CONVERSION_MISMATCH", mismatch)
@@ -685,7 +688,16 @@ async def _finish_upload(
             delivered: Delivered | None = None
             try:
                 delivered = await _upload(
-                    bot, task.chat_id, result, lang, track=track, cover=cover, source_url=task.url
+                    bot,
+                    task.chat_id,
+                    result,
+                    lang,
+                    track=track,
+                    cover=cover,
+                    source_url=task.url,
+                    # Only a video send reads these, and only the probed file
+                    # carries them: a mixed post's other files keep the old call.
+                    facts=facts if result.media_format == "video" else None,
                 )
             except _SentNoFileId:
                 # The bytes are with the user; only their file_id failed to
@@ -1067,6 +1079,29 @@ class Delivered:
         return bool(self.file_id and self.kind)
 
 
+def _video_send_kwargs(facts: verify.MediaFacts | None) -> dict[str, Any]:
+    """The metadata ``send_video`` needs to become an inline player.
+
+    A video sent without dimensions and duration still arrives, but the client
+    shows a black frame and no scrub bar: Telegram renders the player from the
+    *attachment's* metadata. These are the very numbers the delivery probe
+    already measured (:func:`services.verify.verify_produced_with_facts`), so
+    there is no second ffprobe run — and only measured, positive integers are
+    passed, because Telegram rejects a width of 0 and a guess is worse than
+    silence.
+    """
+    if facts is None:
+        return {}
+    kwargs: dict[str, Any] = {}
+    if facts.width is not None and facts.width > 0:
+        kwargs["width"] = facts.width
+    if facts.height is not None and facts.height > 0:
+        kwargs["height"] = facts.height
+    if facts.duration_s is not None and facts.duration_s > 0:
+        kwargs["duration"] = int(facts.duration_s)
+    return kwargs
+
+
 def _delivery_kind(path: Path, media_format: str) -> str:
     """Which Telegram method this produced file needs.
 
@@ -1160,6 +1195,7 @@ async def _send_file(
     *,
     track: spotify.SpotifyTrack | None = None,
     cover: Path | None = None,
+    facts: verify.MediaFacts | None = None,
 ) -> str:
     """Upload one file the way its format deserves; returns its file_id.
 
@@ -1167,6 +1203,10 @@ async def _send_file(
     stores title, performer and artwork with the file, so the song arrives
     *identified* in the client's own player without a single byte being re-encoded
     — and a cached replay carries the same tags, because they live in the file_id.
+
+    ``facts`` is the delivery probe's own measurement of this file — already paid
+    for — and its dimensions and duration ride along on the video send (see
+    :func:`_video_send_kwargs`).
     """
     if media_format == "audio":
         tags: dict[str, Any] = {}
@@ -1181,9 +1221,12 @@ async def _send_file(
             lambda ref: bot.send_audio(chat_id, ref, caption=caption, **tags), path
         )
         return _file_id(sent.audio)
+    video_kwargs = _video_send_kwargs(facts)
     try:
         sent = await _deliver_ref(
-            lambda ref: bot.send_video(chat_id, ref, caption=caption, supports_streaming=True),
+            lambda ref: bot.send_video(
+                chat_id, ref, caption=caption, supports_streaming=True, **video_kwargs
+            ),
             path,
         )
         return _file_id(sent.video)
@@ -1200,6 +1243,7 @@ async def _upload(
     track: spotify.SpotifyTrack | None = None,
     cover: Path | None = None,
     source_url: str = "",
+    facts: verify.MediaFacts | None = None,
 ) -> Delivered:
     """Send what the download produced: one file, one photo, or a whole album.
 
@@ -1222,7 +1266,14 @@ async def _upload(
         return Delivered(kind=delivered.kind)
     return Delivered(
         file_id=await _send_file(
-            bot, chat_id, files[0], result.media_format, caption, track=track, cover=cover
+            bot,
+            chat_id,
+            files[0],
+            result.media_format,
+            caption,
+            track=track,
+            cover=cover,
+            facts=facts,
         ),
         kind=_delivery_kind(files[0], result.media_format),
     )

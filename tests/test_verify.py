@@ -400,10 +400,13 @@ async def test_the_worker_delivers_no_lie_even_mid_upload(
 ) -> None:
     """A measured contradiction stops the job before a caption can be sent."""
 
-    async def fake_verify(path: Path, **_claim: Any) -> str:
-        return "codec: measured mp3, claimed flac"
+    # Deliberate contract update (F2): the worker now awaits
+    # ``verify_produced_with_facts`` — one probe, verdict *and* measurement —
+    # so the fake returns the same ``(mismatch, facts)`` pair.
+    async def fake_verify(path: Path, **_claim: Any) -> tuple[str, MediaFacts]:
+        return "codec: measured mp3, claimed flac", _facts()
 
-    monkeypatch.setattr(worker.verify, "verify_produced", fake_verify)
+    monkeypatch.setattr(worker.verify, "verify_produced_with_facts", fake_verify)
     with pytest.raises(ExtractionError) as caught:
         await worker._finish_upload(
             _task(), None, object(), None, _result(tmp_path, quality="flac")  # type: ignore[arg-type]
@@ -419,11 +422,12 @@ async def test_the_worker_verifies_against_the_users_selection(
     clear failure here, never a silent re-caption."""
     seen: dict[str, Any] = {}
 
-    async def fake_verify(path: Path, **claim: Any) -> str:
+    # Deliberate contract update (F2): same ``(mismatch, facts)`` pair as above.
+    async def fake_verify(path: Path, **claim: Any) -> tuple[str, MediaFacts]:
         seen.update(claim)
-        return "resolution: selected 720p, measured height 480"
+        return "resolution: selected 720p, measured height 480", _facts()
 
-    monkeypatch.setattr(worker.verify, "verify_produced", fake_verify)
+    monkeypatch.setattr(worker.verify, "verify_produced_with_facts", fake_verify)
     job = tmp_path / "job-y"
     job.mkdir()
     produced = job / "clip.mp4"

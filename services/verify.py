@@ -402,16 +402,45 @@ async def verify_produced(
     one) only feeds the *observation* of a source-quality upscale — it never
     changes the verdict (see :func:`is_source_upscale`).
     """
+    mismatch, _facts = await verify_produced_with_facts(
+        path,
+        media_format=media_format,
+        quality=quality,
+        suffix=suffix,
+        produced_p=produced_p,
+        selected_p=selected_p,
+        source_kbps=source_kbps,
+    )
+    return mismatch
+
+
+async def verify_produced_with_facts(
+    path: Path,
+    *,
+    media_format: str,
+    quality: str,
+    suffix: str = "",
+    produced_p: object = None,
+    selected_p: object = None,
+    source_kbps: int | None = None,
+) -> tuple[str | None, MediaFacts | None]:
+    """The same single probe as :func:`verify_produced`, plus what it measured.
+
+    Returns ``(mismatch, facts)``: the verdict first, then the measurement that
+    produced it — ``None`` when verification was unavailable (or the output was
+    missing). The worker threads ``facts`` into ``send_video`` so the inline
+    player gets dimensions and duration without a second ffprobe run (F2).
+    """
     try:
         produced_ok = path.is_file() and path.stat().st_size > 0
     except OSError:
         produced_ok = False
     if not produced_ok:
         logger.error("delivery verification failed for %s: missing or empty output", path.name)
-        return "output: the produced file is missing or empty"
+        return "output: the produced file is missing or empty", None
     facts = await probe_media(path)
     if facts is None:
-        return None
+        return None, None
     mismatch = check_produced(
         facts,
         media_format=media_format,
@@ -422,9 +451,9 @@ async def verify_produced(
     )
     if mismatch:
         logger.error("delivery verification failed for %s: %s", path.name, mismatch)
-        return mismatch
+        return mismatch, facts
     _note_upscale(path, media_format=media_format, quality=quality, source_kbps=source_kbps)
-    return None
+    return None, facts
 
 
 def _note_upscale(
@@ -458,6 +487,7 @@ __all__ = [
     "check_produced",
     "MediaFacts",
     "probe_media",
+    "verify_produced_with_facts",
     "PROBE_TIMEOUT_S",
     "upscale_disclaimer",
     "verify_produced",
