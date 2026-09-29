@@ -700,17 +700,29 @@ async def _finish_upload(
         if result.media_format in ("audio", "video") and _delivery_kind(
             files[0], result.media_format
         ) in ("audio", "video", "file"):
+            # The user's *selection* is a claim too: a 720p tap must land on the
+            # rung the menu promised, not be silently re-captioned to whatever
+            # arrived (a format that vanished between the menu and the download
+            # fails clearly, with a retry on the card).
+            tapped = task.quality if is_video_height(task.quality) else None
+            # An *automatic* video pick (an Instagram reel is the case that
+            # matters) doesn't promise a rung: nobody chose a resolution, and a
+            # site's own metadata is a promise to nobody — so the metadata's
+            # number is not handed over as a claim, and any playable file the
+            # engines produce is delivered. The caption below then names what the
+            # probe measured (and, unmeasured, stays as quiet as it was).
+            automatic_video = result.media_format == "video" and tapped is None
             verification = verify.verify_produced_with_facts(
                 result.file_path,
                 media_format=result.media_format,
                 quality=result.quality,
                 suffix=result.file_path.suffix,
-                produced_p=result.info.label_p or result.info.height,
-                # The user's *selection* is a claim too: a 720p tap must land on
-                # the rung the menu promised, not be silently re-captioned to
-                # whatever arrived (a format that vanished between the menu and
-                # the download fails clearly, with a retry on the card).
-                selected_p=(task.quality if is_video_height(task.quality) else None),
+                produced_p=(
+                    None
+                    if automatic_video
+                    else (result.info.label_p or result.info.height)
+                ),
+                selected_p=tapped,
                 # Source rate feeds the upscale *observation* only — see
                 # services/verify.py (delivered-as-requested is never a failure).
                 source_kbps=result.info.audio_kbps,
@@ -734,6 +746,11 @@ async def _finish_upload(
             verify_task = None
             if mismatch:
                 raise ExtractionError("CONVERSION_MISMATCH", mismatch)
+        # What this file may be *called*: the resolution the probe measured, in
+        # the caption's own vocabulary (the short edge names a portrait reel).
+        # ``None`` when nothing was measured — the caption then falls back to the
+        # metadata, exactly as it always did.
+        measured_p = verify.measured_label_p(facts) if facts is not None else None
         async with ActionPulse(
             bot, task.chat_id, upload_action(_delivery_kind(files[0], result.media_format))
         ):
@@ -750,6 +767,10 @@ async def _finish_upload(
                     # Only a video send reads these, and only the probed file
                     # carries them: a mixed post's other files keep the old call.
                     facts=facts if result.media_format == "video" else None,
+                    # Named by the measurement when there is one — so an
+                    # automatic pick whose site metadata overstates the file
+                    # arrives captioned with the truth about itself.
+                    produced_p=measured_p,
                 )
             except _SentNoFileId:
                 # The bytes are with the user; only their file_id failed to
@@ -794,7 +815,9 @@ async def _finish_upload(
                         result.quality,
                         result.file_path.suffix,
                         lang,
-                        produced_p=result.info.label_p or result.info.height,
+                        produced_p=measured_p
+                        or result.info.label_p
+                        or result.info.height,
                         source_kbps=result.info.audio_kbps,
                     ),
                     ladder=result.info.video_options,
@@ -978,6 +1001,7 @@ def _upload_caption(
     lang: str,
     track: spotify.SpotifyTrack | None = None,
     source_url: str = "",
+    produced_p: object = None,
 ) -> str:
     """The media card this file arrives with — 🎬/🎵 … 🤖, and nothing else.
 
@@ -992,13 +1016,16 @@ def _upload_caption(
     the Spotify URL, never the mapped video it was fetched through).
     """
     # What the file *is* — its produced container and resolution — never what a
-    # button once promised.
+    # button once promised. ``produced_p`` is the delivery probe's own measurement
+    # when it could measure one (the worker threads it in): a file the site's
+    # metadata overstated is then captioned by what it really is, and an automatic
+    # pick — which promised no rung — is captioned by nothing else.
     quality = produced_quality_label(
         result.media_format,
         result.quality,
         result.file_path.suffix,
         lang,
-        produced_p=result.info.label_p or result.info.height,
+        produced_p=produced_p or result.info.label_p or result.info.height,
         source_kbps=result.info.audio_kbps,
     )
     real_size = format_size(
@@ -1335,6 +1362,7 @@ async def _upload(
     cover: Path | None = None,
     source_url: str = "",
     facts: verify.MediaFacts | None = None,
+    produced_p: object = None,
 ) -> Delivered:
     """Send what the download produced: one file, one photo, or a whole album.
 
@@ -1343,7 +1371,9 @@ async def _upload(
     and an album of them as a media group, in the post's own order.
     """
     files = (result.file_path, *result.extra_paths)
-    caption = _upload_caption(result, lang, track, source_url=source_url)
+    caption = _upload_caption(
+        result, lang, track, source_url=source_url, produced_p=produced_p
+    )
     images = [path for path in files if _delivery_kind(path, result.media_format) == "photo"]
     others = [path for path in files if path not in images]
     if images and not others:

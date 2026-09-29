@@ -33,8 +33,19 @@ Tolerances are deliberately generous where the format itself is loose: encoded
 bitrate is a target, not a measurement (VBR, container overhead, padding), so a
 delivered average between 0.7× and 1.5× of the claimed rate is the claim kept —
 an instantaneous VBR spike never fails a file. Lossless containers (FLAC, WAV)
-have no bitrate knob to lie about and are verified by codec alone. Video claims
-a resolution, so the measured height is what is checked (±5%, ≥16 px for coded
+have no bitrate knob to lie about and are verified by codec alone.
+
+**Video, and the two vocabularies.** A video delivery makes at most two
+resolution claims, and each is checked against the measurement *it* may honestly
+be compared with. The caption's claim is a *name* — a 1920x1080 file is 1080p,
+and so is a portrait 1080x1920 reel, because the short edge names a resolution
+(``services.extractor.quality_label_p``) — so it is checked against the name of
+the measurement, never its raw ``height`` field. The user's *tap* is the raw
+height ceiling the format selector speaks (1920 for that same portrait reel), so
+it is checked against the measured height. Comparing a name against a raw height
+used to refuse every vertical reel (a 1080x1920 file «contradicted» its own
+1080p caption); a claim of ``0`` or nothing is no claim at all and is never
+invented into one. The tolerance itself is unchanged (±5%, ≥16 px for coded
 padding like 1088 vs 1080).
 """
 
@@ -49,7 +60,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.utils import normalize_quality
-from services.extractor import audio_bitrate, audio_is_original
+from services.extractor import audio_bitrate, audio_is_original, quality_label_p
 
 logger = logging.getLogger(__name__)
 
@@ -352,33 +363,55 @@ def _container_claims(suffix: str) -> tuple[frozenset[str], bool] | None:
     return codecs, suffix == ".wav"
 
 
+def measured_label_p(facts: MediaFacts) -> int | None:
+    """What the measurement may be *called* — ``1080`` for a 1080x1920 reel.
+
+The name a resolution earns is what the caption would state for this exact
+file, in the vocabulary ``services.delivery.resolution_name`` renders: the
+short edge names it, so a portrait video is not «1920p». ``None`` when nothing
+was measured — an unmeasured file contradicts no name.
+    """
+    return quality_label_p(facts.width, facts.height)
+
+
 def _check_video(
     facts: MediaFacts, produced_p: object, selected_p: object = None
 ) -> str | None:
-    mismatch = _height_mismatch(facts, produced_p, "claimed")
+    """Both of a video delivery's claims, each in its own vocabulary.
+
+    The caption's claim (``produced_p``) is a *name*, so it meets the name of
+    the measurement; the user's tap (``selected_p``) is a raw height ceiling, so
+    it meets the measured height. Anything else compares a name to a number and
+    invents a contradiction out of a portrait frame (see the module docstring).
+    """
+    mismatch = _height_mismatch(produced_p, measured_label_p(facts), "claimed")
     if mismatch:
         return mismatch
-    return _height_mismatch(facts, selected_p, "selected")
+    return _height_mismatch(selected_p, facts.height, "selected")
 
 
-def _height_mismatch(facts: MediaFacts, expected: object, word: str) -> str | None:
-    """One height claim checked against the measurement — or ``None``.
+def _height_mismatch(expected: object, measured: int | None, word: str) -> str | None:
+    """One resolution claim checked against the measurement — or ``None``.
 
     Shared by the two claims a delivery makes: the resolution the caption will
     state (``produced_p``) and the rung the user tapped (``selected_p``). The
     tolerance absorbs coded padding (1088 vs 1080) and normal variance; a file
     that lands on a *different rung* than the claim is a contradiction of that
-    claim, whichever claim it is.
+    claim, whichever claim it is. A claim nobody made (``None``, empty, or a
+    ``0`` that a site's missing metadata produced) is not checked — nothing is
+    contradicted by a file, only by a promise.
     """
     try:
         expected_height = int(str(expected).strip())
     except (TypeError, ValueError):
         return None  # no resolution claimed — nothing to check
-    if facts.height is None or facts.height <= 0:
+    if expected_height <= 0:
+        return None  # «0p» is not a claim anyone made
+    if measured is None or measured <= 0:
         return None  # not reported cannot contradict
     tolerance = max(HEIGHT_TOLERANCE_PX, expected_height * HEIGHT_TOLERANCE_RATIO)
-    if abs(facts.height - expected_height) > tolerance:
-        return f"resolution: {word} {expected_height}p, measured height {facts.height}"
+    if abs(measured - expected_height) > tolerance:
+        return f"resolution: {word} {expected_height}p, measured {measured}p"
     return None
 
 
@@ -485,6 +518,7 @@ def _note_upscale(
 __all__ = [
     "BITRATE_TOLERANCE",
     "check_produced",
+    "measured_label_p",
     "MediaFacts",
     "probe_media",
     "verify_produced_with_facts",

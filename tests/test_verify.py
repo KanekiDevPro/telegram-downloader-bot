@@ -217,6 +217,70 @@ def test_an_unclaimed_video_resolution_is_not_checked() -> None:
     )
 
 
+def test_a_resolution_of_zero_is_no_claim_at_all() -> None:
+    """A claim nobody made cannot be contradicted: a result whose metadata
+    reports no height at all (the cobalt fallback reports none) used to reach
+    the check as ``0`` and read as «claimed 0p» — every real file, whatever its
+    resolution, «contradicted» it."""
+    assert (
+        check_produced(
+            _facts(codec="h264", width=1080, height=1920),
+            media_format="video",
+            quality="best",
+            suffix=".mp4",
+            produced_p=0,
+        )
+        is None
+    )
+
+
+def test_a_portrait_reel_is_named_by_its_short_edge_not_by_its_height() -> None:
+    """The Instagram defect, at its root: a 1080x1920 reel is *called* 1080p —
+    the short edge names a resolution, as every player agrees — while ffprobe
+    reports the literal height 1920. Comparing the name against the raw height
+    refused a file that was exactly what the caption promised (every vertical
+    reel, hence every Instagram download ending in CONVERSION_MISMATCH)."""
+    assert (
+        check_produced(
+            _facts(codec="h264", width=1080, height=1920),
+            media_format="video",
+            quality="best",
+            suffix=".mp4",
+            produced_p=1080,
+        )
+        is None
+    )
+
+
+def test_a_tapped_portrait_rung_is_measured_in_the_taps_own_vocabulary() -> None:
+    """A tap speaks the format selector's language — the raw height ceiling
+    (1920 for a 1080x1920 reel) — while the caption speaks names. Each claim is
+    checked against the measurement it may honestly be compared with."""
+    assert (
+        check_produced(
+            _facts(codec="h264", width=1080, height=1920),
+            media_format="video",
+            quality="1920",
+            suffix=".mp4",
+            produced_p=1080,
+            selected_p="1920",
+        )
+        is None
+    )
+    # …and a portrait reel that really did land lower than the tap still fails:
+    # the caption can only ever say 720p (and does), so the broken promise is the
+    # tap itself — reported in the tap's own numbers.
+    mismatch = check_produced(
+        _facts(codec="h264", width=720, height=1280),
+        media_format="video",
+        quality="1920",
+        suffix=".mp4",
+        produced_p=720,
+        selected_p="1920",
+    )
+    assert mismatch is not None and "selected 1920p" in mismatch
+
+
 # ---------------------------------------------------------------------------
 # The policy: fail open when nothing can be learned
 # ---------------------------------------------------------------------------

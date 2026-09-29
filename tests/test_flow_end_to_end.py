@@ -621,6 +621,162 @@ async def test_the_probe_runs_under_the_send_prep_and_still_gates_the_send(
 
 
 # ---------------------------------------------------------------------------
+# f2. The reported Instagram reel: auto-best, delivered, captioned by measure
+# ---------------------------------------------------------------------------
+
+
+INSTAGRAM_REEL_URL = "https://www.instagram.com/reel/DcUdF_fJ9M_/"
+
+
+class _LoginWalledExtractor:
+    """Instagram behind its login wall: the metadata probe answers nothing."""
+
+    async def extract(self, url: str) -> MediaInfo:
+        raise ExtractionError("EXTRACTOR_BLOCKED", "login required")
+
+
+class _ReelBot(RecordingBot):
+    """The upload edge, minus Telegram: the caption of each send is recorded."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.captions: list[str] = []
+
+    async def send_video(self, chat_id: int, video: Any, **kwargs: Any) -> Any:
+        self.captions.append(kwargs.get("caption") or "")
+        return SimpleNamespace(video=SimpleNamespace(file_id="v-reel"))
+
+
+def _instagram_result(tmp_path: Any, *, label_p: int, height: int) -> DownloadResult:
+    """A portrait reel as yt-dlp reports it: 1080x1920, *named* 1080p."""
+    job = tmp_path / "job-reel"
+    job.mkdir()
+    media = job / "reel.mp4"
+    media.write_bytes(b"x" * 2048)
+    info = MediaInfo(
+        source_url=INSTAGRAM_REEL_URL,
+        title="A Reel",
+        platform="instagram",
+        webpage_url=INSTAGRAM_REEL_URL,
+        extension="mp4",
+        thumbnail=None,
+        duration=12,
+        filesize_approx=2048,
+        is_live=False,
+        height=height,
+        label_p=label_p,
+    )
+    return DownloadResult(file_path=media, info=info, media_format="video", quality="best")
+
+
+def _retiring_status() -> Any:
+    """The status-message edge: nothing to edit, nothing to delete."""
+
+    async def edit_status(text: str = "", **kwargs: Any) -> Any:
+        return None
+
+    async def retire() -> Any:
+        return None
+
+    return SimpleNamespace(edit_text=edit_status, delete=retire)
+
+
+async def test_an_instagram_reel_arrives_and_is_captioned_by_what_the_file_is(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The ticket, end to end: the reel URL, a probe that hits Instagram's login
+    wall (so the *automatic* pick is what the user taps), and a site whose own
+    metadata claims 1080p for a file the delivery probe measures at 720p.
+
+    Nothing there is a broken promise — no rung was ever picked, and a site's
+    metadata is not a promise — so the file is delivered, and the caption names
+    what was measured instead of what the site said. (Before this, the metadata
+    claim was compared against a raw portrait height and every reel ended in
+    CONVERSION_MISMATCH; a mere «no claim» is no claim at all.)"""
+    await _always_supported(monkeypatch)
+    bot = RecordingBot()
+    bot.state = SimpleNamespace(extractor=_LoginWalledExtractor())
+    state, queue = _fresh_state(), _fake_queue()
+
+    await user_module._queue_url_flow(
+        _message(INSTAGRAM_REEL_URL, bot),
+        state,
+        _user(),
+        INSTAGRAM_REEL_URL,
+        EN,
+        bot=cast(Bot, bot),
+        pool=object(),
+        queue=queue,
+    )
+
+    task = queue.tasks[-1]
+    assert (task.media_format, task.quality) == ("video", "best"), (
+        "the reel asks nothing — Instagram's only offered answer is the automatic one"
+    )
+
+    monkeypatch.setattr(
+        verify,
+        "probe_media",
+        _probe(format_name="mp4", codec="h264", width=720, height=1280, media_streams=1),
+    )
+    recorder = _ReelBot()
+
+    await worker._finish_upload(
+        task,
+        cast(Bot, recorder),
+        object(),
+        cast(Any, _retiring_status()),
+        _instagram_result(tmp_path, label_p=1080, height=1920),
+    )
+
+    assert len(recorder.captions) == 1, "the reel went out — no ladder, no refusal"
+    caption = recorder.captions[0]
+    assert t("media.quality_p", EN, height=720) in caption, "captioned as measured"
+    assert t("media.quality_p", EN, height=1080) not in caption, "never the site's claim"
+
+
+async def test_an_automatic_pick_hands_verification_no_resolution_to_enforce(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """What an automatic pick promises is a real video file — not a resolution
+    nobody chose. The metadata's own number is therefore *not* handed to
+    verification as a claim (an automatic Instagram reel whose site metadata
+    disagrees with its bytes is delivered, not refused)."""
+    seen: dict[str, Any] = {}
+
+    async def fake_verify(path: Any, **claim: Any) -> tuple[None, MediaFacts]:
+        seen.update(claim)
+        return None, MediaFacts(
+            format_name="mp4", codec="h264", width=720, height=1280, media_streams=1
+        )
+
+    monkeypatch.setattr(verify, "verify_produced_with_facts", fake_verify)
+    task = DownloadTask(
+        url=INSTAGRAM_REEL_URL,
+        telegram_id=USER_ID,
+        chat_id=USER_ID,
+        media_format="video",
+        quality="best",
+        lang=EN,
+        title="A Reel",
+    )
+    recorder = _ReelBot()
+
+    await worker._finish_upload(
+        task,
+        cast(Bot, recorder),
+        object(),
+        cast(Any, _retiring_status()),
+        _instagram_result(tmp_path, label_p=1080, height=1920),
+    )
+
+    assert seen["media_format"] == "video"
+    assert seen["produced_p"] is None, "no rung was picked, so no rung is a promise"
+    assert seen["selected_p"] is None
+    assert len(recorder.captions) == 1
+
+
+# ---------------------------------------------------------------------------
 # g. Native audio
 # ---------------------------------------------------------------------------
 
