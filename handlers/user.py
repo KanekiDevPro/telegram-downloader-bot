@@ -624,6 +624,7 @@ async def cmd_start(
     user: asyncpg.Record,
     pool: asyncpg.Pool | None = None,
     lang: str = DEFAULT_LANG,
+    state: FSMContext | None = None,
 ) -> None:
     """``/start`` — Home, or the one screen that must come before it.
 
@@ -631,7 +632,13 @@ async def cmd_start(
     language is the one thing not known yet, so asking it *is* the onboarding.
     Everybody else lands on Home directly — the choice is stored on the account
     and never asked again («Change language» is in the Profile).
+
+    It is also the way back to Home from anywhere, so it ends whatever step was
+    pending — including the Downloads picker's: a link sent after `/start` is an
+    ordinary link, never another question about platforms.
     """
+    if state is not None:
+        await state.set_state(None)
     if _needs_language_screen(user):
         await message.answer(
             t("language.first_time", lang),

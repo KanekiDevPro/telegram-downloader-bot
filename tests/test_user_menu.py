@@ -1054,6 +1054,19 @@ async def test_going_home_releases_the_picker_gate(monkeypatch: pytest.MonkeyPat
     )
 
 
+async def test_start_releases_the_picker_gate() -> None:
+    """`/start` is the way back to Home from anywhere, so it ends the picker's
+    step with it: a link sent after `/start` is an ordinary link, never another
+    question about platforms."""
+    bot = RecordingBot()
+    state = _fresh_state()
+
+    await user_module.on_menu_download(_callback(bot, "menu:download"), state, lang=FA)
+    await user_module.cmd_start(_message("/start", bot), _user(), state=state, lang=FA)
+
+    assert await state.get_state() is None
+
+
 async def test_the_explicit_download_command_is_never_gated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
