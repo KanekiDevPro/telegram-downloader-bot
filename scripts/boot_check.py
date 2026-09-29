@@ -358,7 +358,7 @@ async def main() -> int:
                 "on_menu_home",
             }
             <= user_callbacks,
-            "⬇️ دانلود، 👤 پروفایل من، 💬 پشتیبانی، 🌐 زبان، ⬅️ بازگشت",
+            "📥 دانلودها، 👤 پروفایل من، 🌐 تغییر زبان، ℹ️ راهنما و پشتیبانی، ⬅️ بازگشت",
         )
         check(
             "the cookie alert's export button reaches the same path as /refresh",

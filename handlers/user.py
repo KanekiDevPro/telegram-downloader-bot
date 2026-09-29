@@ -121,15 +121,17 @@ class DownloadStates(StatesGroup):
 
 
 def _main_menu(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup:
-    """HOME — the navigation hub everything hangs off: Download, Profile, groups.
+    """HOME — the navigation hub everything hangs off: a 2x2 grid of destinations.
 
-    Deliberate shape, not a flat list. Download gets the top row to itself: it is
-    why most people came. Language, the support contact and the store live under
-    Profile now — they are account concerns, and a home carrying every action is
-    a wall of buttons. And the admin panel button is drawn for admins only (an
-    admin is never offered «💎 Go VIP» either: they hold it permanently, so the
-    button could only lead to a screen explaining that they cannot buy what they
-    already have).
+    Deliberate shape, not a flat list. Download and Profile take the first row:
+    Download is why most people came, Profile is the account. Under them sit the
+    language switch and the support contact — *here*, not one screen deeper: a
+    user who landed in the wrong language is looking at Home, and «change it»
+    behind Profile was a detour through a screen they did not ask for (the store
+    stays under Profile: VIP is an account concern, not a fix). The admin panel
+    button is drawn for admins only (an admin is never offered «💎 Go VIP»
+    either: they hold it permanently, so the button could only lead to a screen
+    explaining that they cannot buy what they already have).
 
     «👥 Add to a group» is the one URL button this bot draws, and it lives here
     alone: it *is* onboarding — Telegram's own group picker, opened through the
@@ -140,12 +142,16 @@ def _main_menu(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text=t("menu.download", lang), callback_data="menu:download")
     builder.button(text=t("menu.profile", lang), callback_data="menu:profile")
+    builder.button(text=t("menu.language", lang), callback_data="menu:language")
+    builder.button(text=t("menu.support", lang), callback_data="menu:support")
+    sizes = [2, 2]
     if admin:
         # The panel used to be reachable only by remembering that `/admin` exists:
         # an operator had no way to tell a missing permission from a missing
-        # feature. It is a button now, on the one screen they always open.
+        # feature. It is a button now, on the one screen they always open — under
+        # the grid, so the four user destinations keep their rows.
         builder.button(text=t("menu.admin", lang), callback_data="menu:admin")
-    sizes = [1, 2] if admin else [1, 1]
+        sizes.append(1)
     link = group_add_link()
     if link:
         builder.button(text=t("menu.add_group", lang), url=link)
@@ -493,18 +499,18 @@ def _language_keyboard(
 
 
 def _profile_keyboard(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup:
-    """Profile's own actions: language, VIP (not for an admin), support, back.
+    """Profile's own actions: VIP (not for an admin), support, back.
 
-    Two per row: four shortcuts read as one small panel instead of a column
-    every one of which needs a scroll to reach. The order is the reading order —
-    language and VIP on the first row, support and the way back under them (an
-    admin loses the VIP button and the grid closes up to a full row plus the
-    back). Premium is the same button the menu used to carry — moved, not
-    removed — and the support contact moved here too when the help section went
-    away: it is who to ask, which is what a profile is for.
+    Two per row: the shortcuts read as one small panel instead of a column every
+    one of which needs a scroll to reach. The order is the reading order — VIP
+    and the support contact on the first row, the way back under them (an admin
+    loses the VIP button, and support and back then share the row). Premium is
+    the same button the menu used to carry — moved, not removed. The language
+    switch deliberately left: it is a *fix*, and a wrong language is noticed at
+    Home, so Home draws it (old keyboards that still carry «profile:language»
+    keep working — ``on_profile_language`` is still routed).
     """
     builder = InlineKeyboardBuilder()
-    builder.button(text=t("menu.language", lang), callback_data="profile:language")
     if not admin:
         builder.button(text=t("menu.premium", lang), callback_data="menu:premium")
     builder.button(text=t("menu.support", lang), callback_data="menu:support")
@@ -630,15 +636,11 @@ def _welcome_text(name: str, lang: str) -> str:
     HTML on purpose (the bot's default parse mode) — the title and the service list
     carry the emphasis, so the buttons under it read as the actions rather than as
     more text. The services are *named*, because "supports many sites" is not an
-    answer to "can it do the one I have".
+    answer to "can it do the one I have". No language line: the switch is one of
+    the four buttons under this text, and a hint pointing at `/language` next to
+    the button would describe a screen the reader is already standing on.
     """
-    return "\n".join(
-        (
-            t("start.welcome", lang, name=escape_html(name)),
-            "",
-            t("menu.language_hint", lang),
-        )
-    )
+    return t("start.welcome", lang, name=escape_html(name))
 
 
 

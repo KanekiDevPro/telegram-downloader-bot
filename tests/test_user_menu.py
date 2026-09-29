@@ -222,23 +222,32 @@ def _no_database(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, str]]:
 # ---------------------------------------------------------------------------
 
 
-def test_the_home_screen_offers_the_two_hubs() -> None:
+def test_the_home_screen_is_a_two_by_two_grid() -> None:
+    """Home is the four destinations, laid out as the grid they are: Downloads
+    and Profile on the first row (why most people came), the language switch and
+    the support contact under them. The language switch belongs *here* — a user
+    who landed in the wrong language is at Home, and hiding the fix one screen
+    deep behind Profile was a detour through a screen they did not want."""
     markup = user_module._main_menu(FA)
 
     assert dict(_buttons(markup)) == {
-        "⬇️ دانلود": "menu:download",
+        "📥 دانلودها": "menu:download",
         "👤 پروفایل من": "menu:profile",
+        "🌐 تغییر زبان": "menu:language",
+        "ℹ️ راهنما و پشتیبانی": "menu:support",
     }
-    # Download first and alone: it is why most people came. The account actions
-    # (VIP, Language, Support) live under Profile — home is two destinations and
-    # nothing more.
-    assert [len(row) for row in markup.inline_keyboard] == [1, 1]
+    assert [[b.callback_data for b in row] for row in markup.inline_keyboard] == [
+        ["menu:download", "menu:profile"],
+        ["menu:language", "menu:support"],
+    ]
 
 
 def test_the_menu_speaks_the_language_it_is_drawn_in() -> None:
     assert dict(_buttons(user_module._main_menu(EN))) == {
-        "⬇️ Download": "menu:download",
+        "📥 Downloads": "menu:download",
         "👤 My profile": "menu:profile",
+        "🌐 Language": "menu:language",
+        "ℹ️ Help and support": "menu:support",
     }
 
 
@@ -253,26 +262,33 @@ def test_the_menu_hides_the_vip_button_from_an_admin() -> None:
     markup = user_module._main_menu(FA, admin=True)
 
     assert "menu:premium" not in dict(_buttons(markup)).values()
-    assert "menu:language" not in dict(_buttons(markup)).values(), "language lives under Profile"
     assert dict(_buttons(markup)) == {
-        "⬇️ دانلود": "menu:download",
+        "📥 دانلودها": "menu:download",
         "👤 پروفایل من": "menu:profile",
+        "🌐 تغییر زبان": "menu:language",
+        "ℹ️ راهنما و پشتیبانی": "menu:support",
         "🛠 پنل مدیریت": "menu:admin",
     }
-    assert [len(row) for row in markup.inline_keyboard] == [1, 2]
+    assert [len(row) for row in markup.inline_keyboard] == [2, 2, 1], (
+        "the grid first, the panel on its own row under it"
+    )
 
 
 def test_an_admins_profile_does_not_offer_the_store_either() -> None:
-    """The store moved, it did not disappear — except where buying is impossible."""
+    """The store moved, it did not disappear — except where buying is impossible.
+
+    Profile carries account actions only: the language switch moved to Home (it
+    is not an account *detail*, it is the first thing a lost user needs), so no
+    screen but Home draws a language button."""
     offered = dict(_buttons(user_module._profile_keyboard(FA, admin=True)))
 
     assert "menu:premium" not in offered.values()
     assert dict(_buttons(user_module._profile_keyboard(FA))) == {
-        "🌐 زبان": "profile:language",
         "💎 ارتقا به ویژه (VIP)": "menu:premium",
-        "💬 پشتیبانی": "menu:support",
+        "ℹ️ راهنما و پشتیبانی": "menu:support",
         "⬅️ بازگشت": "menu:home",
     }
+    assert "menu:language" not in offered.values(), "the switch lives on Home"
 
 
 def test_only_an_admin_is_offered_the_panel() -> None:
@@ -280,24 +296,30 @@ def test_only_an_admin_is_offered_the_panel() -> None:
     assert "menu:admin" in dict(_buttons(user_module._main_menu(EN, admin=True))).values()
 
 
-def test_the_support_button_lives_under_profile_and_home_stays_clean() -> None:
-    """Home is two destinations and nothing more; the support contact is
-    Profile's business — who to ask is an account concern, and its *screen* is
-    the one that honestly says whether anybody configured a contact yet."""
-    assert "menu:support" not in dict(_buttons(user_module._main_menu(FA))).values()
+def test_the_language_and_support_buttons_live_on_home_now() -> None:
+    """Both moved up, not away: Home draws the language switch (the fix for a
+    wrong language, one tap from where the mistake was noticed) and the support
+    contact — and Profile no longer duplicates either route. Its *screen* is
+    still the one that honestly says whether anybody configured a contact yet."""
+    home = dict(_buttons(user_module._main_menu(FA)))
 
-    markup = user_module._profile_keyboard(FA)
+    assert home["🌐 تغییر زبان"] == "menu:language"
+    assert home["ℹ️ راهنما و پشتیبانی"] == "menu:support"
 
-    assert dict(_buttons(markup))["💬 پشتیبانی"] == "menu:support"
+    profile = dict(_buttons(user_module._profile_keyboard(FA)))
+
+    assert profile["ℹ️ راهنما و پشتیبانی"] == "menu:support"
+    assert "menu:language" not in profile.values()
+    assert "profile:language" not in profile.values(), "no second language route"
 
 
 def test_the_profile_actions_sit_side_by_side() -> None:
-    """Profile is four shortcuts, not four screens: two per row keeps every one
-    of them on the same folded-keyboard view — including the way back."""
-    assert [len(row) for row in user_module._profile_keyboard(FA).inline_keyboard] == [2, 2]
+    """Profile is a handful of shortcuts, not a column: two per row keeps every
+    one of them on the same folded-keyboard view — including the way back."""
+    assert [len(row) for row in user_module._profile_keyboard(FA).inline_keyboard] == [2, 1]
     assert [
         len(row) for row in user_module._profile_keyboard(FA, admin=True).inline_keyboard
-    ] == [2, 1], "an admin has no VIP button, so the second row holds only the way back"
+    ] == [2], "an admin has no VIP button, so support and back share one row"
 
 
 @pytest.mark.parametrize(
@@ -544,12 +566,11 @@ async def test_the_profile_shows_id_username_status_and_quota() -> None:
     assert "رایگان 🪙" in text
     assert "سهمیهٔ امروز: 3 از 10" in text and "7 باقی مانده" in text
     assert "کارهای در صف: 2" in text
-    assert "🇮🇷 فارسی" in text, "the language row: 'change it' needs an obvious home"
-    # The screen owns its account actions: language and VIP moved here from Home.
+    assert "🇮🇷 فارسی" in text, "the language row still names the account's language"
+    # The screen owns its account actions: VIP and support, two per row.
     assert dict(_buttons(bot.keyboards[-1])) == {
-        "🌐 زبان": "profile:language",
         "💎 ارتقا به ویژه (VIP)": "menu:premium",
-        "💬 پشتیبانی": "menu:support",
+        "ℹ️ راهنما و پشتیبانی": "menu:support",
         "⬅️ بازگشت": "menu:home",
     }
 
@@ -1941,8 +1962,8 @@ async def test_a_failed_download_offers_a_retry_only_its_owner_can_press(
 
 
 def test_the_home_screen_is_navigation_only() -> None:
-    """Home is a hub: account actions live under the screen that owns them (and
-    the support contact under Profile), and the endpoints that were removed for
+    """Home is a hub: its four destinations are the whole surface (the store
+    stays under the screen that owns it), and the endpoints that were removed for
     good (`menu:status`, `menu:subscribe`, `menu:help`) must not come back — a
     button is a promise, and every promise needs a handler that keeps it."""
     offered = {
@@ -1952,6 +1973,8 @@ def test_the_home_screen_is_navigation_only() -> None:
     assert offered == {
         "menu:download",
         "menu:profile",
+        "menu:language",
+        "menu:support",
         "menu:admin",
     }
     assert not offered & {"menu:status", "menu:subscribe", "menu:help"}
@@ -2013,7 +2036,7 @@ async def test_an_audio_menu_is_refused_on_a_link_that_has_none() -> None:
 
 async def test_entering_a_screen_replaces_the_whole_keyboard() -> None:
     """The navigation promise, pinned: a screen swap carries *only* that screen's
-    controls — Profile keeps Language/VIP/Back and nothing from Home survives."""
+    controls — Profile keeps VIP/Support/Back and nothing from Home survives."""
     bot = RecordingBot()
 
     await user_module.on_menu_profile(
@@ -2021,9 +2044,8 @@ async def test_entering_a_screen_replaces_the_whole_keyboard() -> None:
     )
 
     assert dict(_buttons(bot.keyboards[-1])) == {
-        "🌐 زبان": "profile:language",
         "💎 ارتقا به ویژه (VIP)": "menu:premium",
-        "💬 پشتیبانی": "menu:support",
+        "ℹ️ راهنما و پشتیبانی": "menu:support",
         "⬅️ بازگشت": "menu:home",
     }
     assert bot.texts == [], "the same message, edited"

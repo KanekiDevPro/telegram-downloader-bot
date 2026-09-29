@@ -75,10 +75,10 @@ MESSAGES: Final[Catalog] = {
     "cmd.status": {"en": "Download status", "fa": "وضعیت دانلود"},
     "menu.profile": {"en": "👤 My profile", "fa": "👤 پروفایل من"},
     "menu.premium": {"en": "💎 Go VIP", "fa": "💎 ارتقا به ویژه (VIP)"},
-    "menu.language": {"en": "🌐 Language", "fa": "🌐 زبان"},
-    "menu.download": {"en": "⬇️ Download", "fa": "⬇️ دانلود"},
+    "menu.language": {"en": "🌐 Language", "fa": "🌐 تغییر زبان"},
+    "menu.download": {"en": "📥 Downloads", "fa": "📥 دانلودها"},
     # The one menu button an operator fills in: its target lives in the database.
-    "menu.support": {"en": "💬 Support", "fa": "💬 پشتیبانی"},
+    "menu.support": {"en": "ℹ️ Help and support", "fa": "ℹ️ راهنما و پشتیبانی"},
     "menu.add_group": {"en": "👥 Add to a group", "fa": "👥 افزودن به گروه"},
     # Drawn only for ids in ADMIN_IDS: the panel is not a hidden feature, it is just
     # not a user's business.
@@ -1111,7 +1111,7 @@ MESSAGES: Final[Catalog] = {
     "admin.btn_doctor": {"en": "🩺 Run the YouTube doctor", "fa": "🩺 اجرای دکتر یوتیوب"},
     "admin.btn_refresh": {"en": "♻️ Re-export the cookie jar now", "fa": "♻️ اکسپورت دوبارهٔ کوکی"},
     "admin.btn_broadcast": {"en": "📣 Broadcast", "fa": "📣 پیام همگانی"},
-    "admin.btn_support": {"en": "💬 Support button", "fa": "💬 دکمهٔ پشتیبانی"},
+    "admin.btn_support": {"en": "ℹ️ Support button", "fa": "ℹ️ دکمهٔ پشتیبانی"},
     "admin.broadcast_intro": {
         "en": (
             "📣 <b>Broadcast</b>\n"
@@ -1249,20 +1249,20 @@ MESSAGES: Final[Catalog] = {
     },
     "admin.support_intro": {
         "en": (
-            "💬 <b>Support button</b>\n"
+            "ℹ️ <b>Support button</b>\n"
             "\n"
-            "Every user's menu has a 💬 Support button, and it points wherever you say: "
-            "an <code>@username</code>, a full URL (a web form, a group invite) — or "
-            "plain text, which is shown as it is.\n"
+            "Every user's Home screen has an ℹ️ Help and support button, and it points "
+            "wherever you say: an <code>@username</code>, a full URL (a web form, a "
+            "group invite) — or plain text, which is shown as it is.\n"
             "\n"
             "Right now: <b>{contact}</b>"
         ),
         "fa": (
-            "💬 <b>دکمهٔ پشتیبانی</b>\n"
+            "ℹ️ <b>دکمهٔ پشتیبانی</b>\n"
             "\n"
-            "منوی هر کاربر یک دکمهٔ 💬 پشتیبانی دارد و هر جا بگویی اشاره می‌کند: "
-            "<code>@username</code>، یک URL کامل (فرم وب، دعوت گروه) — یا متن ساده که "
-            "همان‌طور نمایش داده می‌شود.\n"
+            "صفحهٔ خانهٔ هر کاربر یک دکمهٔ ℹ️ راهنما و پشتیبانی دارد و هر جا بگویی "
+            "اشاره می‌کند: <code>@username</code>، یک URL کامل (فرم وب، دعوت گروه) — "
+            "یا متن ساده که همان‌طور نمایش داده می‌شود.\n"
             "\n"
             "الان: <b>{contact}</b>"
         ),
@@ -1476,10 +1476,6 @@ MESSAGES: Final[Catalog] = {
     # A file whose size is genuinely unknown (a live-ish stream, an estimate that
     # never arrived) — the word goes where the number would.
     "misc.unknown_size": {"en": "unknown", "fa": "نامشخص"},
-    "menu.language_hint": {
-        "en": "🌐 Language: /language — English / فارسی",
-        "fa": "🌐 زبان: /language — English / فارسی",
-    },
 }
 
 #: The plan labels the installer seeds, and the catalogue key each one resolves to.
