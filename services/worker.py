@@ -1196,6 +1196,7 @@ async def _send_file(
     track: spotify.SpotifyTrack | None = None,
     cover: Path | None = None,
     facts: verify.MediaFacts | None = None,
+    source_url: str = "",
 ) -> str:
     """Upload one file the way its format deserves; returns its file_id.
 
@@ -1230,7 +1231,16 @@ async def _send_file(
             path,
         )
         return _file_id(sent.video)
-    except TelegramBadRequest:
+    except TelegramBadRequest as exc:
+        # A video Telegram will not take *as a video* still arrives — but never
+        # silently again: the URL, the file suffix and Telegram's own error are
+        # the whole diagnosis (an unplayable container reads exactly like this).
+        logger.warning(
+            "Telegram refused %s (%s) as a video (%s) — sending it as a document",
+            source_url or path.name,
+            path.suffix or "unknown container",
+            exc.message,
+        )
         return await _send_document(bot, chat_id, path, caption)
 
 
@@ -1262,7 +1272,9 @@ async def _upload(
         # not cached (see ``Delivered``).
         delivered = await _send_photos(bot, chat_id, images, caption)
         for path in others:
-            await _send_file(bot, chat_id, path, result.media_format, caption)
+            await _send_file(
+                bot, chat_id, path, result.media_format, caption, source_url=source_url
+            )
         return Delivered(kind=delivered.kind)
     return Delivered(
         file_id=await _send_file(
@@ -1274,6 +1286,7 @@ async def _upload(
             track=track,
             cover=cover,
             facts=facts,
+            source_url=source_url,
         ),
         kind=_delivery_kind(files[0], result.media_format),
     )

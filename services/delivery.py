@@ -507,7 +507,17 @@ async def send_cached_file(
         else:
             await bot.send_document(chat_id, ids[0], caption=caption)
         return True
-    except TelegramBadRequest:
+    except TelegramBadRequest as exc:
+        # A cached file Telegram will not take *as its kind* still replays —
+        # but never silently again: the URL, the kind it was stored as and
+        # Telegram's own error tell a poisoned file_id apart from a poisoned
+        # container, which is the whole diagnosis.
+        logger.warning(
+            "Telegram refused the cached %s for %s (%s) — replaying it as a document",
+            kind,
+            _field(cached, "original_url") or _field(cached, "url_hash"),
+            exc.message,
+        )
         try:
             await bot.send_document(chat_id, ids[0], caption=caption)
             return True

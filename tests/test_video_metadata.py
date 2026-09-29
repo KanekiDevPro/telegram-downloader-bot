@@ -121,3 +121,35 @@ def test_the_kwargs_builder_passes_only_what_was_measured() -> None:
     assert worker._video_send_kwargs(_facts(duration_s=59.9))["duration"] == 59
     # A hand-built fact (or an audio probe) without video dimensions:
     assert worker._video_send_kwargs(MediaFacts(codec="mp3")) == {}
+
+
+async def test_the_document_fallback_warns_with_url_suffix_and_telegram_error(
+    tmp_path: Path, monkeypatch: Any, caplog: Any
+) -> None:
+    """A video Telegram refuses *as a video* still arrives — but silently no
+    longer: the warning names the source URL, the file suffix and Telegram's
+    own error, which is the whole diagnosis for an unplayable container."""
+    from aiogram.exceptions import TelegramBadRequest
+
+    monkeypatch.setattr(worker, "get_settings", lambda: _settings())
+
+    class RefusingBot(FakeBot):
+        async def send_video(self, chat_id: int, file: Any, **kwargs: Any) -> Any:
+            self.calls.append(("send_video", file, kwargs))
+            raise TelegramBadRequest(
+                method=None,  # type: ignore[arg-type]
+                message="Bad Request: wrong file identifier",
+            )
+
+    bot = RefusingBot()
+    media = _media(tmp_path, "clip.mkv")
+
+    with caplog.at_level("WARNING", logger="services.worker"):
+        file_id = await worker._send_file(  # type: ignore[arg-type]
+            bot, 1, media, "video", "caption", facts=_facts()
+        )
+
+    assert file_id == "doc-1"
+    assert [call[0] for call in bot.calls] == ["send_video", "send_document"]
+    assert ".mkv" in caplog.text, "the file suffix is the diagnosis"
+    assert "wrong file identifier" in caplog.text, "Telegram's own error goes in verbatim"

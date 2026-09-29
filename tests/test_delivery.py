@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import pytest
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InputMediaPhoto
 
@@ -163,3 +164,25 @@ async def test_a_row_with_no_id_is_dropped_without_a_call() -> None:
     assert not await delivery.send_cached_file(bot, 1, _row(kind="photo", telegram_file_id=""))  # type: ignore[arg-type]
 
     assert bot.calls == []
+
+
+# ---------------------------------------------------------------------------
+# F3: the silent document fallback warns
+# ---------------------------------------------------------------------------
+
+
+async def test_the_document_fallback_warns_with_error_context(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A cached video Telegram refuses *as a video* still replays as a
+    document — but silently no longer: the warning carries the kind, the
+    url hash and Telegram's own error, which is what tells a poisoned
+    file_id apart from a poisoned container."""
+    bot = FakeBot(failing=("send_video",))
+
+    with caplog.at_level("WARNING", logger="services.delivery"):
+        assert await delivery.send_cached_file(bot, 1, _row(kind="video"))  # type: ignore[arg-type]
+
+    assert bot.methods == ["send_document"]
+    assert "video" in caplog.text
+    assert "wrong file identifier" in caplog.text
