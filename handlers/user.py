@@ -578,11 +578,15 @@ def _download_keyboard(
 
 
 def _platform_text(name: str, lang: str) -> str:
-    """A section screen: what it takes, in the user's language.
+    """A section screen: what it takes and how to send one, in the user's language.
 
-    Three lines, each doing one job: the platform with its badge (a featured section
-    is named as one), the shapes it takes *with their icons* — the same pictures the
-    questions under it use — and the plain instruction to send one.
+    Each block does one job: the platform with its badge (a featured section is
+    named as one), the shapes it takes *with their icons* — the same pictures the
+    questions under it use — then the two steps of copying a link off the site's
+    own share sheet, and a sample link that this bot really takes. The steps are
+    the section's own (four sites, four routes to «Copy link») and the sample is
+    the section's own (``services.content.PLATFORM_EXAMPLES``), so nothing here
+    teaches a shape this screen would then refuse.
     """
     shapes = " · ".join(
         content.shape_label(section, shape)
@@ -590,6 +594,7 @@ def _platform_text(name: str, lang: str) -> str:
         if section == name
         for shape in section_shapes
     )
+    example = content.PLATFORM_EXAMPLES[name] if name in content.PLATFORM_EXAMPLES else ""
     return "\n".join(
         (
             t(f"download.{name}", lang),
@@ -597,6 +602,10 @@ def _platform_text(name: str, lang: str) -> str:
             t("download.section_badge", lang),
             "",
             t("download.section_how", lang, shapes=shapes),
+            "",
+            t(f"download.{name}_how", lang),
+            "",
+            t("download.example", lang, example=escape_html(example)),
         )
     )
 

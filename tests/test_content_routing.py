@@ -32,6 +32,22 @@ def test_every_shape_a_section_promises_has_a_badge() -> None:
     assert set(content.SHAPE_ICONS) == promised
 
 
+def test_every_section_shows_a_sample_link_the_bot_actually_takes() -> None:
+    """A sample is a promise too: the link a section screen shows as «Example:»
+    has to be one this bot would really take. A dead sample teaches the wrong
+    shape — and the user copies it, so it is worse than showing nothing."""
+    assert set(content.PLATFORM_EXAMPLES) == set(content.PLATFORM_NAMES)
+
+    for platform, example in content.PLATFORM_EXAMPLES.items():
+        assert example.startswith("https://"), example
+        assert content.platform_for(example) == platform, example
+        # The section's own gate accepts its sample, and the shape it names is a
+        # shape the bot can deliver — Spotify's resolver answers for its links, so
+        # the *section* gate is what every sample is asked about.
+        assert content.platform_is_on(example, ()), example
+        assert content.classify(example) in ("video", "audio", "gallery", "image", "media")
+
+
 def test_a_shape_wears_its_own_icon() -> None:
     """The same pictures the menus under a section use: 🎬 video, 🖼 photos, 💿 an album."""
     assert content.shape_label("instagram", "reel") == "🎬 reel"

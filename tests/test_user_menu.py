@@ -3363,6 +3363,29 @@ def test_a_platform_section_names_only_its_own_shapes() -> None:
     assert "watch" not in text and "track" not in text
 
 
+def test_a_platform_section_explains_how_to_send_a_link() -> None:
+    """The section screens are the only teaching this bot does: each one says
+    what its links look like (shapes), how to copy one (the site's own share
+    sheet, named as the site names it, in the reader's language) and shows a
+    sample the bot really takes — never another platform's."""
+    for platform in ("youtube", "instagram", "spotify", "tiktok"):
+        others = {
+            example
+            for name, example in content_module.PLATFORM_EXAMPLES.items()
+            if name != platform
+        }
+        for lang in (FA, EN):
+            text = user_module._platform_text(platform, lang)
+            assert t(f"download.{platform}_how", lang) in text, (platform, lang)
+            assert content_module.PLATFORM_EXAMPLES[platform] in text, (platform, lang)
+            assert not any(example in text for example in others), (platform, lang)
+
+    # The share sheet is named as the app names it, in both languages (the words
+    # on the buttons are the words the user is looking for).
+    assert "Share" in user_module._platform_text("instagram", FA)
+    assert "Share" in user_module._platform_text("instagram", EN)
+
+
 def test_a_platform_section_names_its_shapes_with_their_badges() -> None:
     """A section is a menu of shapes, so it wears the icons the questions under it
     use — the same pictures, one line, no explaining."""

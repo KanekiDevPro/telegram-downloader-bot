@@ -214,6 +214,65 @@ MESSAGES: Final[Catalog] = {
         "en": "Send one of these and I’ll fetch it — {shapes}.",
         "fa": "یکی از اینها را بفرست تا بگیرمش — {shapes}.",
     },
+    # ------------------------------------------------------------------
+    # How to copy a link, per section — the site's own share sheet, named the way
+    # the site names it (an app's own wording is what the user is looking for on
+    # screen), in the reader's language. One key per platform so an operator can
+    # reword each: the four sites have four different routes to «Copy link».
+    # ------------------------------------------------------------------
+    "download.youtube_how": {
+        "en": (
+            "1️⃣ Open the video (or the Short) and tap <b>Share</b> → "
+            "<b>Copy link</b>.\n"
+            "2️⃣ Send that whole link here — the <code>watch?v=…</code> part too."
+        ),
+        "fa": (
+            "۱️⃣ ویدیو (یا Short) را باز کن و روی <b>Share</b> بزن → <b>Copy link</b>.\n"
+            "۲️⃣ همان لینک را کامل همینجا بفرست — با بخش <code>watch?v=…</code>."
+        ),
+    },
+    "download.instagram_how": {
+        "en": (
+            "1️⃣ Open the reel or post, tap <b>Share</b> → <b>Copy link</b> "
+            "(a story: <b>⋯</b> → <b>Copy link</b>).\n"
+            "2️⃣ Send that link here — reels, posts and stories each work."
+        ),
+        "fa": (
+            "۱️⃣ ریلز یا پست را باز کن، روی <b>Share</b> بزن و سپس <b>Copy link</b> "
+            "(استوری: <b>⋯</b> → <b>Copy link</b>).\n"
+            "۲️⃣ همان لینک را همینجا بفرست — ریلز، پست و استوری هر سه کار میکنند."
+        ),
+    },
+    "download.spotify_how": {
+        "en": (
+            "1️⃣ Open the track, tap <b>⋯</b> → <b>Share</b> → <b>Copy link</b>.\n"
+            "2️⃣ Send that link here — one track per link, not an album."
+        ),
+        "fa": (
+            "۱️⃣ آهنگ را باز کن، روی <b>⋯</b> بزن → <b>Share</b> → <b>Copy link</b>.\n"
+            "۲️⃣ همان لینک را همینجا بفرست — هر لینک یک آهنگ، نه آلبوم."
+        ),
+    },
+    "download.tiktok_how": {
+        "en": (
+            "1️⃣ Open the video, tap <b>Share</b> → <b>Copy link</b>.\n"
+            "2️⃣ Send that link here — TikTok hands out both its long and its "
+            "short links, and both work."
+        ),
+        "fa": (
+            "۱️⃣ ویدیو را باز کن، روی <b>Share</b> بزن → <b>Copy link</b>.\n"
+            "۲️⃣ همان لینک را همینجا بفرست — تیکتاک هم لینک بلند میدهد هم کوتاه، "
+            "و هر دو کار میکنند."
+        ),
+    },
+    # ``{example}`` carries the section's own sample link (see
+    # ``services.content.PLATFORM_EXAMPLES``), inside <code> so a tap copies it.
+    # Never a generic placeholder: a sample the bot would not take teaches the
+    # wrong shape to the one user who copies it.
+    "download.example": {
+        "en": "👀 Example: <code>{example}</code>",
+        "fa": "👀 نمونه: <code>{example}</code>",
+    },
     # Shown when an admin has switched a section off: the switch is real, so its
     # consequence is said out loud rather than left as a missing button.
     "download.some_off": {

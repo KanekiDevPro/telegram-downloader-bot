@@ -182,6 +182,11 @@ def test_the_download_labels_and_its_intros_are_editable(_desk: _TextDB) -> None
         "download.pick_platform",
         "download.section_badge",
         "download.section_how",
+        "download.youtube_how",
+        "download.instagram_how",
+        "download.spotify_how",
+        "download.tiktok_how",
+        "download.example",
     ):
         assert text_store.editable(key), key
         assert key in MESSAGES, key

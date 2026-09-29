@@ -83,6 +83,19 @@ PLATFORM_SECTIONS: tuple[tuple[Platform, tuple[str, ...]], ...] = (
 #: need the vocabulary (the admin toggles, the intake gate).
 PLATFORM_NAMES: tuple[Platform, ...] = tuple(name for name, _shapes in PLATFORM_SECTIONS)
 
+#: The sample link each section screen shows (``Example: …``). Real and taken:
+#: every one of these is a link this bot would download, spelled the way the
+#: site's own share sheet spells it — a sample that does not resolve teaches the
+#: wrong shape to the one user who copies it (`tests/test_content_routing.py`
+#: pins each one against :func:`platform_for` and :func:`classify`).
+PLATFORM_EXAMPLES: dict[Platform, str] = {
+    "youtube": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "instagram": "https://www.instagram.com/reel/CxYzAbCdEfG/",
+    "spotify": "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+    "tiktok": "https://www.tiktok.com/@username/video/7200000000000000000",
+}
+
+
 #: The badge a shape wears in a section screen — the same pictures the questions
 #: under it use (🎬 a video, 🖼 photos, 💿 an album). Keyed by ``(platform, shape)``
 #: rather than by the word alone, because one word means two things: a ``playlist``
