@@ -43,6 +43,11 @@ from core.utils import (
 #: What the link most likely holds.
 ContentKind = Literal["video", "audio", "image", "gallery", "media"]
 
+#: The platform family a link belongs to, for the Downloads screen's sections.
+#: ``other`` is any claimed host outside the four named sections — the menu
+#: still serves those links, it just does not give them a section of their own.
+Platform = Literal["youtube", "instagram", "spotify", "tiktok", "other"]
+
 #: One button: a label key in the catalogue, and the request it stands for.
 @dataclass(frozen=True)
 class Choice:
@@ -53,11 +58,41 @@ class Choice:
     quality: Quality
 
 
+#: Host fragment → platform section. Read with the same suffix rule as the
+#: kind tables (``music.youtube.com`` is YouTube, ``vm.tiktok.com`` TikTok).
+_PLATFORM_HOSTS: tuple[tuple[tuple[str, ...], Platform], ...] = (
+    (("youtube.com", "youtu.be", "youtube-nocookie.com"), "youtube"),
+    (("instagram.com", "cdninstagram.com"), "instagram"),
+    (("spotify.com", "spotify.link"), "spotify"),
+    (("tiktok.com",), "tiktok"),
+)
+
+#: The four Downloads sections, in screen order, with the link shapes each one
+#: names. A section promises *shapes the bot accepts*, never downloadability —
+#: the engines and the fallback still get the final word on every link.
+PLATFORM_SECTIONS: tuple[tuple[Platform, tuple[str, ...]], ...] = (
+    ("youtube", ("watch", "playlist", "shorts")),
+    ("instagram", ("reel", "post", "story")),
+    ("spotify", ("track", "album", "playlist")),
+    ("tiktok", ("video",)),
+)
+
+
+def platform_for(url: str) -> Platform:
+    """Which Downloads section this link belongs to (``other`` when none)."""
+    host = url_host(url)
+    for needles, platform in _PLATFORM_HOSTS:
+        if any(_matches(host, needle) for needle in needles):
+            return platform
+    return "other"
+
+
 @dataclass(frozen=True)
 class Routing:
     """What to ask a user about this link: the header line and the buttons under it."""
 
     kind: ContentKind
+    platform: Platform
     header_key: str
     #: Every request that may legitimately finish this link's flow — the menu's
     #: vocabulary, and what ``find_choice`` accepts.
@@ -508,6 +543,7 @@ def routing_for(url: str) -> Routing:
     kind = classify(url)
     return Routing(
         kind=kind,
+        platform=platform_for(url),
         header_key=_HEADERS[kind],
         choices=_CHOICES[kind],
         media_choice=_MEDIA_CHOICE if kind == "media" else None,

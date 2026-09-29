@@ -489,20 +489,58 @@ def _profile_keyboard(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup
     return builder.as_markup()
 
 
-def _download_keyboard(lang: str) -> InlineKeyboardMarkup:
+#: The callback a platform section carries: ``menu:platform:<name>``.
+PLATFORM_PREFIX = "menu:platform:"
+
+
+def _platform_sections() -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """The Downloads sections: platform name and the shapes each one takes."""
+    return content.PLATFORM_SECTIONS
+
+
+def _download_keyboard(lang: str, *, platform: str | None = None) -> InlineKeyboardMarkup:
     """The download screen's own controls: the group flow, and the way back.
 
     «Add to a group» is Telegram's own picker (a ``?startgroup`` deep link to the
     bot's real address) — the button exists only once the bot knows its own
-    @handle, because a wrong link is worse than no button.
+    @handle, because a wrong link is worse than no button. With no platform
+    chosen this is the picker itself: one row per platform section, then the
+    group flow and the way back. Inside a section the screen names that
+    platform's link shapes, and back returns to the picker.
     """
     builder = InlineKeyboardBuilder()
+    if platform is None:
+        for name, _shapes in _platform_sections():
+            builder.button(
+                text=t(f"download.{name}", lang),
+                callback_data=f"{PLATFORM_PREFIX}{name}",
+            )
+        builder.adjust(2)
+    else:
+        builder.button(text=t("menu.back", lang), callback_data="menu:download")
+        builder.adjust(1)
     link = group_add_link()
     if link:
         builder.button(text=t("menu.add_group", lang), url=link)
-    builder.button(text=t("menu.back", lang), callback_data="menu:home")
+    builder.button(
+        text=t("menu.back", lang),
+        callback_data="menu:home" if platform is None else "menu:download",
+    )
     builder.adjust(1)
     return builder.as_markup()
+
+
+def _platform_text(name: str, lang: str) -> str:
+    """A section screen: what it takes, in the user's language."""
+    shapes = " · ".join(
+        shape
+        for section, section_shapes in _platform_sections()
+        if section == name
+        for shape in section_shapes
+    )
+    return "\n".join(
+        (t(f"download.{name}", lang), "", t("download.section_how", lang, shapes=shapes))
+    )
 
 
 #: A Telegram handle: what a support contact may be written as (``@name`` or bare).
@@ -650,8 +688,33 @@ async def on_menu_download(cb: CallbackQuery, lang: str = DEFAULT_LANG) -> None:
         await cb.answer(t("intake.stale", lang), show_alert=True)
         return
     await cb.answer()
-    text = "\n".join((t("download.title", lang), "", t("download.how", lang)))
+    text = "\n".join(
+        (
+            t("download.title", lang),
+            "",
+            t("download.how", lang),
+            "",
+            t("download.pick_platform", lang),
+        )
+    )
     await _edit_or_reply(message, text, reply_markup=_download_keyboard(lang))
+
+
+@router.callback_query(F.data.startswith(PLATFORM_PREFIX))
+async def on_menu_platform(cb: CallbackQuery, lang: str = DEFAULT_LANG) -> None:
+    """One platform section: the shapes it takes, and the way back to the picker."""
+    message = callback_message(cb)
+    if message is None:
+        await cb.answer(t("intake.stale", lang), show_alert=True)
+        return
+    name = (cb.data or "")[len(PLATFORM_PREFIX):]
+    if name not in {section for section, _shapes in _platform_sections()}:
+        await cb.answer(t("intake.stale", lang), show_alert=True)
+        return
+    await cb.answer()
+    await _edit_or_reply(
+        message, _platform_text(name, lang), reply_markup=_download_keyboard(lang, platform=name)
+    )
 
 
 @router.callback_query(F.data == "menu:profile")
@@ -1300,7 +1363,14 @@ async def _ask_about_link(
         # were not discovered says so and offers a retry (which re-extracts).
         # The automatic row is drawn only when an operator deliberately enabled
         # it (MENU_AUTO_BEST) — and it names itself an automatic pick, never an
-        # exact quality.
+        # exact quality. One exception: the probe itself failed (no info at
+        # all) on a platform this bot claims, so the download path — which
+        # tries yt-dlp *and* the cobalt fallback — still gets its turn. That
+        # row is the same automatic pick, and states it is one.
+        probe_failed = info is None
+        auto_best = get_settings().menu_auto_best or (
+            probe_failed and content.claims_platform(url)
+        )
         await _ask_again(
             message,
             state,
@@ -1309,7 +1379,7 @@ async def _ask_about_link(
             t("intake.probe_failed", lang),
             edit=edit,
             title=title,
-            auto_best=get_settings().menu_auto_best,
+            auto_best=auto_best,
         )
         return
     # One capability model, built from what the probe found, drives every screen
@@ -1811,9 +1881,10 @@ async def _probe_meta(bot: Bot, url: str) -> MediaInfo | None:
         )
     except Exception as exc:
         logger.warning(
-            "metadata probe gave nothing for %.80s (%s: %s) — falling back to tiers",
+            "metadata probe gave nothing for %.80s (%s/%s: %s) — falling back to tiers",
             url,
             type(exc).__name__,
+            getattr(exc, "code", "?"),
             exc,
         )
         return None

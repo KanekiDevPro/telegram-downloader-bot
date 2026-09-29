@@ -710,6 +710,8 @@ def test_no_menu_button_is_left_without_a_handler() -> None:
             return True
         if data.startswith("lang:"):
             return "F.data.startswith(LANG_PREFIX)" in source
+        if data.startswith(user_module.PLATFORM_PREFIX):
+            return "F.data.startswith(PLATFORM_PREFIX)" in source
         return False
 
     missing = [data for data in sorted(offered) if data and not has_handler(data)]
@@ -1117,8 +1119,12 @@ async def test_an_undiscovered_ladder_says_so_and_offers_a_retry(
     assert (t("intake.probe_retry_btn", FA), user_module.PROBE_CALLBACK) in rows, (
         "one retry, which re-extracts"
     )
-    assert all(data != "fmt:video:best" for _, data in rows), (
-        "and no default download is offered in place of the ladder"
+    # The deliberate fleet-era change: a failed probe on a claimed-platform
+    # video link draws the *automatic* row alongside the retry, because the
+    # download path (yt-dlp + the cobalt fallback) still gets its turn — and
+    # the row says it is automatic, never an exact quality.
+    assert (t("intake.auto_best_btn", FA), "fmt:video:best") in rows, (
+        "the automatic row is the fallback's door, spelled as automatic"
     )
     back_label, back_data = rows[-1]
     assert back_data == "menu:download", "the question's parent is the Download screen"
@@ -3163,3 +3169,108 @@ async def test_a_webp_thumbnail_is_normalized_to_jpeg_before_sending(
     assert len(photos) == 1, "normalized — not a text fallback"
     assert photos[0].photo == "https://i.ytimg.com/vi/abc/maxresdefault.jpg"
     assert bot.texts == [], "no plain-text twin"
+
+
+# ---------------------------------------------------------------------------
+# The Downloads picker: four platform sections, each naming its shapes
+# ---------------------------------------------------------------------------
+
+
+def test_the_download_screen_is_a_four_platform_picker() -> None:
+    """Downloads opens on the picker: one row per platform, then group + back."""
+    rows = _buttons(user_module._download_keyboard(FA))
+
+    assert (t("download.youtube", FA), "menu:platform:youtube") in rows
+    assert (t("download.instagram", FA), "menu:platform:instagram") in rows
+    assert (t("download.spotify", FA), "menu:platform:spotify") in rows
+    assert (t("download.tiktok", FA), "menu:platform:tiktok") in rows
+    assert rows[-1] == (t("menu.back", FA), "menu:home"), (
+        "the picker's parent is home, like every top screen"
+    )
+
+
+def test_a_platform_section_names_only_its_own_shapes() -> None:
+    text = user_module._platform_text("instagram", FA)
+
+    assert "reel" in text and "post" in text and "story" in text
+    assert "watch" not in text and "track" not in text
+
+
+def test_a_platform_section_leads_back_to_the_picker() -> None:
+    rows = _buttons(user_module._download_keyboard(FA, platform="youtube"))
+
+    assert rows[-1] == (t("menu.back", FA), "menu:download"), (
+        "a section's parent is the picker, never a hardcoded home"
+    )
+
+
+async def test_a_failed_probe_on_a_claimed_platform_draws_the_automatic_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BUG 3, pinned: the menu probe never consulted the fallback, so a blocked
+    YouTube/Instagram link stalled at probe_failed while the download path —
+    which *does* fall back to cobalt — would have served it. The failed probe
+    now draws the automatic row (spelled automatic) alongside the retry."""
+    async def supported(url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(user_module, "_probe_supported", supported)
+    bot = RecordingBot()
+    message = _message("https://www.instagram.com/reel/abc/", bot)
+
+    await user_module._queue_url_flow(
+        message,
+        await _state("https://www.instagram.com/reel/abc/"),
+        _user(),
+        "https://www.instagram.com/reel/abc/",
+        FA,
+        bot=cast(Bot, bot),
+        pool=object(),
+        queue=_fake_queue(),
+    )
+
+    rows = _buttons(bot.keyboards[-1])
+    assert (t("intake.probe_retry_btn", FA), user_module.PROBE_CALLBACK) in rows
+    assert (t("intake.auto_best_btn", FA), "fmt:video:best") in rows, (
+        "an Instagram reel with no ladder still gets the fallback's door"
+    )
+
+
+async def test_an_ambiguous_link_keeps_its_own_menu_without_the_retry_screen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The automatic row answers the video-ladder failure only: an ambiguous
+    (``media``-kind) link never reaches the error screen at all — it keeps its
+    own honest menu (the post's media button plus the audio grid), and the
+    probe-retry button belongs to the error screen, not to it."""
+    async def supported(url: str) -> bool:
+        return True
+
+    async def no_probe(bot: Bot, url: str) -> None:
+        return None
+
+    async def no_cache(pool: Any, url: str, *args: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(user_module, "_probe_supported", supported)
+    monkeypatch.setattr(user_module, "_probe_meta", no_probe)
+    monkeypatch.setattr(user_module.cache_service, "get_cached_rows", no_cache)
+    bot = RecordingBot()
+    message = _message("https://some-unknown-site.example/v/1", bot)
+
+    await user_module._queue_url_flow(
+        message,
+        await _state("https://some-unknown-site.example/v/1"),
+        _user(),
+        "https://some-unknown-site.example/v/1",
+        FA,
+        bot=cast(Bot, bot),
+        pool=object(),
+        queue=_fake_queue(),
+    )
+
+    rows = _buttons(bot.keyboards[-1])
+    assert (t("intake.probe_retry_btn", FA), user_module.PROBE_CALLBACK) not in rows
+    assert t("intake.probe_failed", FA) not in bot.screens[-1], (
+        "an ambiguous link is asked, not errored — the failure screen is for video"
+    )

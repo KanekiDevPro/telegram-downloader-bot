@@ -196,9 +196,20 @@ def _quiet_costs(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_a_crafted_default_tap_on_a_failed_lookup_is_refused() -> None:
+async def test_a_crafted_default_tap_on_a_failed_lookup_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Case 3+7: with no ladder discovered and no automatic row drawn, a crafted
-    ``fmt:video:best`` is data — and it buys nothing."""
+    ``fmt:video:best`` is data — and it buys nothing.
+
+    The probe itself is stubbed dead here: the fleet-era automatic row answers
+    a *failed* probe, so this test pins the crafted-tap refusal with the probe
+    returning an empty ladder — not a failure — which draws no automatic row.
+    """
+    async def empty_ladder(bot: Bot, url: str) -> Any:
+        return _info(())
+
+    monkeypatch.setattr(user_module, "_probe_meta", empty_ladder)
     bot = RecordingBot()
     state = _state()
     queue = _FakeQueue()

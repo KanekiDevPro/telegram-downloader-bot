@@ -266,3 +266,32 @@ def test_a_pure_image_link_is_never_asked_about(url: str) -> None:
     assert [choice.media_format for choice in routing.choices] == ["video"], (
         "the only request is \"send its media\" — no audio tiers"
     )
+
+
+@pytest.mark.parametrize(
+    "url,platform",
+    (
+        ("https://www.youtube.com/watch?v=abc", "youtube"),
+        ("https://youtu.be/abc", "youtube"),
+        ("https://music.youtube.com/watch?v=abc", "youtube"),
+        ("https://www.youtube.com/shorts/abc", "youtube"),
+        ("https://www.instagram.com/reel/abc/", "instagram"),
+        ("https://www.instagram.com/p/abc/", "instagram"),
+        ("https://open.spotify.com/track/abc", "spotify"),
+        ("https://open.spotify.com/album/abc", "spotify"),
+        ("https://www.tiktok.com/@user/video/123", "tiktok"),
+        ("https://vm.tiktok.com/abc/", "tiktok"),
+        ("https://example.com/v/1", "other"),
+    ),
+)
+def test_each_link_knows_its_downloads_section(url: str, platform: str) -> None:
+    """The Downloads picker groups by platform — the routing names the section."""
+    assert content.routing_for(url).platform == platform
+
+
+def test_the_sections_name_only_the_shapes_they_take() -> None:
+    names = [name for name, _shapes in content.PLATFORM_SECTIONS]
+    assert names == ["youtube", "instagram", "spotify", "tiktok"]
+    shapes = dict(content.PLATFORM_SECTIONS)
+    assert set(shapes["youtube"]) == {"watch", "playlist", "shorts"}
+    assert set(shapes["instagram"]) == {"reel", "post", "story"}

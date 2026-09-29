@@ -190,6 +190,18 @@ MESSAGES: Final[Catalog] = {
     # Download
     # ---------------------------------------------------------------------
     "download.title": {"en": "⬇️ <b>Download</b>", "fa": "⬇️ <b>دانلود</b>"},
+    "download.youtube": {"en": "🎬 YouTube", "fa": "🎬 یوتیوب"},
+    "download.instagram": {"en": "📸 Instagram", "fa": "📸 اینستاگرام"},
+    "download.spotify": {"en": "🎵 Spotify", "fa": "🎵 اسپاتیفای"},
+    "download.tiktok": {"en": "🎶 TikTok", "fa": "🎶 تیک‌تاک"},
+    "download.pick_platform": {
+        "en": "Pick a platform — each section names the link shapes it takes.",
+        "fa": "یک پلتفرم انتخاب کن — هر بخش شکل لینک‌هایی که می‌گیرد را می‌گوید.",
+    },
+    "download.section_how": {
+        "en": "Send a {shapes} link and I’ll fetch it.",
+        "fa": "یک لینک {shapes} بفرست تا بگیرمش.",
+    },
     "download.how": {
         "en": (
             "Send me a link — YouTube, Instagram, TikTok, X, Spotify or dozens of "
