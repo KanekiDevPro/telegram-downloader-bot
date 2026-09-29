@@ -395,7 +395,7 @@ async def test_back_returns_to_the_menu_in_the_same_message() -> None:
     bot = RecordingBot()
     cb = _callback(bot, "menu:home")
 
-    await user_module.on_menu_home(cb, _user(), lang=FA)
+    await user_module.on_menu_home(cb, _fresh_state(), _user(), lang=FA)
 
     assert bot.answers and bot.answers[0].text is None, "it is not an alert, just an answer"
     assert len(bot.edits) == 1 and "سلام" in bot.edits[0], "edited in place"
@@ -407,7 +407,7 @@ async def test_a_stale_callback_is_answered_in_the_callers_language() -> None:
     bot = RecordingBot()
     cb = _callback(bot, "menu:home", stale=True)
 
-    await user_module.on_menu_home(cb, _user(language=EN), lang=EN)
+    await user_module.on_menu_home(cb, _fresh_state(), _user(language=EN), lang=EN)
 
     # ``on_menu_home`` answers *before* looking at the message, so an unanswerable
     # tap still gets a normal answer; the alert path is pinned below.
@@ -830,6 +830,11 @@ def _fake_spotify_lookup(monkeypatch: pytest.MonkeyPatch, duration_s: float = 15
     monkeypatch.setattr(user_module.spotify, "lookup", lookup)
 
 
+async def _always_supported(url: str) -> bool:
+    """The intake gate's answer for these tests: the site is known."""
+    return True
+
+
 async def test_the_question_matches_the_link(monkeypatch: pytest.MonkeyPatch) -> None:
     async def supported(url: str) -> bool:
         return True
@@ -984,6 +989,96 @@ def test_no_group_button_before_the_bot_knows_its_own_name() -> None:
         for button in row
     ]
     assert all(button.url is None for button in buttons)
+
+
+async def test_the_download_picker_asks_for_a_platform_before_it_takes_a_link() -> None:
+    """Downloads *is* a picker, so a link sent while it is open is not yet a
+    download: the section the user meant is exactly what it has not said. The
+    question — «which platform?» — comes back with the picker itself, and the
+    intake never starts: nothing is probed, nothing is queued.
+    """
+    bot = RecordingBot()
+    message = _message("https://youtu.be/abc", bot)
+    state = _fresh_state()
+    await state.set_state(DownloadStates.picking_platform)
+    queue = _fake_queue()
+
+    await user_module.on_text_with_url(
+        message, state, _user(), object(), queue, bot, lang=FA
+    )
+
+    assert bot.texts == [t("download.need_platform", FA)]
+    assert _buttons(bot.keyboards[-1]) == _buttons(user_module._download_keyboard(FA)), (
+        "the answer to «which platform?» is the picker itself"
+    )
+    assert queue.tasks == []
+    assert await state.get_state() == DownloadStates.picking_platform.state, (
+        "the gate stays armed until a platform is chosen"
+    )
+
+
+async def test_opening_downloads_arms_the_picker_and_a_platform_releases_it() -> None:
+    """The gate is the picker screen's own lifetime: opening Downloads arms it,
+    choosing a platform ends it — after that a link is a link again."""
+    bot = RecordingBot()
+    state = _fresh_state()
+
+    await user_module.on_menu_download(_callback(bot, "menu:download"), state, lang=FA)
+    assert await state.get_state() == DownloadStates.picking_platform.state
+
+    await user_module.on_menu_platform(
+        _callback(bot, "menu:platform:youtube"), state, lang=FA
+    )
+    assert await state.get_state() is None, "a chosen section takes links again"
+
+
+async def test_going_home_releases_the_picker_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leaving the picker for Home must not leave the gate armed behind it: a
+    link sent from Home is an ordinary link, exactly as it was before."""
+    monkeypatch.setattr(user_module, "_probe_supported", _always_supported)
+    _fake_spotify_lookup(monkeypatch)
+    bot = RecordingBot()
+    state = _fresh_state()
+
+    await user_module.on_menu_download(_callback(bot, "menu:download"), state, lang=FA)
+    await user_module.on_menu_home(_callback(bot, "menu:home"), state, _user(), lang=FA)
+
+    assert await state.get_state() is None
+    url = "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+    await user_module.on_text_with_url(
+        _message(url, bot), state, _user(), object(), _fake_queue(), bot, lang=FA
+    )
+    assert t("download.need_platform", FA) not in bot.screens, "Home is not a gate"
+    assert t("intake.choose_media", FA) in bot.screens or bot.keyboards, (
+        "the link was asked about, the way it always is"
+    )
+
+
+async def test_the_explicit_download_command_is_never_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/download <link>` names both the platform and the link, so it is the one
+    intake that must never be stopped by the picker: the user already said what
+    they meant."""
+    _fake_spotify_lookup(monkeypatch)
+    bot = RecordingBot()
+    state = _fresh_state()
+    await state.set_state(DownloadStates.picking_platform)
+
+    await user_module.cmd_download(
+        _message("/download https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC", bot),
+        SimpleNamespace(args="https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"),
+        state,
+        _user(),
+        object(),
+        _fake_queue(),
+        bot,
+        lang=FA,
+    )
+
+    assert t("download.need_platform", FA) not in bot.screens
+    assert t("intake.download_usage", FA) not in bot.screens, "the link was used"
+    assert bot.screens[-1].startswith("🔗 "), "the question came back instead"
 
 
 async def test_a_group_message_without_a_link_is_not_answered() -> None:

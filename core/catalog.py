@@ -198,6 +198,12 @@ MESSAGES: Final[Catalog] = {
         "en": "Pick a platform — each section names the link shapes it takes.",
         "fa": "یک پلتفرم انتخاب کن — هر بخش شکل لینک‌هایی که می‌گیرد را می‌گوید.",
     },
+    # Shown when a link arrives while the picker is open: Downloads asks *which* of
+    # these the link is before it touches it, so the answer is the picker again.
+    "download.need_platform": {
+        "en": "🎯 Pick a platform first — tap one of the buttons below, then send the link.",
+        "fa": "🎯 اول یک پلتفرم انتخاب کن — یکی از دکمه‌های زیر را بزن، بعد لینک را بفرست.",
+    },
     "download.section_how": {
         "en": "Send a {shapes} link and I’ll fetch it.",
         "fa": "یک لینک {shapes} بفرست تا بگیرمش.",

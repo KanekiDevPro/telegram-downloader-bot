@@ -105,8 +105,18 @@ _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 
 class DownloadStates(StatesGroup):
-    """The one step a user is in: a link is known, its format is not yet."""
+    """The two steps a user can be in.
 
+    ``picking_platform`` is the Downloads picker itself: it exists so a link sent
+    while the picker is open is answered with «which platform?» instead of being
+    downloaded blind — the user came to Downloads, and the one thing they have not
+    said yet is which section they meant. It is armed when the picker is drawn and
+    released the moment a platform is chosen (or the user leaves for Home), so it
+    can never outlive the screen it belongs to. ``waiting_format`` is the older
+    step: a link is known, its format is not yet.
+    """
+
+    picking_platform = State()
     waiting_format = State()
 
 
@@ -670,6 +680,7 @@ def _speaks(user: Any) -> bool:
 @router.callback_query(F.data == "menu:home")
 async def on_menu_home(
     cb: CallbackQuery,
+    state: FSMContext,
     user: asyncpg.Record,
     pool: asyncpg.Pool | None = None,
     lang: str = DEFAULT_LANG,
@@ -678,13 +689,15 @@ async def on_menu_home(
 
     Edited, not re-sent: a user who taps around should end up with one menu, not a
     pile of them (and Telegram's own "message is not modified" answer is handled by
-    the reply fallback).
+    the reply fallback). Leaving the picker releases its gate on the way out — a
+    link sent from Home is an ordinary link, never a question about platforms.
     """
     message = callback_message(cb)
     if message is None:
         await cb.answer(t("intake.stale", lang), show_alert=True)
         return
     await cb.answer()
+    await state.set_state(None)
     await _edit_or_reply(
         message,
         _welcome_text(user["username"] or t("misc.friend", lang), lang),
@@ -693,8 +706,15 @@ async def on_menu_home(
 
 
 @router.callback_query(F.data == "menu:download")
-async def on_menu_download(cb: CallbackQuery, lang: str = DEFAULT_LANG) -> None:
-    """Download — the one thing most people came for, said once and clearly."""
+async def on_menu_download(
+    cb: CallbackQuery, state: FSMContext, lang: str = DEFAULT_LANG
+) -> None:
+    """Download — the picker, and the gate that makes it mean something.
+
+    Drawing the picker arms ``picking_platform``: while it is open, a link is not
+    yet a download — the section the user meant is the one thing they have not
+    said, so the picker asks for it instead of the intake guessing.
+    """
     message = callback_message(cb)
     if message is None:
         await cb.answer(t("intake.stale", lang), show_alert=True)
@@ -710,11 +730,19 @@ async def on_menu_download(cb: CallbackQuery, lang: str = DEFAULT_LANG) -> None:
         )
     )
     await _edit_or_reply(message, text, reply_markup=_download_keyboard(lang))
+    await state.set_state(DownloadStates.picking_platform)
 
 
 @router.callback_query(F.data.startswith(PLATFORM_PREFIX))
-async def on_menu_platform(cb: CallbackQuery, lang: str = DEFAULT_LANG) -> None:
-    """One platform section: the shapes it takes, and the way back to the picker."""
+async def on_menu_platform(
+    cb: CallbackQuery, state: FSMContext, lang: str = DEFAULT_LANG
+) -> None:
+    """One platform section: the shapes it takes, and the way back to the picker.
+
+    Choosing a platform is what the picker was waiting for, so the gate is
+    released here: inside a section the user has said where they are, and the
+    link they send next is sent straight into the intake.
+    """
     message = callback_message(cb)
     if message is None:
         await cb.answer(t("intake.stale", lang), show_alert=True)
@@ -724,6 +752,7 @@ async def on_menu_platform(cb: CallbackQuery, lang: str = DEFAULT_LANG) -> None:
         await cb.answer(t("intake.stale", lang), show_alert=True)
         return
     await cb.answer()
+    await state.set_state(None)
     await _edit_or_reply(
         message, _platform_text(name, lang), reply_markup=_download_keyboard(lang, platform=name)
     )
@@ -1074,7 +1103,21 @@ async def on_text_with_url(
                 t("intake.invalid_link", lang), link_preview_options=_NO_PREVIEW
             )
         return
-    if current is not None:
+    if current == DownloadStates.picking_platform.state:
+        # The Downloads picker is open, and a link is not an answer to it: the
+        # question — «which platform?» — comes back with the picker itself, and
+        # nothing is probed, queued or deleted until the user names a section.
+        # A message that is not a link is not the picker's business at all; it
+        # falls through to the ordinary answer below.
+        url = extract_url(message.text or "")
+        if url and validate_url(url):
+            await message.answer(
+                t("download.need_platform", lang),
+                reply_markup=_download_keyboard(lang),
+                link_preview_options=_NO_PREVIEW,
+            )
+            return
+    elif current is not None:
         await message.answer(t("intake.step_in_progress", lang), link_preview_options=_NO_PREVIEW)
         return
 
