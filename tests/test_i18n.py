@@ -71,15 +71,30 @@ def test_the_copy_names_the_four_featured_platforms(key: str, lang: str, names: 
         assert name in text, f"{key}.{lang} never names {name}"
 
 
+#: Wording that turns the four-service offer into a general-purpose promise the
+#: bot does not make — the other direction of the same mistake as "dozens".
+_WIDER_COVERAGE_WORDS = (
+    "1000+",
+    "other websites",
+    "other sites",
+    "any site",
+    "هزار",
+    "سایت دیگر",
+    "هر سایتی",
+)
+
+
 @pytest.mark.parametrize("lang", LANGS)
 @pytest.mark.parametrize("key", _SUPPORTED_COPY)
-def test_no_copy_undersells_the_bot_to_a_handful_of_sites(key: str, lang: str) -> None:
-    """The four are *featured*, never the whole bot: the same engines serve 1000+
-    websites, and copy that reads like a four-site bot turns away the links this
-    one could have served. The old "dozens" wording is the thing being retired."""
+def test_the_copy_promises_exactly_the_four_platforms(key: str, lang: str) -> None:
+    """The offer is YouTube, Instagram, Spotify and TikTok — and the copy says
+    exactly that. A welcome that also advertises «1000+ other websites» sells a
+    general-purpose downloader this bot does not promise to be, and the old
+    "dozens" wording is retired in both directions."""
     text = MESSAGES[key][lang]
 
-    assert "1000+" in text, f"{key}.{lang} does not say how much more there is"
+    for claim in _WIDER_COVERAGE_WORDS:
+        assert claim not in text, f"{key}.{lang} still advertises {claim!r}"
     for word in ("dozens", "ده‌ها"):
         assert word not in text, f"{key}.{lang} still counts in dozens ({word})"
 

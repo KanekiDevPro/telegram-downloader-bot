@@ -303,16 +303,17 @@ async def main() -> int:
 
         # The welcome screen's service list is the first thing a new user reads, and
         # the *only* place a platform is named before a link is sent — a translation
-        # that dropped one would look like the bot no longer supports it. The four
-        # named there are the featured ones, and the line under them is where the
-        # rest of the coverage is stated: a welcome that reads like a four-platform
-        # bot turns away links this one serves.
+        # that dropped one would look like the bot no longer supports it. It names
+        # exactly the four services this bot downloads from: a welcome that also
+        # advertises a wider coverage sells a general-purpose downloader this bot
+        # does not promise to be.
         from core.i18n import t as translate
 
         expected = {
             "en": ("YouTube", "Instagram", "TikTok", "Spotify"),
             "fa": ("یوتیوب", "اینستاگرام", "تیک‌تاک", "اسپاتیفای"),
         }
+        wider_claims = ("1000+", "other websites", "other sites", "سایت دیگر")
         welcome_missing = [
             f"{lang}/{name}"
             for lang, names in expected.items()
@@ -320,15 +321,16 @@ async def main() -> int:
             if name not in translate("start.welcome", lang, name="x")
         ]
         welcome_missing += [
-            f"{lang}/1000+"
+            f"{lang}/{claim}"
             for lang in expected
-            if "1000+" not in translate("start.welcome", lang, name="x")
+            for claim in wider_claims
+            if claim in translate("start.welcome", lang, name="x")
         ]
         check(
-            "the welcome screen names the featured services and the wider coverage",
+            "the welcome screen names exactly the four services it downloads",
             not welcome_missing,
             ", ".join(welcome_missing)
-            or "YouTube/Instagram/TikTok/Spotify + the 1000+ line",
+            or "YouTube/Instagram/TikTok/Spotify, and nothing wider",
         )
         user_router = next((r for r in dp.sub_routers if r.name == "user"), None)
         user_commands = {

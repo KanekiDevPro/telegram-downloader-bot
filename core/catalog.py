@@ -33,9 +33,8 @@ MESSAGES: Final[Catalog] = {
             "\n"
             "🎬 <b>Premium downloader</b> — send a link, the rest is on me:\n"
             "⭐️ YouTube • Instagram • Spotify • TikTok\n"
-            "▫️ Those four are the <b>featured</b> ones — the same bot takes links\n"
-            "▫️ from <b>1000+ other websites</b>: X, Facebook, Reddit, SoundCloud,\n"
-            "▫️ Vimeo, Pinterest and everything else you can copy a link from.\n"
+            "▫️ Video from YouTube and TikTok, reels and posts from Instagram,\n"
+            "▫️ tracks from Spotify — those four are what this bot downloads.\n"
             "\n"
             "Send a link and I'll show you what's on it — the file lands <b>right "
             "here</b>, and a link that cannot be downloaded says why.\n"
@@ -47,10 +46,8 @@ MESSAGES: Final[Catalog] = {
             "\n"
             "🎬 <b>دانلودر حرفه‌ای</b> — فقط لینک را بفرست، بقیه‌اش با من:\n"
             "⭐️ یوتیوب • اینستاگرام • اسپاتیفای • تیک‌تاک\n"
-            "▫️ این چهار تا پلتفرم‌های <b>ویژه</b> هستند — همین ربات از\n"
-            "▫️ <b>1000+ سایت و پلتفرم دیگر</b> هم لینک می‌گیرد: ایکس، فیسبوک،\n"
-            "▫️ ریدیت، ساندکلاود، ویمیو، پینترست و هر جای دیگری که لینکش را\n"
-            "▫️ کپی می‌کنی.\n"
+            "▫️ ویدیو از یوتیوب و تیک‌تاک، ریلز و پست از اینستاگرام،\n"
+            "▫️ آهنگ از اسپاتیفای — همین چهار سرویس، کارِ همین ربات.\n"
             "\n"
             "لینک رو بفرست تا گزینه‌های موجود رو بهت نشون بدم — فایل <b>همین‌جا</b> "
             "برات می‌رسه، و اگر لینکی دانلود نشد علتش گفته می‌شه.\n"
@@ -65,7 +62,7 @@ MESSAGES: Final[Catalog] = {
     "cmd.profile": {"en": "My quota and status", "fa": "سهمیه و وضعیت من"},
     "cmd.premium": {"en": "Upgrade to VIP", "fa": "ارتقا به ویژه"},
     "cmd.language": {"en": "Change language", "fa": "تغییر زبان"},
-    "cmd.help": {"en": "Help and supported sites", "fa": "راهنما و سایت‌های پشتیبانی‌شده"},
+    "cmd.help": {"en": "Help", "fa": "راهنما"},
     "cmd.admin": {"en": "Admin panel", "fa": "پنل مدیریت"},
     "cmd.doctor": {"en": "Diagnose YouTube", "fa": "عیب‌یابی یوتیوب"},
     "cmd.oauth": {"en": "YouTube TV login (OAuth)", "fa": "لاگین یوتیوب با TV"},
@@ -196,11 +193,10 @@ MESSAGES: Final[Catalog] = {
     "download.spotify": {"en": "🎵 Spotify", "fa": "🎵 اسپاتیفای"},
     "download.tiktok": {"en": "🎶 TikTok", "fa": "🎶 تیک‌تاک"},
     "download.pick_platform": {
-        "en": "Pick one of the featured platforms below — each section names the "
-        "link shapes it takes. A link from any of the 1000+ other supported "
-        "sites works too.",
-        "fa": "یکی از پلتفرم‌های ویژهٔ زیر را انتخاب کن — هر بخش شکل لینک‌هایی که "
-        "می‌گیرد را می‌گوید. لینک 1000+ سایت دیگر هم بی‌هیچ تفاوتی کار می‌کند.",
+        "en": "Pick one of the four platforms below — each section names the link "
+        "shapes it takes.",
+        "fa": "یکی از چهار پلتفرم زیر را انتخاب کن — هر بخش شکل لینک‌هایی که "
+        "می‌گیرد را می‌گوید.",
     },
     # Shown when a link arrives while the picker is open: Downloads asks *which* of
     # these the link is before it touches it, so the answer is the picker again.
@@ -230,25 +226,24 @@ MESSAGES: Final[Catalog] = {
     },
     "download.platform_off": {
         "en": (
-            "🚧 That section is switched off right now. A link from any other platform "
-            "still works — try one of those."
+            "🚧 That section is switched off right now. The other sections still "
+            "work — try one of those."
         ),
         "fa": (
-            "🚧 این بخش همین حالا خاموش است. لینک بقیهٔ پلتفرم‌ها بدون تغییر کار می‌کند "
+            "🚧 این بخش همین حالا خاموش است. بقیهٔ بخش‌ها بدون تغییر کار می‌کنند "
             "— یکی از آن‌ها را بفرست."
         ),
     },
     "download.how": {
         "en": (
-            "Send me a link — YouTube, Instagram, Spotify and TikTok lead the way, "
-            "but the same bot takes links from <b>1000+ other websites</b> too — "
-            "and I'll show you what's on it.\n\n"
+            "Send me a link from <b>YouTube, Instagram, Spotify or TikTok</b> — "
+            "those four are what I download — and I'll show you what's on it.\n\n"
             "🎬 video · 🎵 audio · 🖼️ photos\n\n"
             "Quality and format depend on what the link holds."
         ),
         "fa": (
-            "لینک رو بفرست — یوتیوب، اینستاگرام، اسپاتیفای و تیک‌تاک شاخص‌اند، ولی "
-            "همین ربات از <b>1000+ سایت و پلتفرم دیگر</b> هم لینک می‌گیرد — "
+            "لینک رو از <b>یوتیوب، اینستاگرام، اسپاتیفای یا تیک‌تاک</b> بفرست — "
+            "همین چهار سرویس رو دانلود می‌کنم — "
             "تا گزینه‌های موجود رو بهت نشون بدم.\n\n"
             "🎬 ویدیو · 🎵 صدا · 🖼️ تصاویر\n\n"
             "کیفیت و فرمت بسته به محتوای لینک قابل انتخابه."

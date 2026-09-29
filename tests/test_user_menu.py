@@ -328,13 +328,12 @@ async def test_start_shows_the_menu() -> None:
     welcome = bot.texts[0]
     assert "سلام" in welcome and "لینک" in welcome
     # The service list is the point of the welcome screen: naming them is the
-    # difference between "supports many sites" and an answer. The four named here
-    # are the *featured* ones — and the line under them says how much more the
-    # same bot takes, so the welcome reads as a downloader rather than a
-    # four-site toy.
+    # difference between "supports many sites" and an answer — and naming *only*
+    # them is the promise. The welcome is a four-service offer, not a
+    # general-purpose downloader's.
     for platform in ("یوتیوب", "اینستاگرام", "اسپاتیفای", "تیک‌تاک"):
         assert platform in welcome, platform
-    assert "1000+" in welcome
+    assert "1000+" not in welcome, "the offer is the four services, nothing wider"
     assert _buttons(bot.keyboards[0]) == _buttons(user_module._main_menu(FA))
 
 
