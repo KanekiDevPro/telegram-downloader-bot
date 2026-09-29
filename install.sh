@@ -508,12 +508,80 @@ preflight_resources() {
     esac
 }
 
+#: Bring an older .env up to the current .env.example — without touching a
+#: thing the operator wrote (E1). A release that adds a mandatory variable used
+#: to break `compose up` with an interpolation error mid-build; this heals the
+#: file *before* the build instead. Only ever appends, so comments, order and
+#: custom values are never rewritten:
+#:   1. no .env at all -> copy .env.example (the first-run path);
+#:   2. otherwise append every `KEY=` line of .env.example whose KEY is wholly
+#:      absent from .env, under one `# Auto-synced missing variables` block,
+#:      keeping the example's own default value;
+#:   3. exactly one atomic timestamped backup (`.env.bak-<epoch>`) before any
+#:      append, and one plain `[INFO] Added ...` line per added key — silence
+#:      when there is nothing to add.
+sync_missing_env_vars() {
+    [ -f .env.example ] || return 0
+    if [ ! -f .env ]; then
+        cp .env.example .env
+        chmod 600 .env 2>/dev/null || true
+        printf '%s\n' "[INFO] Created .env from .env.example."
+        return 0
+    fi
+    local line="" key="" default="" missing=""
+    while IFS= read -r line || [ -n "$line" ]; do
+        if printf '%s' "$line" | grep -qE '^[A-Z0-9_]+='
+        then
+            key="${line%%=*}"
+            if ! grep -q "^${key}=" .env
+            then
+                default="${line#*=}"
+                missing="${missing}${key}=${default}
+"
+            fi
+        fi
+    done <.env.example
+    [ -n "$missing" ] || return 0
+    cp .env .env.bak-$(date +%s) || return 1
+    if ! grep -q "^# Auto-synced missing variables" .env
+    then
+        printf '\n# Auto-synced missing variables (appended by install.sh from .env.example)\n' >>.env
+    fi
+    printf '%s' "$missing" | while IFS= read -r line || [ -n "$line" ]; do
+        [ -n "$line" ] || continue
+        printf '%s\n' "$line" >>.env
+        printf '%s\n' "[INFO] Added missing configuration variable ${line%%=*} to .env"
+    done
+}
+
+#: Fail the build before it starts when the compose configuration itself is
+#: broken (E2). A variable missing from .env otherwise aborts `up` mid-build,
+#: after images were already pulled. `config --quiet` only validates; its own
+#: error already names the variable, and the hint says where the defaults live.
+preflight_compose_config() {
+    local errors=""
+    if errors="$(compose config --quiet 2>&1)"; then
+        return 0
+    fi
+    fail "The compose configuration is invalid — nothing was built or started."
+    [ -n "$errors" ] && say "$errors"
+    say "Most often this is a variable missing from .env: compare it with"
+    say ".env.example (new defaults are appended automatically — a key with no"
+    say "default, like POSTGRES_PASSWORD, must be filled in by hand)."
+    return 1
+}
+
 #: Build the stack with every line also written to a timestamped log in the
 #: project dir — a failed build scrolls its evidence off the screen, and the
 #: operator needs a file to inspect (or paste into an issue). `tee` is last in
 #: the pipe, so the build's own exit code comes back via PIPESTATUS.
 build_and_log() {
     local log_file="$1"
+    # Heal first, validate second, build last: every install, update, start and
+    # restart funnels through here, so no build ever meets a stale .env or a
+    # broken interpolation unannounced.
+    sync_missing_env_vars
+    preflight_compose_config || return 1
     say "${DIM}Build log: $log_file${RESET}"
     if [ "$HAS_GUM" = 1 ]; then
         # A spinner over the build. The build still tees every line into the log
@@ -561,6 +629,9 @@ do_install() {
 
     cd "$PROJECT_DIR" || return 1
     write_env || return 1
+    # A fresh prompt writes only the secrets; anything the release added since
+    # lands here with its example default.
+    sync_missing_env_vars
     cookie_jar_step
     cobalt_dir_step
 
@@ -634,6 +705,8 @@ do_update() {
     else
         warn "No .git here — skipping the code update, rebuilding what is present."
     fi
+    # The pull may have added settings: heal .env before the rebuild meets it.
+    sync_missing_env_vars
     say "${GREEN}Rebuilding and restarting...${RESET}"
     local log_file="update-$(date +%Y%m%d-%H%M%S).log"
     build_and_log "$log_file" || {

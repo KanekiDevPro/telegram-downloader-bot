@@ -60,6 +60,45 @@ else
     echo "==> .env already exists, leaving it untouched"
 fi
 
+# Bring an older .env up to the current .env.example without touching what the
+# operator wrote (E1, same contract as install.sh): every example key wholly
+# absent from .env is appended with its default, under one annotated block,
+# after a single atomic timestamped backup — and silence when nothing is missing.
+sync_missing_env_vars() {
+    [ -f .env.example ] || return 0
+    if [ ! -f .env ]; then
+        cp .env.example .env
+        echo "[INFO] Created .env from .env.example."
+        return 0
+    fi
+    local line="" key="" default="" missing=""
+    while IFS= read -r line || [ -n "$line" ]; do
+        if printf '%s' "$line" | grep -qE '^[A-Z0-9_]+='
+        then
+            key="${line%%=*}"
+            if ! grep -q "^${key}=" .env
+            then
+                default="${line#*=}"
+                missing="${missing}${key}=${default}
+"
+            fi
+        fi
+    done <.env.example
+    [ -n "$missing" ] || return 0
+    cp .env .env.bak-$(date +%s) || return 1
+    if ! grep -q "^# Auto-synced missing variables" .env
+    then
+        printf '\n# Auto-synced missing variables (appended by deploy/install.sh from .env.example)\n' >>.env
+    fi
+    printf '%s' "$missing" | while IFS= read -r line || [ -n "$line" ]; do
+        [ -n "$line" ] || continue
+        printf '%s\n' "$line" >>.env
+        printf '%s\n' "[INFO] Added missing configuration variable ${line%%=*} to .env"
+    done
+}
+
+sync_missing_env_vars
+
 # Fill one .env key in place when .env carries it, append it when it does not
 # (a blind append would leave duplicate lines — one filled, one still empty).
 set_env_key() {
