@@ -1642,6 +1642,29 @@ def _photo_caption(
     return "\n\n".join(["\n".join(facts), body] if facts else [body])
 
 
+def _sendable_thumbnail(thumbnail: str | None) -> str | None:
+    """A thumbnail URL Telegram's ``send_photo`` will actually carry.
+
+    YouTube reports ``vi_webp`` thumbnails (``.../vi_webp/<id>/maxresdefault.webp``)
+    that ``send_photo`` refuses, failing the whole photo question into its text
+    fallback. The standard JPEG twin (``.../vi/<id>/maxresdefault.jpg``) is the
+    same picture in a carried container, so WebP ships as JPEG. Anything else —
+    including a bare ``.webp`` file off another host, whose JPEG twin cannot be
+    known — passes through untouched and keeps the existing fallback.
+    """
+    if not thumbnail:
+        return thumbnail
+    normalized = thumbnail
+    if "/vi_webp/" in normalized:
+        normalized = normalized.replace("/vi_webp/", "/vi/")
+    if normalized.lower().split("?", 1)[0].endswith(".webp"):
+        base, _, query = normalized.partition("?")
+        normalized = base[: -len(".webp")] + ".jpg"
+        if query:
+            normalized += "?" + query
+    return normalized
+
+
 async def _send_question(
     message: Message,
     text: str,
@@ -1656,12 +1679,13 @@ async def _send_question(
     not eat the menu: the photo attempt is best-effort, and the fallback is the
     same text screen this has always been.
     """
-    if thumbnail:
+    photo = _sendable_thumbnail(thumbnail)
+    if photo:
         try:
-            await message.answer_photo(photo=thumbnail, caption=caption, reply_markup=keyboard)
+            await message.answer_photo(photo=photo, caption=caption, reply_markup=keyboard)
             return
         except Exception:  # a refused picture is the fallback's cue, never an error
-            logger.warning("thumbnail %.80s would not send — asking as text", thumbnail)
+            logger.warning("thumbnail %.80s would not send — asking as text", photo)
     await message.answer(text, reply_markup=keyboard, link_preview_options=_NO_PREVIEW)
 
 

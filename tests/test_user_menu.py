@@ -3145,3 +3145,21 @@ async def test_a_dead_cached_rung_still_delivers_by_downloading(
 
     assert ("video", "720") in forgotten, "the dead row is dropped, not retried forever"
     assert len(queue.tasks) == 1, "and the rung downloads for real — the button never fails"
+
+
+async def test_a_webp_thumbnail_is_normalized_to_jpeg_before_sending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """YouTube reports `vi_webp/...maxresdefault.webp` thumbnails that Telegram's
+    send_photo refuses — so the intake normalizes to the standard JPEG
+    (`/vi/.../maxresdefault.jpg`) and the question still arrives as a photo."""
+    bot = RecordingBot()
+
+    await _ask_with_probe(
+        bot, monkeypatch, "https://i.ytimg.com/vi_webp/abc/maxresdefault.webp"
+    )
+
+    photos = [call for call in bot.calls if isinstance(call, SendPhoto)]
+    assert len(photos) == 1, "normalized — not a text fallback"
+    assert photos[0].photo == "https://i.ytimg.com/vi/abc/maxresdefault.jpg"
+    assert bot.texts == [], "no plain-text twin"
