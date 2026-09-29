@@ -32,10 +32,10 @@ MESSAGES: Final[Catalog] = {
             "<b>Hi {name} 👋</b>\n"
             "\n"
             "🎬 <b>Premium downloader</b> — send a link, the rest is on me:\n"
-            "▫️ YouTube • Twitter/X • Instagram • TikTok\n"
-            "▫️ Spotify • SoundCloud • Facebook • Reddit\n"
-            "▫️ Pinterest • Vimeo • Twitch • Dailymotion\n"
-            "▫️ and dozens of other sites\n"
+            "⭐️ YouTube • Instagram • Spotify • TikTok\n"
+            "▫️ Those four are the <b>featured</b> ones — the same bot takes links\n"
+            "▫️ from <b>1000+ other websites</b>: X, Facebook, Reddit, SoundCloud,\n"
+            "▫️ Vimeo, Pinterest and everything else you can copy a link from.\n"
             "\n"
             "Send a link and I'll show you what's on it — the file lands <b>right "
             "here</b>, and a link that cannot be downloaded says why.\n"
@@ -46,10 +46,11 @@ MESSAGES: Final[Catalog] = {
             "<b>سلام {name} 👋</b>\n"
             "\n"
             "🎬 <b>دانلودر حرفه‌ای</b> — فقط لینک را بفرست، بقیه‌اش با من:\n"
-            "▫️ یوتیوب • توییتر/X • اینستاگرام • تیک‌تاک\n"
-            "▫️ اسپاتیفای • ساندکلاود • فیسبوک • ریدیت\n"
-            "▫️ پینترست • ویمیو • توییچ • دیلی‌موشن\n"
-            "▫️ و ده‌ها سرویس دیگر\n"
+            "⭐️ یوتیوب • اینستاگرام • اسپاتیفای • تیک‌تاک\n"
+            "▫️ این چهار تا پلتفرم‌های <b>ویژه</b> هستند — همین ربات از\n"
+            "▫️ <b>1000+ سایت و پلتفرم دیگر</b> هم لینک می‌گیرد: ایکس، فیسبوک،\n"
+            "▫️ ریدیت، ساندکلاود، ویمیو، پینترست و هر جای دیگری که لینکش را\n"
+            "▫️ کپی می‌کنی.\n"
             "\n"
             "لینک رو بفرست تا گزینه‌های موجود رو بهت نشون بدم — فایل <b>همین‌جا</b> "
             "برات می‌رسه، و اگر لینکی دانلود نشد علتش گفته می‌شه.\n"
@@ -195,8 +196,11 @@ MESSAGES: Final[Catalog] = {
     "download.spotify": {"en": "🎵 Spotify", "fa": "🎵 اسپاتیفای"},
     "download.tiktok": {"en": "🎶 TikTok", "fa": "🎶 تیک‌تاک"},
     "download.pick_platform": {
-        "en": "Pick a platform — each section names the link shapes it takes.",
-        "fa": "یک پلتفرم انتخاب کن — هر بخش شکل لینک‌هایی که می‌گیرد را می‌گوید.",
+        "en": "Pick one of the featured platforms below — each section names the "
+        "link shapes it takes. A link from any of the 1000+ other supported "
+        "sites works too.",
+        "fa": "یکی از پلتفرم‌های ویژهٔ زیر را انتخاب کن — هر بخش شکل لینک‌هایی که "
+        "می‌گیرد را می‌گوید. لینک 1000+ سایت دیگر هم بی‌هیچ تفاوتی کار می‌کند.",
     },
     # Shown when a link arrives while the picker is open: Downloads asks *which* of
     # these the link is before it touches it, so the answer is the picker again.
@@ -210,14 +214,16 @@ MESSAGES: Final[Catalog] = {
     },
     "download.how": {
         "en": (
-            "Send me a link — YouTube, Instagram, TikTok, X, Spotify or dozens of "
-            "other sites — and I'll show you what's on it.\n\n"
+            "Send me a link — YouTube, Instagram, Spotify and TikTok lead the way, "
+            "but the same bot takes links from <b>1000+ other websites</b> too — "
+            "and I'll show you what's on it.\n\n"
             "🎬 video · 🎵 audio · 🖼️ photos\n\n"
             "Quality and format depend on what the link holds."
         ),
         "fa": (
-            "لینک رو بفرست — یوتیوب، اینستاگرام، تیک‌تاک، ایکس، اسپاتیفای یا ده‌ها "
-            "سایت دیگه — تا گزینه‌های موجود رو بهت نشون بدم.\n\n"
+            "لینک رو بفرست — یوتیوب، اینستاگرام، اسپاتیفای و تیک‌تاک شاخص‌اند، ولی "
+            "همین ربات از <b>1000+ سایت و پلتفرم دیگر</b> هم لینک می‌گیرد — "
+            "تا گزینه‌های موجود رو بهت نشون بدم.\n\n"
             "🎬 ویدیو · 🎵 صدا · 🖼️ تصاویر\n\n"
             "کیفیت و فرمت بسته به محتوای لینک قابل انتخابه."
         ),

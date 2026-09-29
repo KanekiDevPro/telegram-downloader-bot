@@ -43,6 +43,47 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # ---------------------------------------------------------------------------
 
 
+#: The platforms the bot *leads* with, spelled as the copy spells them.
+FEATURED_EN = ("YouTube", "Instagram", "Spotify", "TikTok")
+FEATURED_FA = ("یوتیوب", "اینستاگرام", "اسپاتیفای", "تیک‌تاک")
+
+#: The keys that introduce the bot to somebody who has not used it yet.
+_FEATURED_COPY = ("start.welcome", "download.how")
+#: Every key that talks about what the bot can take links from.
+_SUPPORTED_COPY = (*_FEATURED_COPY, "download.pick_platform")
+
+
+@pytest.mark.parametrize(
+    ("key", "lang", "names"),
+    [
+        ("start.welcome", "en", FEATURED_EN),
+        ("start.welcome", "fa", FEATURED_FA),
+        ("download.how", "en", FEATURED_EN),
+        ("download.how", "fa", FEATURED_FA),
+    ],
+)
+def test_the_copy_names_the_four_featured_platforms(key: str, lang: str, names: tuple[str, ...]) -> None:
+    """Named, in both languages: "supports many sites" is not an answer to "can it
+    do the one I have", and the four are what most people came for."""
+    text = MESSAGES[key][lang]
+
+    for name in names:
+        assert name in text, f"{key}.{lang} never names {name}"
+
+
+@pytest.mark.parametrize("lang", LANGS)
+@pytest.mark.parametrize("key", _SUPPORTED_COPY)
+def test_no_copy_undersells_the_bot_to_a_handful_of_sites(key: str, lang: str) -> None:
+    """The four are *featured*, never the whole bot: the same engines serve 1000+
+    websites, and copy that reads like a four-site bot turns away the links this
+    one could have served. The old "dozens" wording is the thing being retired."""
+    text = MESSAGES[key][lang]
+
+    assert "1000+" in text, f"{key}.{lang} does not say how much more there is"
+    for word in ("dozens", "ده‌ها"):
+        assert word not in text, f"{key}.{lang} still counts in dozens ({word})"
+
+
 def test_every_message_parses_under_telegram_html_rules() -> None:
     """What the catalogue ships must be sendable: Telegram's HTML parser is
     the gate every string eventually meets, and a bare "<" or "&" in one of

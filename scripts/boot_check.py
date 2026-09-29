@@ -303,12 +303,15 @@ async def main() -> int:
 
         # The welcome screen's service list is the first thing a new user reads, and
         # the *only* place a platform is named before a link is sent — a translation
-        # that dropped one would look like the bot no longer supports it.
+        # that dropped one would look like the bot no longer supports it. The four
+        # named there are the featured ones, and the line under them is where the
+        # rest of the coverage is stated: a welcome that reads like a four-platform
+        # bot turns away links this one serves.
         from core.i18n import t as translate
 
         expected = {
-            "en": ("YouTube", "Instagram", "TikTok", "Spotify", "SoundCloud", "Reddit"),
-            "fa": ("یوتیوب", "اینستاگرام", "تیک‌تاک", "اسپاتیفای", "ساندکلاود", "ریدیت"),
+            "en": ("YouTube", "Instagram", "TikTok", "Spotify"),
+            "fa": ("یوتیوب", "اینستاگرام", "تیک‌تاک", "اسپاتیفای"),
         }
         welcome_missing = [
             f"{lang}/{name}"
@@ -316,10 +319,16 @@ async def main() -> int:
             for name in names
             if name not in translate("start.welcome", lang, name="x")
         ]
+        welcome_missing += [
+            f"{lang}/1000+"
+            for lang in expected
+            if "1000+" not in translate("start.welcome", lang, name="x")
+        ]
         check(
-            "the welcome screen names the supported services in both languages",
+            "the welcome screen names the featured services and the wider coverage",
             not welcome_missing,
-            ", ".join(welcome_missing) or "YouTube/Instagram/TikTok/Spotify/SoundCloud/Reddit",
+            ", ".join(welcome_missing)
+            or "YouTube/Instagram/TikTok/Spotify + the 1000+ line",
         )
         user_router = next((r for r in dp.sub_routers if r.name == "user"), None)
         user_commands = {

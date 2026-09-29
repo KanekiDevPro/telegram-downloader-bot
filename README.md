@@ -23,7 +23,7 @@ sudo bash -c "$(wget -qO- https://raw.githubusercontent.com/KanekiDevPro/telegra
 
 ## Supported media
 
-Video and audio from dozens of platforms (YouTube, Twitter/X, Instagram, TikTok, Facebook, Reddit, Pinterest, Vimeo, Twitch, Dailymotion, Spotify, SoundCloud, …), photo posts delivered as photos, and a Cobalt fallback for the moments a site refuses yt-dlp. By design: no private links, no live streams, no playlists. The bot only offers what a link really contains.
+Video and audio from YouTube, Instagram, Spotify and TikTok — the four the bot features — and from any of the 1000+ other websites yt-dlp can read (Twitter/X, Facebook, Reddit, Pinterest, Vimeo, Twitch, Dailymotion, SoundCloud, …). Photo posts are delivered as photos, Instagram reels and posts go straight to the best available file without a quality menu, and a Cobalt fallback (its own engine, fed the same cookie jar) takes over the moments a site refuses yt-dlp. By design: no private links, no live streams, no playlists. The bot only offers what a link really contains.
 
 ## Architecture
 
