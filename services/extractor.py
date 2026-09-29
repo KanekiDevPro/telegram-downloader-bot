@@ -174,8 +174,9 @@ class YdlLogAdapter:
 #      and natively playable in Telegram clients.
 #   2. H.264/AVC (``avc1``) + m4a — maximum compatibility fallback.
 #   3. Whatever the site considers best, then the single-file best.
-# Streams are merged into MP4 (MKV only if a site offers nothing MP4-compatible)
-# because Telegram handles MP4 with inline streaming best.
+# Streams are merged into MP4 (WebM only if a site offers nothing MP4-compatible)
+# because Telegram plays MP4 inline with streaming and WebM on iOS/desktop -
+# while MKV/AVI/MOV arrive silent or as documents (see F1).
 #: ``hev1``/``hvc1`` are the two HEVC codec tags YouTube ships; ``avc1``/``h264``
 #: the H.264 ones. Each filter uses its own bracket — yt-dlp ANDs them, whereas
 #: combining conditions inside one pair of brackets is a syntax error.
@@ -193,7 +194,7 @@ VIDEO_FORMAT_SELECTOR = "/".join(
     )
 )
 AUDIO_FORMAT_SELECTOR = "bestaudio[ext=m4a]/bestaudio/best"
-MERGE_OUTPUT_FORMAT = "mp4/mkv"
+MERGE_OUTPUT_FORMAT = "mp4/webm"
 #: yt-dlp ``format_sort`` for every download: resolution first, then HEVC on ties.
 #: One constant because two places must agree on it forever — the download opts
 #: (``_base_opts``) and the menu's prediction of what a tier will deliver

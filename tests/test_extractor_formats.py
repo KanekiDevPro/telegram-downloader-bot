@@ -819,3 +819,21 @@ def test_the_menu_never_advertises_a_rung_the_chain_would_trade_down() -> None:
         assert int(picked["height"]) < hidden, (
             "hidden exactly because the chain trades the tap down"
         )
+
+
+# ---------------------------------------------------------------------------
+# F1: delivered videos are always an inline-playable container
+# ---------------------------------------------------------------------------
+
+
+def test_merge_output_prefers_mp4_then_webm_and_never_an_unplayable_container() -> None:
+    """Telegram plays .mp4/.webm inline; .mkv/.avi/.mov/.wmv arrive silent or as
+    files. The merge preference must name a playable container first (mp4, the
+    H.264+AAC union) with webm as the fallback — never an unplayable one."""
+    parts = [part.strip().lower() for part in MERGE_OUTPUT_FORMAT.split("/")]
+    assert parts[0] == "mp4", f"mp4 is the preferred merge container, got {MERGE_OUTPUT_FORMAT!r}"
+    assert parts[1] == "webm", f"webm is the fallback merge container, got {MERGE_OUTPUT_FORMAT!r}"
+    for forbidden in (".mkv", ".avi", ".mov", ".wmv"):
+        assert forbidden.lstrip(".") not in parts, (
+            f"{forbidden} is not playable inline in Telegram and must never be a merge target"
+        )
