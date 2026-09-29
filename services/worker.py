@@ -100,6 +100,13 @@ _PERMANENT_ERROR_CODES = {
 #: a photo, and one cache row can be replayed as a video.
 IMAGE_EXTENSIONS = frozenset({"jpg", "jpeg", "png", "webp"})
 
+#: Video containers Telegram plays inline (F4). mp4 is what the merge preference
+#: produces, webm the fallback — both with streaming metadata (F2). Anything else
+#: a video request yields (.mkv from the old merge preference or a foreign engine
+#: such as Cobalt, .avi/.mov/.wmv) is deliberately a *document*: attempting a
+#: video send Telegram is known to refuse would only buy a silent fallback (F3).
+PLAYABLE_VIDEO_EXTENSIONS = frozenset({"mp4", "webm"})
+
 
 # ---------------------------------------------------------------------------
 # Worker lifecycle
@@ -647,7 +654,9 @@ async def _finish_upload(
         # caption under a 192 kbps file is the exact lie this refuses to send.
         # Only the captioned media is checked (an album is named by its first
         # file); see services/verify.py for the policy and its tolerances.
-        if _delivery_kind(files[0], result.media_format) in ("audio", "video"):
+        if result.media_format in ("audio", "video") and _delivery_kind(
+            files[0], result.media_format
+        ) in ("audio", "video", "file"):
             verification = verify.verify_produced_with_facts(
                 result.file_path,
                 media_format=result.media_format,
@@ -1106,12 +1115,20 @@ def _delivery_kind(path: Path, media_format: str) -> str:
     """Which Telegram method this produced file needs.
 
     The *file* decides, not the request: a user who asked for «video» on an
-    image-only post gets photos, and the extension is what says so. Everything else
-    follows the format that was asked for, exactly as it always did.
+    image-only post gets photos, and the extension is what says so. A video the
+    clients cannot play inline (.mkv and friends — the old merge preference, or
+    a foreign engine) is deliberately a document, so the send, the cached kind
+    and the replay all agree up front instead of discovering it in a fallback.
+    Everything else follows the format that was asked for, exactly as it always
+    did.
     """
     if path.suffix.lower().lstrip(".") in IMAGE_EXTENSIONS:
         return "photo"
-    return "audio" if media_format == "audio" else "video"
+    if media_format == "audio":
+        return "audio"
+    if path.suffix.lower().lstrip(".") not in PLAYABLE_VIDEO_EXTENSIONS:
+        return "file"
+    return "video"
 
 
 def _photo_id(message: Any) -> str:
@@ -1222,6 +1239,16 @@ async def _send_file(
             lambda ref: bot.send_audio(chat_id, ref, caption=caption, **tags), path
         )
         return _file_id(sent.audio)
+    if _delivery_kind(path, media_format) == "file":
+        # Deliberate routing (F4), not a failure: this container never plays
+        # inline, so there is no video attempt to refuse — straight to document,
+        # named loudly for the same reason the fallback warns (F3).
+        logger.warning(
+            "Routing %s (%s) to document: unplayable video container — sending it as a file",
+            source_url or path.name,
+            path.suffix or "unknown container",
+        )
+        return await _send_document(bot, chat_id, path, caption)
     video_kwargs = _video_send_kwargs(facts)
     try:
         sent = await _deliver_ref(

@@ -70,8 +70,8 @@ async def test_send_video_carries_the_measured_dimensions_and_duration(
     bot = FakeBot()
     media = _media(tmp_path)
 
-    file_id = await worker._send_file(  # type: ignore[arg-type]
-        bot, 1, media, "video", "caption", facts=_facts()
+    file_id = await worker._send_file(
+        bot, 1, media, "video", "caption", facts=_facts()  # type: ignore[arg-type]
     )
 
     assert file_id == "vid-1"
@@ -106,8 +106,9 @@ async def test_only_measured_positive_integers_are_passed(
     bot = FakeBot()
     media = _media(tmp_path)
 
-    await worker._send_file(  # type: ignore[arg-type]
-        bot, 1, media, "video", "caption", facts=_facts(width=None, height=0, duration_s=-3.0)
+    await worker._send_file(
+        bot, 1, media, "video", "caption",  # type: ignore[arg-type]
+        facts=_facts(width=None, height=0, duration_s=-3.0),
     )
 
     assert bot.calls[0][0] == "send_video"
@@ -142,14 +143,63 @@ async def test_the_document_fallback_warns_with_url_suffix_and_telegram_error(
             )
 
     bot = RefusingBot()
-    media = _media(tmp_path, "clip.mkv")
+    # A *playable* container Telegram still refuses: the genuinely unexpected
+    # fallback (an unplayable .mkv never attempts the video send at all — F4).
+    media = _media(tmp_path, 'clip.mp4')
 
     with caplog.at_level("WARNING", logger="services.worker"):
-        file_id = await worker._send_file(  # type: ignore[arg-type]
-            bot, 1, media, "video", "caption", facts=_facts()
+        file_id = await worker._send_file(
+            bot, 1, media, "video", "caption", facts=_facts()  # type: ignore[arg-type]
         )
 
     assert file_id == "doc-1"
     assert [call[0] for call in bot.calls] == ["send_video", "send_document"]
-    assert ".mkv" in caplog.text, "the file suffix is the diagnosis"
+    assert ".mp4" in caplog.text, "the file suffix is the diagnosis"
     assert "wrong file identifier" in caplog.text, "Telegram's own error goes in verbatim"
+
+
+# ---------------------------------------------------------------------------
+# F4: unplayable containers route to document deliberately
+# ---------------------------------------------------------------------------
+
+
+def test_delivery_kind_routes_unplayable_video_containers_to_document() -> None:
+    """The kind is the routing decision: .mp4/.webm play inline, everything
+    else a video request produces (.mkv from the old merge preference or a
+    foreign engine, .avi/.mov/.wmv) is deliberately a document — never a
+    video send Telegram will refuse."""
+    for suffix in (".mkv", ".avi", ".mov", ".wmv"):
+        assert worker._delivery_kind(Path(f"clip{suffix}"), "video") == "file", suffix
+    assert worker._delivery_kind(Path("clip.mp4"), "video") == "video"
+    assert worker._delivery_kind(Path("clip.webm"), "video") == "video"
+    assert worker._delivery_kind(Path("clip.MP4"), "video") == "video"
+    # Untouched: audio keeps its method whatever the suffix, photos stay photos.
+    assert worker._delivery_kind(Path("song.mkv"), "audio") == "audio"
+    assert worker._delivery_kind(Path("pic.jpg"), "video") == "photo"
+
+
+async def test_an_unplayable_container_is_sent_as_a_document_without_a_doomed_video_attempt(
+    tmp_path: Path, monkeypatch: Any, caplog: Any
+) -> None:
+    """No send_video attempt Telegram is known to refuse: straight to document,
+    with a warning that names the deliberate routing (the F3 warning stays for
+    the genuinely unexpected refusals)."""
+    monkeypatch.setattr(worker, "get_settings", lambda: _settings())
+    bot = FakeBot()
+    media = _media(tmp_path, "clip.mkv")
+
+    with caplog.at_level("WARNING", logger="services.worker"):
+        file_id = await worker._send_file(
+            bot,  # type: ignore[arg-type]
+            1,
+            media,
+            "video",
+            "caption",
+            facts=_facts(),
+            source_url="https://example.com/v",
+        )
+
+    assert file_id == "doc-1"
+    assert [call[0] for call in bot.calls] == ["send_document"]
+    assert ".mkv" in caplog.text
+    assert "https://example.com/v" in caplog.text
