@@ -1064,6 +1064,42 @@ async def set_support_contact(pool: asyncpg.Pool, value: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# the Download screen's section switches (which platform buttons are drawn)
+# ---------------------------------------------------------------------------
+
+#: Where the switched-off sections live in ``bot_state``. One row, comma-separated:
+#: a list nobody queries, read whole on every menu draw and written whole from the
+#: admin screen — a table for four names would be ceremony.
+DISABLED_PLATFORMS_KEY = "disabled_platforms"
+
+
+async def get_disabled_platforms(pool: asyncpg.Pool) -> tuple[str, ...]:
+    """The section names an admin switched off (``()`` when all four are on).
+
+    Never raises, like the support contact and for the same reason: this is read
+    while the *Download screen* is being drawn, and a screen that fails to appear
+    because one optional setting could not be read is worse than a button that is
+    visible when the operator meant to hide it. A value nobody can parse reads as
+    "nothing is off" — the safe direction, since every section is still served by
+    the engines.
+    """
+    try:
+        raw = str(await get_state(pool, DISABLED_PLATFORMS_KEY) or "")
+    except Exception:
+        logger.exception("could not read the disabled platforms from bot_state")
+        return ()
+    return tuple(
+        part.strip().lower() for part in raw.split(",") if part.strip()
+    )
+
+
+async def set_disabled_platforms(pool: asyncpg.Pool, names: Sequence[str]) -> None:
+    """Store the switched-off sections (sorted and deduplicated, so the row is stable)."""
+    cleaned = sorted({name.strip().lower() for name in names if name and name.strip()})
+    await set_state(pool, DISABLED_PLATFORMS_KEY, ",".join(cleaned))
+
+
+# ---------------------------------------------------------------------------
 # broadcast (every user, one message)
 # ---------------------------------------------------------------------------
 

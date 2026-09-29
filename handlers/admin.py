@@ -20,7 +20,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Sequence
 
 import asyncpg
 from aiogram import Bot, F, Router
@@ -47,7 +47,7 @@ from core.ui import Screen, edit_quietly
 from core.utils import escape_html
 from handlers.user import _back_to_menu, support_target
 from services import backup as backup_service
-from services import broadcast, cookie_refresh, login_wizard, panel
+from services import broadcast, content, cookie_refresh, login_wizard, panel
 from services.cobalt import CobaltService
 from services.cookie_refresh import RefreshOutcome, render_outcome
 from services.cookie_watch import DOCTOR_CALLBACK, REFRESH_CALLBACK
@@ -538,6 +538,7 @@ _PANEL_SCREENS: frozenset[str] = frozenset(
         "settings",
         "texts",
         "sources",
+        "platforms",
         # …and the six category submenus themselves.
         "cat_users",
         "cat_downloads",
@@ -570,6 +571,7 @@ _SCREEN_PARENT: dict[str, str] = {
     "system": "cat_system",
     "settings": "cat_system",
     "sources": "cat_sources",
+    "platforms": "cat_downloads",
 }
 #: The hub's six categories, in hub order: id → its label key.
 _CATEGORY_LABELS: dict[str, str] = {
@@ -598,7 +600,10 @@ _CATEGORY_ITEMS: dict[str, tuple[tuple[str, str], ...]] = {
         ("admin.btn_users", "admin:users"),
         ("admin.btn_groups", "admin:groups"),
     ),
-    "cat_downloads": (("admin.btn_stats", "admin:stats"),),
+    "cat_downloads": (
+        ("admin.btn_stats", "admin:stats"),
+        ("admin.btn_platforms", "admin:platforms"),
+    ),
     "cat_sources": (
         ("admin.btn_doctor", DOCTOR_CALLBACK),
         ("admin.btn_refresh", REFRESH_CALLBACK),
@@ -628,6 +633,13 @@ BC_CANCEL = "bc:cancel"
 BC_START = "bc:start"
 SUP_EDIT = "sup:edit"
 SUP_CLEAR = "sup:clear"
+
+#: The Download screen's switches: ``plat:<section>`` — a tap flips that one.
+PLATFORM_TOGGLE_PREFIX = "plat:"
+#: What a switch looks like in a button and in a line of the screen. Emoji rather
+#: than words on purpose: an operator reads four rows at a glance on a phone.
+PLATFORM_MARK_ON = "✅"
+PLATFORM_MARK_OFF = "❌"
 
 
 def _panel_keyboard(lang: str) -> InlineKeyboardMarkup:
@@ -767,6 +779,66 @@ def _users_keyboard(
     return builder.as_markup()
 
 
+def _platform_switch(name: str, lang: str, *, disabled: Sequence[str]) -> str:
+    """One switch's label: the mark, then the section *as the picker spells it*.
+
+    The name is the operator's own ``download.<section>`` text — an admin who renamed
+    a button in the texts editor sees that name here too, so the screen and the user
+    menu can never drift apart.
+    """
+    mark = PLATFORM_MARK_OFF if name in disabled else PLATFORM_MARK_ON
+    return f"{mark} {t(f'download.{name}', lang)}"
+
+
+def _platforms_keyboard(lang: str, disabled: Sequence[str]) -> InlineKeyboardMarkup:
+    """One switch per section — in pairs — then Back and Home.
+
+    Every section is listed whatever its state: this screen is the one place a
+    closed section is still named, which is what makes reopening it possible.
+    """
+    builder = InlineKeyboardBuilder()
+    for name in content.PLATFORM_NAMES:
+        builder.button(
+            text=_platform_switch(name, lang, disabled=disabled),
+            callback_data=f"{PLATFORM_TOGGLE_PREFIX}{name}",
+        )
+    builder.adjust(2)
+    _leave(builder, lang, to=f"admin:{_SCREEN_PARENT.get('platforms', 'home')}")
+    return builder.as_markup()
+
+
+async def _platforms_screen(pool: asyncpg.Pool, lang: str) -> Screen:
+    """Which sections the Download screen offers, and how to flip one.
+
+    Read live on every draw: an operator who just closed a section expects the next
+    tap to show it, and the next user to see it — no restart, no cache.
+    """
+    disabled = await database.get_disabled_platforms(pool)
+    lines = [
+        t(
+            "admin.platforms_intro",
+            lang,
+            on=len(content.visible_sections(disabled)),
+            total=len(content.PLATFORM_NAMES),
+        ),
+        "",
+    ]
+    lines += [
+        t(
+            "admin.platform_line",
+            lang,
+            mark=PLATFORM_MARK_OFF if name in disabled else PLATFORM_MARK_ON,
+            name=t(f"download.{name}", lang),
+            state=t(
+                "admin.platform_state_off" if name in disabled else "admin.platform_state_on",
+                lang,
+            ),
+        )
+        for name in content.PLATFORM_NAMES
+    ]
+    return Screen("\n".join(lines), _platforms_keyboard(lang, disabled))
+
+
 def _support_keyboard(lang: str, *, configured: bool) -> InlineKeyboardMarkup:
     """Write the contact, or remove it (shown only when there is one to remove).
 
@@ -819,6 +891,8 @@ async def panel_screen(
             await panel.sources_text(pool, settings, cobalt, lang),
             _section_keyboard(lang, "sources"),
         )
+    if screen == "platforms":
+        return await _platforms_screen(pool, lang)
     if screen in ("system", "health", "queue", "tools"):
         health = await panel.health_text(pool, queue, settings, cobalt, lang)
         queue_line = await panel.queue_text(queue, settings, lang)
@@ -1718,6 +1792,54 @@ async def on_broadcast_send(
         report.total,
         report.blocked,
         report.failed,
+    )
+
+
+@router.callback_query(F.data.startswith(PLATFORM_TOGGLE_PREFIX))
+async def on_platform_toggle(
+    cb: CallbackQuery, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
+) -> None:
+    """Flip one section's switch — never the last open one.
+
+    A Download screen whose every section is closed is a dead end for users, so the
+    desk refuses to create one and says why; any other tap is a one-line change that
+    every user's next picker already reflects (it reads the row on each draw, never
+    from a cached copy in the process). The check is repeated on the callback rather
+    than trusted from the keyboard: a forwarded panel message travels with its
+    buttons.
+    """
+    if not get_settings().is_admin(cb.from_user.id):
+        await cb.answer(t("admin.only", lang), show_alert=True)
+        return
+    name = (cb.data or "")[len(PLATFORM_TOGGLE_PREFIX):]
+    if name not in content.PLATFORM_NAMES:
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    disabled = await database.get_disabled_platforms(pool)
+    if name in disabled:
+        remaining = tuple(item for item in disabled if item != name)
+    else:
+        remaining = (*disabled, name)
+    if not content.visible_sections(remaining):
+        await cb.answer(t("admin.platform_last", lang), show_alert=True)
+        return
+    await database.set_disabled_platforms(pool, remaining)
+    label = t(f"download.{name}", lang)
+    closing = name in remaining
+    await cb.answer(
+        t("admin.platform_off" if closing else "admin.platform_on", lang, name=label)
+    )
+    message = cb.message if isinstance(cb.message, Message) else None
+    if message is None:
+        return
+    text, keyboard = await _platforms_screen(pool, lang)
+    await _edit(message, text, reply_markup=keyboard)
+    logger.info(
+        "platform switch by admin %s: %s %s (off: %s)",
+        cb.from_user.id,
+        name,
+        "closed" if closing else "reopened",
+        ", ".join(remaining) or "none",
     )
 
 

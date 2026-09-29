@@ -16,6 +16,47 @@ import pytest
 
 from services import content
 
+# ---------------------------------------------------------------------------
+# The picker's data: badges per shape, and the sections an admin left on
+# ---------------------------------------------------------------------------
+
+
+def test_every_shape_a_section_promises_has_a_badge() -> None:
+    """One badge per promised shape, and no badge without a promise: a section
+    screen lists exactly the shapes the picker advertises, so a shape added
+    without its icon would ship as a bare word (and a deleted one as a lie)."""
+    promised = {
+        (name, shape) for name, shapes in content.PLATFORM_SECTIONS for shape in shapes
+    }
+
+    assert set(content.SHAPE_ICONS) == promised
+
+
+def test_a_shape_wears_its_own_icon() -> None:
+    """The same pictures the menus under a section use: 🎬 video, 🖼 photos, 💿 an album."""
+    assert content.shape_label("instagram", "reel") == "🎬 reel"
+    assert content.shape_label("instagram", "post") == "🖼️ post"
+    assert content.shape_label("spotify", "album") == "💿 album"
+    # ``playlist`` means two different things on two platforms, which is exactly
+    # why the badge is keyed by the pair rather than by the word alone.
+    assert content.shape_label("youtube", "playlist") == "🎬 playlist"
+    assert content.shape_label("spotify", "playlist") == "🎵 playlist"
+
+
+def test_the_picker_shows_the_sections_that_are_actually_on() -> None:
+    """What the Download screen draws is the section list minus the switches an
+    admin turned off — read through one function so the menu, the intake gate and
+    the admin screen can never disagree about what is on."""
+    assert content.visible_sections(()) == content.PLATFORM_SECTIONS
+    assert [name for name, _shapes in content.visible_sections(["instagram", "SPOTIFY "])] == [
+        "youtube",
+        "tiktok",
+    ]
+    assert content.visible_sections(content.PLATFORM_NAMES) == (), (
+        "an operator who switched everything off gets an honest empty picker, "
+        "never a silent resurrection of the four"
+    )
+
 
 @pytest.mark.parametrize(
     ("url", "kind"),

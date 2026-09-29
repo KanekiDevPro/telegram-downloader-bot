@@ -23,6 +23,7 @@ from aiogram.types import CallbackQuery, Chat, Message, User
 
 from core import config as config_module
 from core.config import Settings
+from core.i18n import t
 from handlers import admin as admin_module
 from services import panel as panel_module
 from services.broadcast import BroadcastReport
@@ -1069,6 +1070,96 @@ async def test_a_run_that_stops_early_says_what_it_managed(
     screen = bot.screens[-1]
     assert "page 8" in screen and "37" in screen, "where it stopped, and what it managed"
     assert "finished" not in screen, "a stopped run must not report itself as finished"
+
+
+@pytest.fixture
+def platforms(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """``bot_state`` for the section switches: one list, no database."""
+    stored: list[str] = []
+
+    async def get_disabled_platforms(pool: Any) -> tuple[str, ...]:
+        return tuple(stored)
+
+    async def set_disabled_platforms(pool: Any, names: Any) -> None:
+        stored[:] = list(names)
+
+    monkeypatch.setattr(
+        admin_module.database, "get_disabled_platforms", get_disabled_platforms
+    )
+    monkeypatch.setattr(
+        admin_module.database, "set_disabled_platforms", set_disabled_platforms
+    )
+    return stored
+
+
+async def test_the_platform_screen_marks_every_section_on_or_off(
+    platforms: list[str]
+) -> None:
+    """One screen, four switches: what is on, what is off, and how to flip either."""
+    platforms[:] = ["tiktok"]
+
+    text, keyboard = await admin_module.panel_screen(
+        "platforms", object(), _queue(), None, "en"
+    )
+
+    assert "✅ 🎬 YouTube" in text and "❌ 🎶 TikTok" in text
+    assert _buttons(keyboard)[:4] == [
+        ("✅ 🎬 YouTube", f"{admin_module.PLATFORM_TOGGLE_PREFIX}youtube"),
+        ("✅ 📸 Instagram", f"{admin_module.PLATFORM_TOGGLE_PREFIX}instagram"),
+        ("✅ 🎵 Spotify", f"{admin_module.PLATFORM_TOGGLE_PREFIX}spotify"),
+        ("❌ 🎶 TikTok", f"{admin_module.PLATFORM_TOGGLE_PREFIX}tiktok"),
+    ], "the row that switches a section off names the section the same way the picker does"
+    assert _buttons(keyboard)[-1][1] == "menu:home"
+
+
+async def test_an_admin_switches_a_section_off_and_on_again(
+    platforms: list[str]
+) -> None:
+    bot = RecordingBot()
+
+    await admin_module.on_platform_toggle(
+        _callback(bot, f"{admin_module.PLATFORM_TOGGLE_PREFIX}instagram"), object(), lang="en"
+    )
+    assert platforms == ["instagram"], "off is stored, not just drawn"
+    assert "❌ 📸 Instagram" in bot.screens[-1], "and the screen says so at once"
+
+    await admin_module.on_platform_toggle(
+        _callback(bot, f"{admin_module.PLATFORM_TOGGLE_PREFIX}instagram"), object(), lang="en"
+    )
+    assert platforms == [], "and back on again"
+    assert "✅ 📸 Instagram" in bot.screens[-1]
+
+
+async def test_the_last_open_section_cannot_be_switched_off(
+    platforms: list[str]
+) -> None:
+    """A Download screen with every section closed is a dead end, so the desk
+    refuses to create one — and says why instead of silently ignoring the tap."""
+    platforms[:] = ["youtube", "instagram", "spotify"]
+    bot = RecordingBot()
+
+    await admin_module.on_platform_toggle(
+        _callback(bot, f"{admin_module.PLATFORM_TOGGLE_PREFIX}tiktok"), object(), lang="en"
+    )
+
+    assert platforms == ["youtube", "instagram", "spotify"], "nothing was written"
+    assert bot.answers[-1].show_alert is True
+    assert t("admin.platform_last", "en") in (bot.answers[-1].text or "")
+    assert bot.screens == [], "and no screen is re-drawn"
+
+
+async def test_a_stranger_cannot_switch_a_section_off(platforms: list[str]) -> None:
+    bot = RecordingBot()
+
+    await admin_module.on_platform_toggle(
+        _callback(bot, f"{admin_module.PLATFORM_TOGGLE_PREFIX}instagram", STRANGER_ID),
+        object(),
+        lang="en",
+    )
+
+    assert platforms == []
+    assert bot.answers[0].show_alert is True
+    assert bot.screens == []
 
 
 async def test_the_support_contact_is_stored_and_is_what_users_get(

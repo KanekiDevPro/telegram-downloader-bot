@@ -522,7 +522,22 @@ def _platform_sections() -> tuple[tuple[str, tuple[str, ...]], ...]:
     return content.PLATFORM_SECTIONS
 
 
-def _download_keyboard(lang: str, *, platform: str | None = None) -> InlineKeyboardMarkup:
+async def _disabled_platforms(pool: asyncpg.Pool | None) -> tuple[str, ...]:
+    """The sections an operator switched off (``()`` when none, or no database).
+
+    Read on every draw rather than cached in the process: an admin turning a section
+    off expects the next tap to show it, not the next restart. A read that fails
+    reads as "everything is on" — the safe direction, since the engines still serve
+    every link.
+    """
+    if pool is None:
+        return ()
+    return await database.get_disabled_platforms(pool)
+
+
+def _download_keyboard(
+    lang: str, *, platform: str | None = None, disabled: Sequence[str] = ()
+) -> InlineKeyboardMarkup:
     """The download screen's own controls: the platforms, and the way back.
 
     With no platform chosen this is the picker itself: the platform buttons two
@@ -532,10 +547,14 @@ def _download_keyboard(lang: str, *, platform: str | None = None) -> InlineKeybo
 
     No URL buttons here, deliberately: «Add to a group» is onboarding and lives
     on Home. A download screen exists to receive links.
+
+    ``disabled`` is the sections an operator switched off: they are simply not
+    drawn, and an empty picker (every switch off) is left as the way back alone —
+    the screen above it is the one that says so.
     """
     builder = InlineKeyboardBuilder()
     if platform is None:
-        names = [name for name, _shapes in _platform_sections()]
+        names = [name for name, _shapes in content.visible_sections(disabled)]
         for name in names:
             builder.button(
                 text=t(f"download.{name}", lang),
@@ -553,15 +572,26 @@ def _download_keyboard(lang: str, *, platform: str | None = None) -> InlineKeybo
 
 
 def _platform_text(name: str, lang: str) -> str:
-    """A section screen: what it takes, in the user's language."""
+    """A section screen: what it takes, in the user's language.
+
+    Three lines, each doing one job: the platform with its badge (a featured section
+    is named as one), the shapes it takes *with their icons* — the same pictures the
+    questions under it use — and the plain instruction to send one.
+    """
     shapes = " · ".join(
-        shape
+        content.shape_label(section, shape)
         for section, section_shapes in _platform_sections()
         if section == name
         for shape in section_shapes
     )
     return "\n".join(
-        (t(f"download.{name}", lang), "", t("download.section_how", lang, shapes=shapes))
+        (
+            t(f"download.{name}", lang),
+            "",
+            t("download.section_badge", lang),
+            "",
+            t("download.section_how", lang, shapes=shapes),
+        )
     )
 
 
@@ -714,54 +744,84 @@ async def on_menu_home(
 
 @router.callback_query(F.data == "menu:download")
 async def on_menu_download(
-    cb: CallbackQuery, state: FSMContext, lang: str = DEFAULT_LANG
+    cb: CallbackQuery,
+    state: FSMContext,
+    pool: asyncpg.Pool | None = None,
+    lang: str = DEFAULT_LANG,
 ) -> None:
     """Download — the picker, and the gate that makes it mean something.
 
     Drawing the picker arms ``picking_platform``: while it is open, a link is not
     yet a download — the section the user meant is the one thing they have not
     said, so the picker asks for it instead of the intake guessing.
+
+    The sections drawn are the ones an operator left on (``disabled``), and the
+    screen says so when some — or all — of them are off: a button that quietly
+    disappears is indistinguishable from a missing feature.
     """
     message = callback_message(cb)
     if message is None:
         await cb.answer(t("intake.stale", lang), show_alert=True)
         return
     await cb.answer()
-    text = "\n".join(
-        (
-            t("download.title", lang),
+    disabled = await _disabled_platforms(pool)
+    lines = [
+        t("download.title", lang),
+        "",
+        t("download.how", lang),
+        "",
+        t("download.pick_platform", lang),
+    ]
+    if disabled:
+        lines += [
             "",
-            t("download.how", lang),
-            "",
-            t("download.pick_platform", lang),
-        )
+            t("download.all_off", lang)
+            if not content.visible_sections(disabled)
+            else t("download.some_off", lang),
+        ]
+    await _edit_or_reply(
+        message,
+        "\n".join(lines),
+        reply_markup=_download_keyboard(lang, disabled=disabled),
     )
-    await _edit_or_reply(message, text, reply_markup=_download_keyboard(lang))
     await state.set_state(DownloadStates.picking_platform)
 
 
 @router.callback_query(F.data.startswith(PLATFORM_PREFIX))
 async def on_menu_platform(
-    cb: CallbackQuery, state: FSMContext, lang: str = DEFAULT_LANG
+    cb: CallbackQuery,
+    state: FSMContext,
+    pool: asyncpg.Pool | None = None,
+    lang: str = DEFAULT_LANG,
 ) -> None:
     """One platform section: the shapes it takes, and the way back to the picker.
 
     Choosing a platform is what the picker was waiting for, so the gate is
     released here: inside a section the user has said where they are, and the
     link they send next is sent straight into the intake.
+
+    A section an operator closed while this keyboard was on screen is not opened by
+    a tap: the same honest answer the link would have got, on the stale-keyboard tap
+    that would otherwise draw it.
     """
     message = callback_message(cb)
     if message is None:
         await cb.answer(t("intake.stale", lang), show_alert=True)
         return
     name = (cb.data or "")[len(PLATFORM_PREFIX):]
+    disabled = await _disabled_platforms(pool)
+    if name in disabled:
+        await cb.answer(t("download.platform_off", lang), show_alert=True)
+        return
     if name not in {section for section, _shapes in _platform_sections()}:
         await cb.answer(t("intake.stale", lang), show_alert=True)
         return
     await cb.answer()
     await state.set_state(None)
     await _edit_or_reply(
-        message, _platform_text(name, lang), reply_markup=_download_keyboard(lang, platform=name)
+        message,
+        _platform_text(name, lang),
+        reply_markup=_download_keyboard(lang, platform=name, disabled=disabled),
     )
 
 
@@ -1298,6 +1358,16 @@ async def _intake_flow(
     # (resolving, probing, routing) that would otherwise keep the loop to itself
     # while the user's link is still sitting in the chat.
     await asyncio.sleep(0)
+    disabled = await _disabled_platforms(pool)
+    if not content.platform_is_on(url, disabled):
+        # A section an operator switched off is answered, not served — and answered
+        # *here*, before the cache, the resolver and the probe: a link from a closed
+        # section that a stored row could have replayed is still a link from a
+        # closed section, and there is nothing to look up for one.
+        await message.answer(
+            t("download.platform_off", lang), link_preview_options=_NO_PREVIEW
+        )
+        return
     # The zero-wait path sits *in front of* the slow ones: a link the cache
     # already knows answers from its rows — no resolve, no probe, no extraction
     # (see _ask_from_cache). Only a link that would be *asked* about takes it; a

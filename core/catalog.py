@@ -208,9 +208,35 @@ MESSAGES: Final[Catalog] = {
         "en": "🎯 Pick a platform first — tap one of the buttons below, then send the link.",
         "fa": "🎯 اول یک پلتفرم انتخاب کن — یکی از دکمه‌های زیر را بزن، بعد لینک را بفرست.",
     },
+    "download.section_badge": {
+        "en": "⭐️ Featured platform",
+        "fa": "⭐️ پلتفرم ویژه",
+    },
+    # ``{shapes}`` carries the badges (🎬 reel · 🖼️ post · …), so the sentence leads
+    # and the list closes it: «send a 🎬 reel · 🖼️ post link» reads like a typo.
     "download.section_how": {
-        "en": "Send a {shapes} link and I’ll fetch it.",
-        "fa": "یک لینک {shapes} بفرست تا بگیرمش.",
+        "en": "Send one of these and I’ll fetch it — {shapes}.",
+        "fa": "یکی از اینها را بفرست تا بگیرمش — {shapes}.",
+    },
+    # Shown when an admin has switched a section off: the switch is real, so its
+    # consequence is said out loud rather than left as a missing button.
+    "download.some_off": {
+        "en": "🚧 One or more sections are switched off at the moment.",
+        "fa": "🚧 یک یا چند بخش موقتاً خاموش است.",
+    },
+    "download.all_off": {
+        "en": "🚧 Every section is switched off at the moment — the operator can turn them back on.",
+        "fa": "🚧 همهٔ بخش‌ها موقتاً خاموش‌اند — ادمین می‌تواند دوباره روشنشان کند.",
+    },
+    "download.platform_off": {
+        "en": (
+            "🚧 That section is switched off right now. A link from any other platform "
+            "still works — try one of those."
+        ),
+        "fa": (
+            "🚧 این بخش همین حالا خاموش است. لینک بقیهٔ پلتفرم‌ها بدون تغییر کار می‌کند "
+            "— یکی از آن‌ها را بفرست."
+        ),
     },
     "download.how": {
         "en": (
@@ -1184,6 +1210,47 @@ MESSAGES: Final[Catalog] = {
             "در صفحه {pages} متوقف شد — {sent} از {total} رسید\n"
             "دلیلش در لاگ است."
         ),
+    },
+    # The Download screen's four switches: what the picker offers is an operator's
+    # decision, and the screen says which sections are open right now.
+    "admin.btn_platforms": {"en": "🎛 Platform buttons", "fa": "🎛 دکمه‌های پلتفرم"},
+    "admin.platforms_intro": {
+        "en": (
+            "🎛 <b>Platform buttons</b>\n"
+            "\n"
+            "Which sections the Download screen offers. Tap one to close or reopen it: "
+            "a closed section loses its button *and* refuses its links with an honest "
+            "answer — the switch is real, not cosmetic.\n"
+            "\n"
+            "The labels and the intro above the buttons are yours to reword under "
+            "<b>Messages &amp; localization → Bot texts</b> (category «Download»).\n"
+            "\n"
+            "Open right now: <b>{on}</b> of {total}"
+        ),
+        "fa": (
+            "🎛 <b>دکمه‌های پلتفرم</b>\n"
+            "\n"
+            "این‌که صفحهٔ دانلود کدام بخش‌ها را نشان دهد. روی هر کدام بزن تا ببندی یا "
+            "دوباره بازش کنی: بخش بسته هم دکمه‌اش را از دست می‌دهد و هم لینک‌هایش را "
+            "با یک پیام صادقانه رد می‌کند — این کلید واقعی است، نه نمایشی.\n"
+            "\n"
+            "برچسب‌ها و متن بالای دکمه‌ها را خودت می‌توانی عوض کنی: "
+            "<b>پیام‌ها و زبان‌ها → متن‌های ربات</b> (دستهٔ «دانلود»).\n"
+            "\n"
+            "الان باز: <b>{on}</b> از {total}"
+        ),
+    },
+    "admin.platform_line": {"en": "{mark} {name} — {state}", "fa": "{mark} {name} — {state}"},
+    "admin.platform_state_on": {"en": "open", "fa": "باز"},
+    "admin.platform_state_off": {"en": "closed", "fa": "بسته"},
+    "admin.platform_on": {"en": "✅ {name} is open again.", "fa": "✅ {name} دوباره باز شد."},
+    "admin.platform_off": {"en": "🚧 {name} is closed now.", "fa": "🚧 {name} الان بسته است."},
+    "admin.platform_last": {
+        "en": (
+            "The last open section cannot be closed — the Download screen would have "
+            "nothing left to offer."
+        ),
+        "fa": "آخرین بخش باز را نمی‌شود بست — صفحهٔ دانلود چیزی برای ارائه نمی‌ماند.",
     },
     "admin.support_intro": {
         "en": (

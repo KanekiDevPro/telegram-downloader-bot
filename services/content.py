@@ -27,6 +27,7 @@ reports those, so the gateway queues them instead of drawing a one-button menu �
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -78,6 +79,61 @@ PLATFORM_SECTIONS: tuple[tuple[Platform, tuple[str, ...]], ...] = (
 )
 
 
+#: The four section names, in screen order — the *names*, for callers that only
+#: need the vocabulary (the admin toggles, the intake gate).
+PLATFORM_NAMES: tuple[Platform, ...] = tuple(name for name, _shapes in PLATFORM_SECTIONS)
+
+#: The badge a shape wears in a section screen — the same pictures the questions
+#: under it use (🎬 a video, 🖼 photos, 💿 an album). Keyed by ``(platform, shape)``
+#: rather than by the word alone, because one word means two things: a ``playlist``
+#: is video on YouTube and music on Spotify. ``tests/test_content_routing.py`` pins
+#: this table against ``PLATFORM_SECTIONS``, so a promised shape cannot ship bare.
+SHAPE_ICONS: dict[tuple[str, str], str] = {
+    ("youtube", "watch"): "🎬",
+    ("youtube", "playlist"): "🎬",
+    ("youtube", "shorts"): "🎬",
+    ("instagram", "reel"): "🎬",
+    ("instagram", "post"): "🖼️",
+    ("instagram", "story"): "📸",
+    ("spotify", "track"): "🎵",
+    ("spotify", "album"): "💿",
+    ("spotify", "playlist"): "🎵",
+    ("tiktok", "video"): "🎬",
+}
+
+#: What a shape wears when nobody gave it an icon (never drawn today, see the pin
+#: above — a plain link is a worse badge than an emoji, and a *missing* one here
+#: would be a crash in a menu).
+_SHAPE_FALLBACK = "🔗"
+
+
+def shape_label(platform: str, shape: str) -> str:
+    """One promised shape with its badge: ``reel`` → ``🎬 reel``."""
+    return f"{SHAPE_ICONS.get((platform, shape), _SHAPE_FALLBACK)} {shape}"
+
+
+def _switched_off(disabled: Iterable[object]) -> frozenset[str]:
+    """The disabled names as a comparable set (trimmed, lowercased, blanks gone)."""
+    return frozenset(
+        name.strip().lower()
+        for name in disabled
+        if isinstance(name, str) and name.strip()
+    )
+
+
+def visible_sections(
+    disabled: Iterable[object] = (),
+) -> tuple[tuple[Platform, tuple[str, ...]], ...]:
+    """The sections a picker shows: the four, minus the switches an admin turned off.
+
+    One function for the menu, the intake gate and the admin screen, so the three can
+    never disagree about what is on — and an empty tuple means every section is off,
+    which the screens say out loud rather than quietly resurrecting the four.
+    """
+    off = _switched_off(disabled)
+    return tuple((name, shapes) for name, shapes in PLATFORM_SECTIONS if name not in off)
+
+
 def platform_for(url: str) -> Platform:
     """Which Downloads section this link belongs to (``other`` when none)."""
     host = url_host(url)
@@ -85,6 +141,17 @@ def platform_for(url: str) -> Platform:
         if any(_matches(host, needle) for needle in needles):
             return platform
     return "other"
+
+
+def platform_is_on(url: str, disabled: Iterable[object] = ()) -> bool:
+    """Whether the section this link belongs to is open (``other`` always is).
+
+    The gate the intake reads: a link from a switched-off section is answered with
+    the truth instead of being served — a switch that only hid a button would be
+    cosmetic.
+    """
+    platform = platform_for(url)
+    return platform == "other" or platform not in _switched_off(disabled)
 
 
 @dataclass(frozen=True)

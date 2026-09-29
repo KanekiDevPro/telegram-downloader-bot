@@ -3342,6 +3342,56 @@ def test_a_platform_section_names_only_its_own_shapes() -> None:
     assert "watch" not in text and "track" not in text
 
 
+def test_a_platform_section_names_its_shapes_with_their_badges() -> None:
+    """A section is a menu of shapes, so it wears the icons the questions under it
+    use — the same pictures, one line, no explaining."""
+    text = user_module._platform_text("instagram", FA)
+
+    assert "🎬 reel" in text and "🖼️ post" in text and "📸 story" in text
+    assert t("download.section_badge", FA) in text, "and says it is a featured section"
+
+
+async def test_a_section_an_admin_switched_off_is_not_drawn_and_its_link_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The switches are real, not cosmetic: a section an operator turned off is
+    absent from the picker *and* its links are answered with the truth — the same
+    engine still exists, this section is simply closed right now."""
+    async def switched_off(pool: Any) -> tuple[str, ...]:
+        return ("instagram",)
+
+    monkeypatch.setattr(user_module, "_disabled_platforms", switched_off)
+    bot = RecordingBot()
+
+    await user_module.on_menu_download(
+        _callback(bot, "menu:download"), _fresh_state(), object(), lang=FA
+    )
+
+    rows = _buttons(bot.keyboards[-1])
+    assert (t("download.instagram", FA), "menu:platform:instagram") not in rows
+    assert (t("download.youtube", FA), "menu:platform:youtube") in rows
+    assert [len(row) for row in bot.keyboards[-1].inline_keyboard] == [2, 1, 1], (
+        "three sections still pair up, the odd one keeps its own row, and the "
+        "way back stays alone"
+    )
+    assert t("download.some_off", FA) in bot.screens[-1], "and the screen says why"
+
+    refused = RecordingBot()
+    url = "https://www.instagram.com/reel/abc/"
+    await user_module.on_text_with_url(
+        _message(url, refused),
+        _fresh_state(),
+        _user(),
+        object(),
+        _fake_queue(),
+        refused,
+        lang=FA,
+    )
+
+    assert refused.texts == [t("download.platform_off", FA)]
+    assert refused.keyboards == [], "and nothing to tap — the section is closed"
+
+
 def test_a_platform_section_leads_back_to_the_picker() -> None:
     rows = _buttons(user_module._download_keyboard(FA, platform="youtube"))
 

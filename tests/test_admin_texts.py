@@ -169,6 +169,43 @@ async def test_a_stranger_cannot_reach_any_texts_action(_desk: _TextDB) -> None:
     assert _desk.rows == {}, "and a typed value is stored nowhere"
 
 
+def test_the_download_labels_and_its_intros_are_editable(_desk: _TextDB) -> None:
+    """Everything the Download screen puts in front of a user is the operator's to
+    word: the four section labels (which are also the toggle buttons' names), the
+    intro above them, the per-section badge and the shape lines."""
+    for key in (
+        "download.youtube",
+        "download.instagram",
+        "download.spotify",
+        "download.tiktok",
+        "download.how",
+        "download.pick_platform",
+        "download.section_badge",
+        "download.section_how",
+    ):
+        assert text_store.editable(key), key
+        assert key in MESSAGES, key
+        # And the editor would actually accept a replacement for it: the key must
+        # exist in the catalogue, not merely sit under an editable prefix.
+        assert text_store.validate_text(key, MESSAGES[key]["en"]) is None, key
+
+
+def test_a_rewritten_platform_label_is_what_the_button_says(_desk: _TextDB) -> None:
+    """The editor's reach, pinned: an override is not a nice preview — the picker
+    is drawn from ``t()``, so the button wears the operator's wording the next
+    time it is drawn *and* an admin's toggle row names the same section by it."""
+    from handlers import user as user_module
+
+    text_store.apply_overrides(
+        [{"key": "download.youtube", "lang": "en", "value": "🎬 MyTube"}]
+    )
+
+    assert t("download.youtube", "en") == "🎬 MyTube"
+    assert ("🎬 MyTube", "menu:platform:youtube") in _buttons(
+        user_module._download_keyboard("en")
+    )
+
+
 async def test_a_locked_text_is_not_editable_even_by_an_admin(_desk: _TextDB) -> None:
     """Operator screens and the command menu are nobody's to replace from here —
     a crafted payload naming one gets the honest refusal."""
