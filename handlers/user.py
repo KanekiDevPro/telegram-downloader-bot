@@ -111,15 +111,21 @@ class DownloadStates(StatesGroup):
 
 
 def _main_menu(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup:
-    """HOME — the navigation hub everything hangs off: Download, Profile.
+    """HOME — the navigation hub everything hangs off: Download, Profile, groups.
 
     Deliberate shape, not a flat list. Download gets the top row to itself: it is
     why most people came. Language, the support contact and the store live under
-    Profile now — they are account concerns, and a home carrying
-    every action is a wall of buttons. And the admin panel button is drawn for
-    admins only (an admin is never offered «💎 Go VIP» either: they hold it
-    permanently, so the button could only lead to a screen explaining that they
-    cannot buy what they already have).
+    Profile now — they are account concerns, and a home carrying every action is
+    a wall of buttons. And the admin panel button is drawn for admins only (an
+    admin is never offered «💎 Go VIP» either: they hold it permanently, so the
+    button could only lead to a screen explaining that they cannot buy what they
+    already have).
+
+    «👥 Add to a group» is the one URL button this bot draws, and it lives here
+    alone: it *is* onboarding — Telegram's own group picker, opened through the
+    bot's real address — while every Download screen exists to receive links and
+    therefore carries callbacks only. It appears the moment the bot knows its own
+    @handle, because a deep link to the wrong address is worse than no button.
     """
     builder = InlineKeyboardBuilder()
     builder.button(text=t("menu.download", lang), callback_data="menu:download")
@@ -129,7 +135,12 @@ def _main_menu(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup:
         # an operator had no way to tell a missing permission from a missing
         # feature. It is a button now, on the one screen they always open.
         builder.button(text=t("menu.admin", lang), callback_data="menu:admin")
-    builder.adjust(1, 2 if admin else 1)
+    sizes = [1, 2] if admin else [1, 1]
+    link = group_add_link()
+    if link:
+        builder.button(text=t("menu.add_group", lang), url=link)
+        sizes.append(1)
+    builder.adjust(*sizes)
     return builder.as_markup()
 
 
@@ -474,10 +485,13 @@ def _language_keyboard(
 def _profile_keyboard(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup:
     """Profile's own actions: language, VIP (not for an admin), support, back.
 
-    One per row: this is a screen people reach for a specific thing, and
-    predictable positions beat density. Premium is the same button the menu used
-    to carry — moved, not removed — and the support contact moved here too when
-    the help section went away: it is who to ask, which is what a profile is for.
+    Two per row: four shortcuts read as one small panel instead of a column
+    every one of which needs a scroll to reach. The order is the reading order —
+    language and VIP on the first row, support and the way back under them (an
+    admin loses the VIP button and the grid closes up to a full row plus the
+    back). Premium is the same button the menu used to carry — moved, not
+    removed — and the support contact moved here too when the help section went
+    away: it is who to ask, which is what a profile is for.
     """
     builder = InlineKeyboardBuilder()
     builder.button(text=t("menu.language", lang), callback_data="profile:language")
@@ -485,7 +499,7 @@ def _profile_keyboard(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup
         builder.button(text=t("menu.premium", lang), callback_data="menu:premium")
     builder.button(text=t("menu.support", lang), callback_data="menu:support")
     builder.button(text=t("menu.back", lang), callback_data="menu:home")
-    builder.adjust(1)
+    builder.adjust(2)
     return builder.as_markup()
 
 
@@ -499,34 +513,32 @@ def _platform_sections() -> tuple[tuple[str, tuple[str, ...]], ...]:
 
 
 def _download_keyboard(lang: str, *, platform: str | None = None) -> InlineKeyboardMarkup:
-    """The download screen's own controls: the group flow, and the way back.
+    """The download screen's own controls: the platforms, and the way back.
 
-    «Add to a group» is Telegram's own picker (a ``?startgroup`` deep link to the
-    bot's real address) — the button exists only once the bot knows its own
-    @handle, because a wrong link is worse than no button. With no platform
-    chosen this is the picker itself: one row per platform section, then the
-    group flow and the way back. Inside a section the screen names that
-    platform's link shapes, and back returns to the picker.
+    With no platform chosen this is the picker itself: the platform buttons two
+    to a row — a grid, not a column, so the fourth is not one scroll away — and
+    the way back alone under them. Inside a section the screen names that
+    platform's link shapes, and its single button is back to the picker.
+
+    No URL buttons here, deliberately: «Add to a group» is onboarding and lives
+    on Home. A download screen exists to receive links.
     """
     builder = InlineKeyboardBuilder()
     if platform is None:
-        for name, _shapes in _platform_sections():
+        names = [name for name, _shapes in _platform_sections()]
+        for name in names:
             builder.button(
                 text=t(f"download.{name}", lang),
                 callback_data=f"{PLATFORM_PREFIX}{name}",
             )
-        builder.adjust(2)
+        rows = [2] * (len(names) // 2) + ([1] if len(names) % 2 else [])
     else:
-        builder.button(text=t("menu.back", lang), callback_data="menu:download")
-        builder.adjust(1)
-    link = group_add_link()
-    if link:
-        builder.button(text=t("menu.add_group", lang), url=link)
+        rows = []
     builder.button(
         text=t("menu.back", lang),
         callback_data="menu:home" if platform is None else "menu:download",
     )
-    builder.adjust(1)
+    builder.adjust(*(rows + [1]))
     return builder.as_markup()
 
 

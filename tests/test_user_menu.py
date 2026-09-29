@@ -291,6 +291,15 @@ def test_the_support_button_lives_under_profile_and_home_stays_clean() -> None:
     assert dict(_buttons(markup))["💬 پشتیبانی"] == "menu:support"
 
 
+def test_the_profile_actions_sit_side_by_side() -> None:
+    """Profile is four shortcuts, not four screens: two per row keeps every one
+    of them on the same folded-keyboard view — including the way back."""
+    assert [len(row) for row in user_module._profile_keyboard(FA).inline_keyboard] == [2, 2]
+    assert [
+        len(row) for row in user_module._profile_keyboard(FA, admin=True).inline_keyboard
+    ] == [2, 1], "an admin has no VIP button, so the second row holds only the way back"
+
+
 @pytest.mark.parametrize(
     ("contact", "target"),
     (
@@ -926,27 +935,52 @@ def test_a_raw_or_lossless_format_gets_no_fake_quality_screen() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_download_screen_offers_the_group_flow_once_the_bot_is_named() -> None:
+def test_the_welcome_screen_keeps_the_group_flow_the_download_screens_dropped() -> None:
+    """«Add to a group» is onboarding, not a download control.
+
+    Telegram's own group picker, opened through the bot's real address, belongs
+    on the first screen a user sees — once. The Download picker and its sections
+    *receive* links, they do not install the bot anywhere, so every download
+    screen is callback-only from now on.
+    """
     from services import delivery
 
     delivery.set_bot_username("AnimStoreV2ray_bot")
     try:
-        markup = user_module._download_keyboard(EN)
+        home = [
+            button for row in user_module._main_menu(EN).inline_keyboard for button in row
+        ]
+        downloads = [
+            button
+            for markup in (
+                user_module._download_keyboard(EN),
+                *(
+                    user_module._download_keyboard(EN, platform=name)
+                    for name, _shapes in user_module._platform_sections()
+                ),
+            )
+            for row in markup.inline_keyboard
+            for button in row
+        ]
     finally:
         delivery.set_bot_username("")
 
-    buttons = [button for row in markup.inline_keyboard for button in row]
     assert any(
-        button.url == "https://t.me/AnimStoreV2ray_bot?startgroup=true"
-        for button in buttons
+        button.url == "https://t.me/AnimStoreV2ray_bot?startgroup=true" for button in home
     ), "Telegram's own group picker, via the bot's real address"
-    assert ("⬅️ Back", "menu:home") in _buttons(markup)
+    assert all(button.url is None for button in downloads), (
+        "no download screen carries a URL button any more"
+    )
+    assert all(button.text != t("menu.add_group", EN) for button in downloads)
 
 
 def test_no_group_button_before_the_bot_knows_its_own_name() -> None:
     buttons = [
         button
-        for row in user_module._download_keyboard(FA).inline_keyboard
+        for row in (
+            user_module._main_menu(FA).inline_keyboard
+            + user_module._download_keyboard(FA).inline_keyboard
+        )
         for button in row
     ]
     assert all(button.url is None for button in buttons)
@@ -3199,9 +3233,21 @@ def test_a_platform_section_names_only_its_own_shapes() -> None:
 def test_a_platform_section_leads_back_to_the_picker() -> None:
     rows = _buttons(user_module._download_keyboard(FA, platform="youtube"))
 
-    assert rows[-1] == (t("menu.back", FA), "menu:download"), (
-        "a section's parent is the picker, never a hardcoded home"
+    assert rows == [(t("menu.back", FA), "menu:download")], (
+        "a section's parent is the picker, never a hardcoded home — and the unused "
+        "second «back» and the group button are gone, not merely shuffled"
     )
+
+
+def test_the_picker_puts_the_platforms_side_by_side() -> None:
+    """Four platforms in two rows, then the way back on a row of its own: the
+    picker is a small grid, not a column that pushes «back» out of the view."""
+    markup = user_module._download_keyboard(FA)
+
+    assert [len(row) for row in markup.inline_keyboard] == [2, 2, 1]
+    assert [button.text for row in markup.inline_keyboard[:2] for button in row] == [
+        t(f"download.{name}", FA) for name, _shapes in user_module._platform_sections()
+    ]
 
 
 async def test_a_failed_probe_on_a_claimed_platform_draws_the_automatic_row(
