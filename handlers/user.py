@@ -37,7 +37,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, LinkPreviewOptions, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from core import database
+from core import database, ui
 from core.config import get_settings
 from core.i18n import (
     DEFAULT_LANG,
@@ -120,7 +120,9 @@ class DownloadStates(StatesGroup):
     waiting_format = State()
 
 
-def _main_menu(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup:
+def _main_menu(
+    lang: str, *, admin: bool = False, looks: ui.Looks | None = None
+) -> InlineKeyboardMarkup:
     """HOME — the navigation hub everything hangs off: a 2x2 grid of destinations.
 
     Deliberate shape, not a flat list. Download and Profile take the first row:
@@ -140,10 +142,20 @@ def _main_menu(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup:
     @handle, because a deep link to the wrong address is worse than no button.
     """
     builder = InlineKeyboardBuilder()
-    builder.button(text=t("menu.download", lang), callback_data="menu:download")
-    builder.button(text=t("menu.profile", lang), callback_data="menu:profile")
-    builder.button(text=t("menu.language", lang), callback_data="menu:language")
-    builder.button(text=t("menu.support", lang), callback_data="menu:support")
+    # ``looks`` is what an operator set in the panel — colour and custom emoji per
+    # button. Drawn here, on the screen every user opens: a look nobody sees is
+    # not a look, it is a setting (see ``core.ui`` for what reaches Telegram).
+    # The first four of the panel's list are this grid (see ``core.ui.MAIN_BUTTONS``:
+    # the four destinations, then the store that lives on Profile).
+    for callback, label_key in ui.MAIN_BUTTONS[:4]:
+        style, emoji = ui.look_for(looks, callback)
+        ui.add_button(
+            builder,
+            t(label_key, lang),
+            callback_data=callback,
+            style=style,
+            icon_custom_emoji_id=emoji,
+        )
     sizes = [2, 2]
     if admin:
         # The panel used to be reachable only by remembering that `/admin` exists:
@@ -160,9 +172,23 @@ def _main_menu(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def _menu_for(user: asyncpg.Record, lang: str) -> InlineKeyboardMarkup:
+def _menu_for(
+    user: asyncpg.Record, lang: str, *, looks: ui.Looks | None = None
+) -> InlineKeyboardMarkup:
     """The home screen as this user should see it (admins get the panel button)."""
-    return _main_menu(lang, admin=is_admin(user))
+    return _main_menu(lang, admin=is_admin(user), looks=looks)
+
+
+async def _button_looks(pool: asyncpg.Pool | None) -> ui.Looks:
+    """How the main buttons are dressed today — read per draw, never cached.
+
+    An operator who just recoloured a button expects the next menu to show it, so
+    this is a read on the draw that needs it (like the section switches). No pool
+    (a bare test context, an early boot) reads as "nothing is dressed".
+    """
+    if pool is None:
+        return {}
+    return await database.get_button_looks(pool)
 
 
 def _back_to_menu(lang: str, *, to: str = "menu:home") -> InlineKeyboardMarkup:
@@ -498,7 +524,9 @@ def _language_keyboard(
     return builder.as_markup()
 
 
-def _profile_keyboard(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup:
+def _profile_keyboard(
+    lang: str, *, admin: bool = False, looks: ui.Looks | None = None
+) -> InlineKeyboardMarkup:
     """Profile's own actions: VIP (not for an admin), support, back.
 
     Two per row: the shortcuts read as one small panel instead of a column every
@@ -512,8 +540,22 @@ def _profile_keyboard(lang: str, *, admin: bool = False) -> InlineKeyboardMarkup
     """
     builder = InlineKeyboardBuilder()
     if not admin:
-        builder.button(text=t("menu.premium", lang), callback_data="menu:premium")
-    builder.button(text=t("menu.support", lang), callback_data="menu:support")
+        style, emoji = ui.look_for(looks, "menu:premium")
+        ui.add_button(
+            builder,
+            t("menu.premium", lang),
+            callback_data="menu:premium",
+            style=style,
+            icon_custom_emoji_id=emoji,
+        )
+    style, emoji = ui.look_for(looks, "menu:support")
+    ui.add_button(
+        builder,
+        t("menu.support", lang),
+        callback_data="menu:support",
+        style=style,
+        icon_custom_emoji_id=emoji,
+    )
     builder.button(text=t("menu.back", lang), callback_data="menu:home")
     builder.adjust(2)
     return builder.as_markup()
@@ -688,7 +730,7 @@ async def cmd_start(
         return
     await message.answer(
         _welcome_text(user["username"] or t("misc.friend", lang), lang),
-        reply_markup=_menu_for(user, lang),
+        reply_markup=_menu_for(user, lang, looks=await _button_looks(pool)),
     )
 
 
@@ -749,7 +791,7 @@ async def on_menu_home(
     await _edit_or_reply(
         message,
         _welcome_text(user["username"] or t("misc.friend", lang), lang),
-        reply_markup=_menu_for(user, lang),
+        reply_markup=_menu_for(user, lang, looks=await _button_looks(pool)),
     )
 
 
@@ -852,7 +894,9 @@ async def on_menu_profile(
     await _edit_or_reply(
         message,
         await _profile_text(user, lang, pool, queue),
-        reply_markup=_profile_keyboard(lang, admin=is_admin(user)),
+        reply_markup=_profile_keyboard(
+            lang, admin=is_admin(user), looks=await _button_looks(pool)
+        ),
     )
 
 
@@ -938,7 +982,9 @@ async def cmd_language(
     await database.set_user_language(pool, user["telegram_id"], chosen)
     await message.answer(
         t("language.set", chosen, name=lang_button(chosen)),
-        reply_markup=_main_menu(chosen, admin=is_admin(user)),
+        reply_markup=_main_menu(
+            chosen, admin=is_admin(user), looks=await _button_looks(pool)
+        ),
     )
 
 
@@ -1006,17 +1052,18 @@ async def on_language_chosen(
         data = await state.get_data()
         origin = str(data.pop("lang_return", "") or "")
         await state.set_data(data)
+    looks = await _button_looks(pool)
     if origin == "profile":
         await _edit_or_reply(
             message,
             await _profile_text(user, chosen, pool, queue),
-            reply_markup=_profile_keyboard(chosen, admin=is_admin(user)),
+            reply_markup=_profile_keyboard(chosen, admin=is_admin(user), looks=looks),
         )
         return
     await _edit_or_reply(
         message,
         _welcome_text(user["username"] or t("misc.friend", chosen), chosen),
-        reply_markup=_menu_for(user, chosen),
+        reply_markup=_menu_for(user, chosen, looks=looks),
     )
 
 
@@ -1034,7 +1081,9 @@ async def cmd_profile(
 ) -> None:
     await message.answer(
         await _profile_text(user, lang, pool, queue),
-        reply_markup=_profile_keyboard(lang, admin=is_admin(user)),
+        reply_markup=_profile_keyboard(
+            lang, admin=is_admin(user), looks=await _button_looks(pool)
+        ),
     )
 
 

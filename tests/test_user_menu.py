@@ -296,6 +296,37 @@ def test_only_an_admin_is_offered_the_panel() -> None:
     assert "menu:admin" in dict(_buttons(user_module._main_menu(EN, admin=True))).values()
 
 
+def test_home_wears_the_colours_the_operator_chose() -> None:
+    """A stored look is not a preview: the menu every user sees is drawn with
+    it (and only the button it belongs to) — that is the whole point of letting
+    an admin set one."""
+    markup = user_module._main_menu(
+        FA, looks={"menu:download": ("success", "5368324170671202286")}
+    )
+    buttons = [button for row in markup.inline_keyboard for button in row]
+    download = next(item for item in buttons if item.callback_data == "menu:download")
+
+    assert download.style == "success"
+    assert download.icon_custom_emoji_id == "5368324170671202286"
+    assert all(
+        item.style is None and item.icon_custom_emoji_id is None
+        for item in buttons
+        if item.callback_data != "menu:download"
+    ), "one button's colour is not every button's colour"
+
+
+def test_the_profile_action_can_be_dressed_too() -> None:
+    markup = user_module._profile_keyboard(EN, looks={"menu:premium": ("danger", "")})
+    premium = next(
+        button
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data == "menu:premium"
+    )
+
+    assert premium.style == "danger"
+
+
 def test_the_language_and_support_buttons_live_on_home_now() -> None:
     """Both moved up, not away: Home draws the language switch (the fix for a
     wrong language, one tap from where the mistake was noticed) and the support

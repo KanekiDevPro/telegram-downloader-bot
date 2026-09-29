@@ -1297,6 +1297,69 @@ MESSAGES: Final[Catalog] = {
     "admin.platform_line": {"en": "{mark} {name} — {state}", "fa": "{mark} {name} — {state}"},
     "admin.platform_state_on": {"en": "open", "fa": "باز"},
     "admin.platform_state_off": {"en": "closed", "fa": "بسته"},
+    # The main buttons' colours and custom emoji: Telegram's own two decoration
+    # fields on an inline button (Bot API ``style`` and ``icon_custom_emoji_id``).
+    "admin.btn_looks": {"en": "🎨 Button style", "fa": "🎨 رنگ و آیکن دکمه‌ها"},
+    "admin.looks_intro": {
+        "en": (
+            "🎨 <b>Button style</b>\n"
+            "\n"
+            "How the {total} main buttons look. The 🎨 button moves one to the next "
+            "colour (Telegram's own: primary, success, danger — and one more tap "
+            "puts it back to no colour). The 🆔 button sets or clears that button's "
+            "custom emoji.\n"
+            "\n"
+            "Custom emoji only show for bots that bought extra usernames on "
+            "Fragment: without one, Telegram ignores the id and the button stays "
+            "plain — nothing breaks, and the labels themselves are yours to reword "
+            "under <b>Bot texts</b>."
+        ),
+        "fa": (
+            "🎨 <b>رنگ و آیکن دکمه‌ها</b>\n"
+            "\n"
+            "ظاهر {total} دکمهٔ اصلی. دکمهٔ 🎨 هر دکمه را به رنگ بعدی می‌برد "
+            "(رنگ‌های خود تلگرام: primary، success، danger — و یک ضربهٔ دیگر "
+            "رنگش را برمی‌دارد). دکمهٔ 🆔 هم ایموجی سفارشی آن دکمه را تنظیم یا "
+            "پاک می‌کند.\n"
+            "\n"
+            "ایموجی سفارشی فقط برای ربات‌هایی نمایش داده می‌شود که از Fragment "
+            "نام‌کاربری اضافه خریده باشند: بدون آن، تلگرام شناسه را نادیده می‌گیرد "
+            "و دکمه ساده می‌ماند — چیزی خراب نمی‌شود، و خود برچسب‌ها را می‌توانی از "
+            "<b>متن‌های ربات</b> عوض کنی."
+        ),
+    },
+    "admin.looks_line": {
+        "en": "{name} — {style} · {emoji}",
+        "fa": "{name} — {style} · {emoji}",
+    },
+    "admin.looks_cycle": {"en": "🎨 {name} · {style}", "fa": "🎨 {name} · {style}"},
+    "admin.looks_emoji_btn": {"en": "🆔 {name}", "fa": "🆔 {name}"},
+    "admin.looks_default": {"en": "default", "fa": "پیش‌فرض"},
+    "admin.looks_emoji_none": {"en": "no emoji", "fa": "بدون ایموجی"},
+    "admin.looks_prompt": {
+        "en": (
+            "🆔 Send the custom emoji id for <b>{name}</b> — digits only — or «-» to "
+            "clear it. /cancel stops here."
+        ),
+        "fa": (
+            "🆔 شناسهٔ ایموجی سفارشی <b>{name}</b> را بفرست — فقط رقم — یا «-» برای "
+            "پاک کردن. /cancel اینجا را متوقف می‌کند."
+        ),
+    },
+    "admin.looks_saved": {
+        "en": "🎨 {name} — {style} · {emoji}",
+        "fa": "🎨 {name} — {style} · {emoji}",
+    },
+    "admin.looks_bad": {
+        "en": (
+            "❌ That is not a custom emoji id — Telegram's are digits only. "
+            "Send the id, or «-» to clear it."
+        ),
+        "fa": (
+            "❌ این شناسهٔ ایموجی سفارشی نیست — شناسه‌های تلگرام فقط رقم‌اند. "
+            "شناسه را بفرست، یا «-» برای پاک کردن."
+        ),
+    },
     "admin.platform_on": {"en": "✅ {name} is open again.", "fa": "✅ {name} دوباره باز شد."},
     "admin.platform_off": {"en": "🚧 {name} is closed now.", "fa": "🚧 {name} الان بسته است."},
     "admin.platform_last": {

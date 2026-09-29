@@ -27,13 +27,113 @@ from __future__ import annotations
 
 import secrets
 import time
-from typing import Any, NamedTuple
+from typing import Any, Mapping, NamedTuple
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from core.i18n import t
+
+# ---------------------------------------------------------------------------
+# How a button is dressed: Telegram's own ``style`` and ``icon_custom_emoji_id``
+# ---------------------------------------------------------------------------
+
+#: The colours a button may wear — Telegram's vocabulary, in Telegram's order.
+#: ``""`` (no colour) is the fourth state of the cycle, not a style.
+BUTTON_STYLES: tuple[str, ...] = ("primary", "success", "danger")
+
+#: The buttons an admin may dress, in menu order: ``(callback, label key)``. The
+#: label key is what the operator sees in the panel — the *same* text the menu
+#: draws the button from, so a renamed button is renamed in both places. The five
+#: are the destinations a user meets first: the four on Home and the store on
+#: Profile (VIP is an account action, not a navigation one).
+MAIN_BUTTONS: tuple[tuple[str, str], ...] = (
+    ("menu:download", "menu.download"),
+    ("menu:profile", "menu.profile"),
+    ("menu:language", "menu.language"),
+    ("menu:support", "menu.support"),
+    ("menu:premium", "menu.premium"),
+)
+
+#: One button's looks: the colour and the custom emoji id, both ``""`` when
+#: nobody set one. A look is stored server-side per button *callback*, read whole
+#: on every menu draw (see ``core.database.get_button_looks``).
+Looks = Mapping[str, tuple[str, str]]
+
+
+def button_kwargs(
+    *, style: str | None = None, icon_custom_emoji_id: str | None = None
+) -> dict[str, Any]:
+    """Telegram's appearance keywords for one button — only the valid ones.
+
+    Decoration must never be a liability: a colour Telegram does not know, or an
+    emoji id that is not an id (Telegram's are digits), is *dropped* here rather
+    than sent. The button stays plain, and every user's menu still arrives — the
+    alternative is one typo in a settings screen failing the send that carries it.
+    """
+    kwargs: dict[str, Any] = {}
+    if style in BUTTON_STYLES:
+        kwargs["style"] = style
+    if icon_custom_emoji_id and icon_custom_emoji_id.isdigit():
+        kwargs["icon_custom_emoji_id"] = icon_custom_emoji_id
+    return kwargs
+
+
+def add_button(
+    builder: InlineKeyboardBuilder,
+    text: str,
+    *,
+    callback_data: str = "",
+    url: str = "",
+    style: str | None = None,
+    icon_custom_emoji_id: str | None = None,
+) -> None:
+    """Add one inline button, dressed the way the operator set it up.
+
+    A callback button passes ``callback_data``, the one URL button this bot draws
+    passes ``url``, and both go through :func:`button_kwargs` — so no keyboard in
+    this project has to know Telegram's field names to wear a colour.
+    """
+    builder.button(
+        text=text,
+        callback_data=callback_data or None,
+        url=url or None,
+        **button_kwargs(style=style, icon_custom_emoji_id=icon_custom_emoji_id),
+    )
+
+
+def look_for(looks: Looks | None, key: str) -> tuple[str, str]:
+    """The stored look for ``key`` — ``("", "")`` when there is none.
+
+    Total on purpose: the value comes from ``bot_state``, where a hand-edited row
+    or an older shape can appear that nobody validated. Anything that is not a
+    ``(style, emoji)`` pair of strings the API accepts reads as "not dressed" —
+    the same direction :func:`button_kwargs` fails in.
+    """
+    entry = (looks or {}).get(key)
+    if not isinstance(entry, tuple) or len(entry) != 2:
+        return "", ""
+    style, emoji = (str(part or "") for part in entry)
+    kwargs = button_kwargs(style=style, icon_custom_emoji_id=emoji)
+    return kwargs.get("style", ""), kwargs.get("icon_custom_emoji_id", "")
+
+
+#: What one tap moves through: the three colours, then «no colour» — so a full
+#: cycle puts the button back the way it came.
+_STYLE_CYCLE: tuple[str, ...] = (*BUTTON_STYLES, "")
+
+
+def next_style(style: str) -> str:
+    """The next colour in the cycle — ``""`` after ``danger``, back to ``primary``.
+
+    A cycle rather than a form: an admin taps once per colour, the last tap
+    undresses the button, and a value nobody knows starts the cycle over instead
+    of propagating itself forever.
+    """
+    if style not in _STYLE_CYCLE:
+        return _STYLE_CYCLE[0]
+    return _STYLE_CYCLE[(_STYLE_CYCLE.index(style) + 1) % len(_STYLE_CYCLE)]
 
 
 class Screen(NamedTuple):

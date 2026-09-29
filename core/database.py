@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from collections.abc import Sequence
@@ -1097,6 +1098,66 @@ async def set_disabled_platforms(pool: asyncpg.Pool, names: Sequence[str]) -> No
     """Store the switched-off sections (sorted and deduplicated, so the row is stable)."""
     cleaned = sorted({name.strip().lower() for name in names if name and name.strip()})
     await set_state(pool, DISABLED_PLATFORMS_KEY, ",".join(cleaned))
+
+
+# ---------------------------------------------------------------------------
+# the main buttons' colours and custom emoji (what the panel dresses them in)
+# ---------------------------------------------------------------------------
+
+#: Where the button looks live in ``bot_state``: one JSON object,
+#: ``{"menu:download": {"style": "primary", "emoji": "…"}}``. One row for a
+#: handful of buttons, read whole on every menu draw — the same reasoning as the
+#: section switches above, with a shape that keeps the two fields of a look
+#: together instead of inventing a second separator to get wrong.
+BUTTON_LOOKS_KEY = "button_looks"
+
+
+async def get_button_looks(pool: asyncpg.Pool) -> dict[str, tuple[str, str]]:
+    """How the main buttons are dressed today — ``{}`` when nothing is set.
+
+    Never raises, like the support contact and for the same reason: this is read
+    while a *menu* is being drawn, and a menu that fails to appear because one
+    optional setting could not be read is worse than a button without its colour.
+    A value nobody can parse reads as "nothing is dressed" — the safe direction,
+    since every button still works undressed.
+    """
+    try:
+        raw = await get_state(pool, BUTTON_LOOKS_KEY)
+        data = json.loads(str(raw)) if raw else {}
+    except Exception:
+        logger.exception("could not read the button looks from bot_state")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    looks: dict[str, tuple[str, str]] = {}
+    for key, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        style = str(entry.get("style") or "")
+        emoji = str(entry.get("emoji") or "")
+        if style or emoji:
+            looks[str(key)] = (style, emoji)
+    return looks
+
+
+async def set_button_look(
+    pool: asyncpg.Pool, key: str, style: str = "", emoji: str = ""
+) -> dict[str, tuple[str, str]]:
+    """Store one button's look — or clear it when both parts are empty.
+
+    Returns the whole map as it stands afterwards: the panel redraws from what was
+    actually written, so the screen can never show a colour the row does not hold.
+    """
+    looks = await get_button_looks(pool)
+    if style or emoji:
+        looks[key] = (style, emoji)
+    else:
+        looks.pop(key, None)
+    payload = {
+        name: {"style": parts[0], "emoji": parts[1]} for name, parts in sorted(looks.items())
+    }
+    await set_state(pool, BUTTON_LOOKS_KEY, json.dumps(payload, ensure_ascii=False))
+    return looks
 
 
 # ---------------------------------------------------------------------------

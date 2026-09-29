@@ -38,7 +38,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from core import database
+from core import database, ui
 from core import texts as text_store
 from core.catalog import MESSAGES
 from core.config import get_settings, reload_settings
@@ -159,6 +159,9 @@ class AdminStates(StatesGroup):
     #: server-side pending restore behind a short nonce — the FSM never holds
     #: the payload (see services/backup.py).
     restore = State()
+    #: Waiting for one button's custom emoji id (which button travels in the FSM
+    #: data; the next message from this admin is the id, or «-» to clear it).
+    look_emoji = State()
 
 
 def _chunks(text: str, limit: int = CHUNK_LIMIT) -> list[str]:
@@ -539,6 +542,7 @@ _PANEL_SCREENS: frozenset[str] = frozenset(
         "texts",
         "sources",
         "platforms",
+        "looks",
         # …and the six category submenus themselves.
         "cat_users",
         "cat_downloads",
@@ -572,6 +576,7 @@ _SCREEN_PARENT: dict[str, str] = {
     "settings": "cat_system",
     "sources": "cat_sources",
     "platforms": "cat_downloads",
+    "looks": "cat_system",
 }
 #: The hub's six categories, in hub order: id → its label key.
 _CATEGORY_LABELS: dict[str, str] = {
@@ -616,6 +621,7 @@ _CATEGORY_ITEMS: dict[str, tuple[tuple[str, str], ...]] = {
     "cat_system": (
         ("admin.btn_system", "admin:system"),
         ("admin.btn_settings", "admin:settings"),
+        ("admin.btn_looks", "admin:looks"),
         ("admin.btn_backup", BK_BACKUP),
         ("admin.btn_restore", BK_RESTORE),
     ),
@@ -633,6 +639,12 @@ BC_CANCEL = "bc:cancel"
 BC_START = "bc:start"
 SUP_EDIT = "sup:edit"
 SUP_CLEAR = "sup:clear"
+
+#: The button-dressing callbacks: ``look:<button callback>`` cycles a colour,
+#: ``lke:<button callback>`` asks for a custom emoji id (both carry the *menu's*
+#: own callback, so the panel and the screens it dresses name buttons identically).
+LOOK_PREFIX = "look:"
+LOOK_EMOJI_PREFIX = "lke:"
 
 #: The Download screen's switches: ``plat:<section>`` — a tap flips that one.
 PLATFORM_TOGGLE_PREFIX = "plat:"
@@ -839,6 +851,173 @@ async def _platforms_screen(pool: asyncpg.Pool, lang: str) -> Screen:
     return Screen("\n".join(lines), _platforms_keyboard(lang, disabled))
 
 
+def _look_style(style: str, lang: str) -> str:
+    """A stored colour as the panel says it — Telegram's word, or «default»."""
+    return style or t("admin.looks_default", lang)
+
+
+def _looks_keyboard(lang: str, looks: ui.Looks) -> InlineKeyboardMarkup:
+    """Two controls per main button: cycle its colour, set or clear its emoji.
+
+    Rows of two, one row per button — the 🎨 button names the colour it is *on
+    now* (the next tap moves to the next one), and the 🆔 button opens the prompt.
+    Every button on the list is drawn whatever its state, so a colour set months
+    ago is visible and undoable.
+    """
+    builder = InlineKeyboardBuilder()
+    for callback, label_key in ui.MAIN_BUTTONS:
+        style, _emoji = ui.look_for(looks, callback)
+        name = t(label_key, lang)
+        builder.button(
+            text=t("admin.looks_cycle", lang, name=name, style=_look_style(style, lang)),
+            callback_data=f"{LOOK_PREFIX}{callback}",
+        )
+        builder.button(
+            text=t("admin.looks_emoji_btn", lang, name=name),
+            callback_data=f"{LOOK_EMOJI_PREFIX}{callback}",
+        )
+    builder.adjust(2)
+    _leave(builder, lang, to=f"admin:{_SCREEN_PARENT.get('looks', 'home')}")
+    return builder.as_markup()
+
+
+async def _looks_screen(pool: asyncpg.Pool, lang: str) -> Screen:
+    """What the main buttons are dressed in — read live, like every setting here.
+
+    The lines and the buttons are built from the *same* read, so the screen can
+    never show a colour the row does not hold: one tap later both have moved.
+    """
+    looks = await database.get_button_looks(pool)
+    lines = [t("admin.looks_intro", lang, total=len(ui.MAIN_BUTTONS)), ""]
+    lines += [
+        t(
+            "admin.looks_line",
+            lang,
+            name=t(label_key, lang),
+            style=_look_style(ui.look_for(looks, callback)[0], lang),
+            emoji=ui.look_for(looks, callback)[1] or t("admin.looks_emoji_none", lang),
+        )
+        for callback, label_key in ui.MAIN_BUTTONS
+    ]
+    return Screen("\n".join(lines), _looks_keyboard(lang, looks))
+
+
+@router.callback_query(F.data.startswith(LOOK_PREFIX))
+async def on_look_cycle(
+    cb: CallbackQuery, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
+) -> None:
+    """Move one button to the next colour (and, after ``danger``, to none at all).
+
+    The callback is checked against the list rather than trusted: a forwarded
+    panel message travels with its buttons, and only an admin may dress one.
+    """
+    if not get_settings().is_admin(cb.from_user.id):
+        await cb.answer(t("admin.only", lang), show_alert=True)
+        return
+    key = (cb.data or "")[len(LOOK_PREFIX) :]
+    if key not in dict(ui.MAIN_BUTTONS):
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    looks = await database.get_button_looks(pool)
+    style, emoji = ui.look_for(looks, key)
+    chosen = ui.next_style(style)
+    await database.set_button_look(pool, key, chosen, emoji)
+    name = t(dict(ui.MAIN_BUTTONS)[key], lang)
+    await cb.answer(
+        t(
+            "admin.looks_saved",
+            lang,
+            name=name,
+            style=_look_style(chosen, lang),
+            emoji=emoji or t("admin.looks_emoji_none", lang),
+        )
+    )
+    message = cb.message if isinstance(cb.message, Message) else None
+    if message is None:
+        return
+    text, keyboard = await _looks_screen(pool, lang)
+    await _edit(message, text, reply_markup=keyboard)
+    logger.info(
+        "button look by admin %s: %s style %s (previous: %s)",
+        cb.from_user.id,
+        key,
+        chosen or "none",
+        style or "none",
+    )
+
+
+@router.callback_query(F.data.startswith(LOOK_EMOJI_PREFIX))
+async def on_look_emoji(
+    cb: CallbackQuery, state: FSMContext, lang: str = DEFAULT_LANG
+) -> None:
+    """Ask for one button's custom emoji id (the next message is the answer)."""
+    if not get_settings().is_admin(cb.from_user.id):
+        await cb.answer(t("admin.only", lang), show_alert=True)
+        return
+    key = (cb.data or "")[len(LOOK_EMOJI_PREFIX) :]
+    if key not in dict(ui.MAIN_BUTTONS):
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    message = cb.message if isinstance(cb.message, Message) else None
+    if message is None:
+        await cb.answer(t("admin.stale", lang), show_alert=True)
+        return
+    await cb.answer()
+    await state.set_state(AdminStates.look_emoji)
+    await state.update_data(look_key=key)
+    await _edit(
+        message,
+        t("admin.looks_prompt", lang, name=t(dict(ui.MAIN_BUTTONS)[key], lang)),
+        reply_markup=_back_to_menu(lang, to="admin:looks"),
+    )
+
+
+@router.message(AdminStates.look_emoji, ~F.text.startswith("/"))
+async def on_look_emoji_value(
+    message: Message, state: FSMContext, pool: asyncpg.Pool, lang: str = DEFAULT_LANG
+) -> None:
+    """Store the id, or clear the emoji with «-».
+
+    Telegram's ids are digits, so anything else is answered and *not* stored: the
+    step stays open, which is the difference between a retyped typo and a button
+    quietly wearing nothing. The colour already on the button is preserved — the
+    two halves of a look are set independently.
+    """
+    user = message.from_user
+    if not get_settings().is_admin(user.id if user else None):
+        await state.clear()
+        await message.answer(t("admin.only", lang))
+        return
+    key = str((await state.get_data()).get("look_key") or "")
+    if key not in dict(ui.MAIN_BUTTONS):
+        await state.clear()
+        await message.answer(t("admin.stale", lang))
+        return
+    value = (message.text or "").strip()
+    if value != "-" and not value.isdigit():
+        await message.answer(t("admin.looks_bad", lang))
+        return
+    looks = await database.get_button_looks(pool)
+    style = ui.look_for(looks, key)[0]
+    emoji = "" if value == "-" else value
+    await database.set_button_look(pool, key, style, emoji)
+    await state.clear()
+    name = t(dict(ui.MAIN_BUTTONS)[key], lang)
+    # The keyboard is drawn from a fresh read, not from the map taken before the
+    # write: the console the admin returns to must match the row on disk.
+    await message.answer(
+        t(
+            "admin.looks_saved",
+            lang,
+            name=name,
+            style=_look_style(style, lang),
+            emoji=emoji or t("admin.looks_emoji_none", lang),
+        ),
+        reply_markup=_looks_keyboard(lang, await database.get_button_looks(pool)),
+    )
+    logger.info("button emoji by admin %s: %s -> %s", user.id if user else "?", key, emoji or "none")
+
+
 def _support_keyboard(lang: str, *, configured: bool) -> InlineKeyboardMarkup:
     """Write the contact, or remove it (shown only when there is one to remove).
 
@@ -893,6 +1072,8 @@ async def panel_screen(
         )
     if screen == "platforms":
         return await _platforms_screen(pool, lang)
+    if screen == "looks":
+        return await _looks_screen(pool, lang)
     if screen in ("system", "health", "queue", "tools"):
         health = await panel.health_text(pool, queue, settings, cobalt, lang)
         queue_line = await panel.queue_text(queue, settings, lang)

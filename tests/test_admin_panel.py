@@ -1130,6 +1130,132 @@ async def test_an_admin_switches_a_section_off_and_on_again(
     assert "✅ 📸 Instagram" in bot.screens[-1]
 
 
+@pytest.fixture
+def looks(monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[str, str]]:
+    """``bot_state`` for the button colours: one dict, no database."""
+    stored: dict[str, tuple[str, str]] = {}
+
+    async def get_button_looks(pool: Any) -> dict[str, tuple[str, str]]:
+        return dict(stored)
+
+    async def set_button_look(pool: Any, key: str, style: str, emoji: str) -> None:
+        if style or emoji:
+            stored[key] = (style, emoji)
+        else:
+            stored.pop(key, None)
+
+    monkeypatch.setattr(admin_module.database, "get_button_looks", get_button_looks)
+    monkeypatch.setattr(admin_module.database, "set_button_look", set_button_look)
+    return stored
+
+
+async def test_the_ui_screen_names_every_main_button_and_its_colour(
+    looks: dict[str, tuple[str, str]]
+) -> None:
+    """One line and one row per main button: what it is called *as the menu
+    spells it*, which colour it wears, and whether it has a custom emoji."""
+    looks["menu:download"] = ("success", "5368324170671202286")
+
+    text, keyboard = await admin_module.panel_screen(
+        "looks", object(), _queue(), None, "en"
+    )
+
+    assert "📥 Downloads" in text and "success" in text
+    assert "📥 Downloads · primary" not in text, "the screen shows what is stored"
+    buttons = _buttons(keyboard)
+    assert ("🎨 📥 Downloads · success", "look:menu:download") in buttons
+    assert ("🆔 📥 Downloads", "lke:menu:download") in buttons
+    assert buttons[-1][1] == "menu:home"
+
+
+async def test_a_tap_cycles_a_buttons_colour_and_stores_it(
+    looks: dict[str, tuple[str, str]]
+) -> None:
+    """Cycle, don't configure: three colours and «none», stored the moment it is
+    tapped, and the screen the admin is looking at already says so."""
+    bot = RecordingBot()
+
+    for expected in ("primary", "success", "danger"):
+        await admin_module.on_look_cycle(
+            _callback(bot, f"{admin_module.LOOK_PREFIX}menu:download"), object(), lang="en"
+        )
+        assert looks["menu:download"] == (expected, ""), "stored, not just drawn"
+        assert f"🎨 📥 Downloads · {expected}" in dict(_buttons(bot.keyboards[-1]))
+        assert f"📥 Downloads — {expected}" in bot.screens[-1], "and the screen says so"
+
+    await admin_module.on_look_cycle(
+        _callback(bot, f"{admin_module.LOOK_PREFIX}menu:download"), object(), lang="en"
+    )
+    assert "menu:download" not in looks, "a full cycle ends where it started"
+    assert "🎨 📥 Downloads · default" in dict(_buttons(bot.keyboards[-1]))
+
+
+async def test_a_crafted_look_callback_cannot_dress_a_foreign_button(
+    looks: dict[str, tuple[str, str]]
+) -> None:
+    """Only the buttons on the list, and only for an admin: a forwarded panel
+    message travels with its buttons."""
+    bot = RecordingBot()
+
+    await admin_module.on_look_cycle(
+        _callback(bot, f"{admin_module.LOOK_PREFIX}menu:admin"), object(), lang="en"
+    )
+    assert looks == {}, "not a main button, not dressed"
+    assert bot.answers[-1].show_alert is True
+
+    await admin_module.on_look_cycle(
+        _callback(bot, f"{admin_module.LOOK_PREFIX}menu:download", STRANGER_ID),
+        object(),
+        lang="en",
+    )
+    assert looks == {}, "and not by anybody else"
+
+
+async def test_a_custom_emoji_id_is_typed_in_and_stored(
+    looks: dict[str, tuple[str, str]]
+) -> None:
+    """The 🆔 button asks for the id, the admin's next message is the answer,
+    and «-» takes it away again."""
+    bot = RecordingBot()
+    state = _fsm()
+
+    await admin_module.on_look_emoji(
+        _callback(bot, f"{admin_module.LOOK_EMOJI_PREFIX}menu:language"), state, lang="en"
+    )
+    assert await state.get_state() == admin_module.AdminStates.look_emoji.state
+
+    await admin_module.on_look_emoji_value(
+        _message("5368324170671202286", bot), state, object(), lang="en"
+    )
+    assert looks["menu:language"] == ("", "5368324170671202286")
+    assert await state.get_state() is None, "the step does not outlive its answer"
+
+    await admin_module.on_look_emoji(
+        _callback(bot, f"{admin_module.LOOK_EMOJI_PREFIX}menu:language"), state, lang="en"
+    )
+    await admin_module.on_look_emoji_value(_message("-", bot), state, object(), lang="en")
+    assert "menu:language" not in looks, "«-» clears it"
+
+
+async def test_an_emoji_id_that_is_not_one_is_refused(
+    looks: dict[str, tuple[str, str]]
+) -> None:
+    """Telegram's ids are digits. Anything else is answered, not stored — and
+    the step stays open so the admin can retype it."""
+    bot = RecordingBot()
+    state = _fsm()
+    await admin_module.on_look_emoji(
+        _callback(bot, f"{admin_module.LOOK_EMOJI_PREFIX}menu:support"), state, lang="en"
+    )
+
+    await admin_module.on_look_emoji_value(
+        _message("not-an-id", bot), state, object(), lang="en"
+    )
+
+    assert looks == {}
+    assert await state.get_state() == admin_module.AdminStates.look_emoji.state
+
+
 async def test_the_last_open_section_cannot_be_switched_off(
     platforms: list[str]
 ) -> None:
