@@ -129,6 +129,60 @@ def test_the_document_is_the_shape_cobalt_parses(tmp_path: Path) -> None:
     assert document["youtube"][0].startswith("LOGIN_INFO=")
 
 
+def test_the_instagram_login_rides_along_for_cobalt(tmp_path: Path) -> None:
+    """Cobalt's instagram service needs the same kind of session YouTube's does.
+
+    When yt-dlp is refused on a reel, a post or a story, cobalt is the engine that
+    gets the link — and an anonymous instagram request is refused the same way. The
+    jar is the only place that login exists, so it is exported under cobalt's own
+    service key, beside youtube's.
+    """
+    settings = _settings(
+        tmp_path,
+        directory=tmp_path / "cobalt",
+        jar=_jar(tmp_path, [LOGIN_ROW, SAPISID_ROW, OTHER_SITE]),
+    )
+
+    state = sync_from_jar(settings)
+
+    document = json.loads(Path(state.path).read_text(encoding="utf-8"))  # type: ignore[arg-type]
+    assert document["youtube"][0].startswith("LOGIN_INFO=")
+    assert document[cobalt_cookies.INSTAGRAM_SERVICE] == ["sessionid=ig"]
+    assert state.other_services == (), "instagram is ours when the jar carries it"
+
+
+def test_instagram_tracking_cookies_are_not_shipped(tmp_path: Path) -> None:
+    """Same rule as YouTube's: the login, not the rest of the jar."""
+    noise = [".instagram.com", "TRUE", "/", "TRUE", "0", "ig_analytics", "tracking"]
+    jar = _jar(tmp_path, [LOGIN_ROW, SAPISID_ROW, OTHER_SITE, noise])
+
+    header, used, _ = cobalt_cookies.instagram_cookie_header(
+        cobalt_cookies.read_netscape_cookie_rows(jar)
+    )
+
+    assert used == 1 and header == "sessionid=ig"
+
+
+def test_a_jar_without_instagram_cookies_leaves_cobalts_own_alone(tmp_path: Path) -> None:
+    """Cobalt refreshes its own instagram cookies back into this file. A jar that
+    says nothing about instagram must not overwrite the session it refreshed."""
+    directory = tmp_path / "cobalt"
+    directory.mkdir()
+    theirs = {"instagram": ["sessionid=from-cobalt"]}
+    (directory / cobalt_cookies.COBALT_FILE_NAME).write_text(
+        json.dumps(theirs), encoding="utf-8"
+    )
+    settings = _settings(tmp_path, directory=directory)
+
+    sync_from_jar(settings)
+
+    document = json.loads(
+        (directory / cobalt_cookies.COBALT_FILE_NAME).read_text(encoding="utf-8")
+    )
+    assert document["instagram"] == theirs["instagram"], "their session survives us"
+    assert document["youtube"]
+
+
 def test_a_second_run_is_not_a_new_export(tmp_path: Path) -> None:
     """A restart rewrites the same bytes — cobalt must not be asked to restart for
     that, and the stamp that proves what cobalt loaded must survive."""

@@ -3358,25 +3358,91 @@ def test_the_picker_puts_the_platforms_side_by_side() -> None:
     ]
 
 
+async def test_an_instagram_link_is_downloaded_without_being_asked_about(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Instagram never gets a ladder, even when the probe reports resolutions.
+
+    A reel, a post and a story each arrive as one file whose resolutions the site
+    keeps behind a login wall — so a quality menu here is a question with one
+    honest answer, and the answer is «best». It is submitted straight away: the
+    automatic pick, the same request a solo link makes, no button in between.
+    """
+    async def supported(url: str) -> bool:
+        return True
+
+    async def probe(bot: Bot, url: str) -> MediaInfo:
+        return MediaInfo(
+            source_url=url,
+            title="A Reel",
+            platform="instagram",
+            webpage_url=url,
+            extension="mp4",
+            thumbnail=None,
+            duration=12,
+            filesize_approx=5 * 1024 * 1024,
+            is_live=False,
+            video_options=(VideoOption(1080, 5 * 1024 * 1024, True),),
+        )
+
+    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(user_module, "_probe_supported", supported)
+    monkeypatch.setattr(user_module, "_probe_meta", probe)
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
+    bot = RecordingBot()
+    url = "https://www.instagram.com/reel/abc/"
+    queue = _fake_queue()
+    state = _fresh_state()
+
+    await user_module._queue_url_flow(
+        _message(url, bot),
+        state,
+        _user(),
+        url,
+        FA,
+        bot=cast(Bot, bot),
+        pool=object(),
+        queue=queue,
+    )
+
+    assert [task.media_format for task in queue.tasks] == ["video"]
+    assert queue.tasks[0].quality == "best", "the highest the link has, unasked"
+    assert [len(kb.inline_keyboard) for kb in bot.keyboards] == [0], (
+        "the card carries no buttons: there was nothing to choose"
+    )
+    assert t("intake.choose_quality", FA) not in " ".join(bot.screens), "no ladder"
+    assert "1080p" not in " ".join(bot.screens), "and no resolution row either"
+    assert "fmt:" not in " ".join(
+        data for kb in bot.keyboards for _label, data in _buttons(kb)
+    ), "nothing was offered, so nothing can be tapped"
+
+
 async def test_a_failed_probe_on_a_claimed_platform_draws_the_automatic_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """BUG 3, pinned: the menu probe never consulted the fallback, so a blocked
-    YouTube/Instagram link stalled at probe_failed while the download path —
+    """BUG 3, pinned on a TikTok link: the menu probe never consulted the
+    fallback, so a blocked link stalled at probe_failed while the download path —
     which *does* fall back to cobalt — would have served it. The failed probe
-    now draws the automatic row (spelled automatic) alongside the retry."""
+    now draws the automatic row (spelled automatic) alongside the retry.
+
+    Instagram is no longer the example here: it is never asked at all, on any
+    probe outcome (see the test above).
+    """
     async def supported(url: str) -> bool:
         return True
 
     monkeypatch.setattr(user_module, "_probe_supported", supported)
     bot = RecordingBot()
-    message = _message("https://www.instagram.com/reel/abc/", bot)
+    url = "https://www.tiktok.com/@user/video/123"
+    message = _message(url, bot)
 
     await user_module._queue_url_flow(
         message,
-        await _state("https://www.instagram.com/reel/abc/"),
+        await _state(url),
         _user(),
-        "https://www.instagram.com/reel/abc/",
+        url,
         FA,
         bot=cast(Bot, bot),
         pool=object(),
@@ -3386,7 +3452,7 @@ async def test_a_failed_probe_on_a_claimed_platform_draws_the_automatic_row(
     rows = _buttons(bot.keyboards[-1])
     assert (t("intake.probe_retry_btn", FA), user_module.PROBE_CALLBACK) in rows
     assert (t("intake.auto_best_btn", FA), "fmt:video:best") in rows, (
-        "an Instagram reel with no ladder still gets the fallback's door"
+        "a video link with no ladder still gets the fallback's door"
     )
 
 

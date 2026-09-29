@@ -1345,6 +1345,34 @@ async def _intake_flow(
             fallback_any_tier=True,
         )
         return
+    if routing.platform == "instagram":
+        # Instagram is the one section this bot promises a straight download on.
+        # A reel, a post and a story each hold a single file, and the resolutions
+        # a reel *does* have sit behind a login wall — so the ladder here is a
+        # menu of «best» drawn from a lookup that mostly fails, and the honest
+        # answer is to ask nothing. The automatic request goes straight to the
+        # card and the worker's engines (yt-dlp, then the cobalt fallback) fetch
+        # the best they can get.
+        await state.clear()
+        status = await message.answer(
+            media_card(url=url, lang=lang), link_preview_options=_NO_PREVIEW
+        )
+        await _submit(
+            bot,
+            status,
+            pool,
+            queue,
+            user,
+            url,
+            "video",
+            "best",
+            lang,
+            tap=None,
+            # No tier was asked for, so anything this URL already produced in
+            # the media family answers it (the zero-wait rule for solo links).
+            fallback_any_tier=True,
+        )
+        return
     await _ask_about_link(
         message, state, user, url, lang, bot=bot, pool=pool, queue=queue
     )

@@ -1137,8 +1137,24 @@ def _map_download_error(exc: DownloadError) -> ExtractionError:
             "اگر تکرار شد کوکی تازه و PO token provider لازم است.",
         ),
         (
-            ("http error 403", "http error 429", "temporary ban", "requested format is not available",
-             "sign in to confirm"),
+            (
+                "http error 403",
+                "http error 429",
+                "temporary ban",
+                "requested format is not available",
+                "sign in to confirm",
+                # A login wall and a rate limit, in the site's own words. Instagram
+                # is where this matters most — a reel, a post or a story it decides
+                # not to serve anonymously answers with the first sentence, and
+                # ``empty media response`` is the same refusal arriving as a page
+                # with nothing in it — and every one of them is «the site refused
+                # *this* request», which is exactly what the fallback is for. Left
+                # unrecognised they fell through to GENERAL, where no other engine
+                # is ever tried: Instagram had no fallback path at all.
+                "login required",
+                "rate-limit reached",
+                "empty media response",
+            ),
             "EXTRACTOR_BLOCKED",
             "سایت مبدأ دانلود را مسدود کرد؛ کمی بعد دوباره تلاش کنید.",
         ),

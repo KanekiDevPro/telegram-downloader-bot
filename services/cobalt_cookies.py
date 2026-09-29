@@ -40,16 +40,39 @@ import os
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from core.config import Settings
 from services.extractor import missing_youtube_login_cookies, read_netscape_cookie_rows
 
 logger = logging.getLogger(__name__)
 
-#: The service key cobalt knows (``VALID_SERVICES`` in its cookie manager). The
-#: others (``instagram``, ``twitter``, …) are for logins the bot has no jar for.
+#: The service key cobalt knows (``VALID_SERVICES`` in its cookie manager).
 SERVICE = "youtube"
+
+#: The second service this module can serve, and the one it exists for besides
+#: YouTube: when yt-dlp is refused on an instagram link (reel, post, story), cobalt
+#: is the engine that gets it — and an anonymous instagram request is refused just
+#: the same way. The jar is where that login lives, so it is exported too.
+#: ``twitter`` and the rest are logins this bot has no jar for, and are left alone.
+INSTAGRAM_SERVICE = "instagram"
+
+#: Where an instagram session lives, and which cookie names *are* that session.
+#: Cobalt sends this header to instagram only, so an allowlist is enough: the
+#: names its own cookie manager reads, and no tracking cookie beside them.
+INSTAGRAM_DOMAINS: tuple[str, ...] = ("instagram.com",)
+INSTAGRAM_NAMES: frozenset[str] = frozenset(
+    {
+        "sessionid",
+        "csrftoken",
+        "ds_user_id",
+        "mid",
+        "ig_did",
+        "rur",
+        "datr",
+        "ig_nrcb",
+    }
+)
 
 #: The file cobalt reads and the sidecar this module writes beside it. Both names
 #: are fixed: the compose service points ``COOKIE_PATH`` at the same file.
@@ -183,12 +206,36 @@ def ensure_cookie_dir(directory: Path | None, *, create: bool = True) -> str:
     )
 
 
-def cookie_header(rows: list[list[str]]) -> tuple[str, int, int]:
-    """Build the ``Cookie:`` header value from Netscape rows.
+def _host_matches(host: str, domain: str) -> bool:
+    """Domain-suffix match on a jar host (``youtube.com`` covers ``m.youtube.com``)."""
+    return host == domain or host.endswith(f".{domain}")
+
+
+def _youtube_keeps(host: str, name: str) -> bool:
+    """The YouTube session: everything on its own domains, the login on Google's."""
+    if _host_matches(host, FALLBACK_DOMAIN):
+        return name in SESSION_NAMES
+    return any(_host_matches(host, domain) for domain in SESSION_DOMAINS)
+
+
+def _instagram_keeps(host: str, name: str) -> bool:
+    """An instagram session, and nothing else instagram keeps about the reader."""
+    return name in INSTAGRAM_NAMES and any(
+        _host_matches(host, domain) for domain in INSTAGRAM_DOMAINS
+    )
+
+
+def _header_from(
+    rows: list[list[str]],
+    keeps: Callable[[str, str], bool],
+    *,
+    first: frozenset[str],
+) -> tuple[str, int, int]:
+    """Build one ``Cookie:`` header value from Netscape rows.
 
     Returns ``(header, used, skipped)``. Order is the browser's own within each
-    domain, with the session names first — cobalt only ever sends this header to
-    YouTube, so the cookies that *are* the login should not be the ones a
+    domain, with the session names first — cobalt only ever sends a service's header
+    to that service, so the cookies that *are* the login should not be the ones a
     truncating peer drops.
 
     A value that cannot survive the trip is skipped rather than mangled: cobalt
@@ -200,11 +247,7 @@ def cookie_header(rows: list[list[str]]) -> tuple[str, int, int]:
     for fields in rows:
         domain, name, value = fields[0], fields[5], fields[6]
         host = domain.lstrip("@.").lower()  # '@' shows up in some exporters
-        in_session_domain = any(host == d or host.endswith(f".{d}") for d in SESSION_DOMAINS)
-        in_fallback_domain = host == FALLBACK_DOMAIN or host.endswith(f".{FALLBACK_DOMAIN}")
-        if in_fallback_domain:
-            in_session_domain = name in SESSION_NAMES
-        if not in_session_domain:
+        if not keeps(host, name):
             continue
         if not name or not value or "; " in value or "\n" in value:
             skipped += 1
@@ -212,8 +255,18 @@ def cookie_header(rows: list[list[str]]) -> tuple[str, int, int]:
         # First writer wins: `youtube.com` is more specific than `.youtube.com`,
         # and both are better than whatever a google.com row repeats.
         chosen.setdefault(name, value)
-    ordered = sorted(chosen.items(), key=lambda item: item[0] not in SESSION_NAMES)
+    ordered = sorted(chosen.items(), key=lambda item: item[0] not in first)
     return "; ".join(f"{name}={value}" for name, value in ordered), len(chosen), skipped
+
+
+def cookie_header(rows: list[list[str]]) -> tuple[str, int, int]:
+    """The YouTube ``Cookie:`` header (see :func:`_header_from`)."""
+    return _header_from(rows, _youtube_keeps, first=SESSION_NAMES)
+
+
+def instagram_cookie_header(rows: list[list[str]]) -> tuple[str, int, int]:
+    """The instagram ``Cookie:`` header, for the service cobalt falls back to."""
+    return _header_from(rows, _instagram_keeps, first=INSTAGRAM_NAMES)
 
 
 def _read_document(path: Path) -> tuple[dict[str, Any] | None, str]:
@@ -260,12 +313,17 @@ def sync_from_jar(settings: Settings, *, jar_path: Path | None = None) -> Cobalt
         )
 
     header, used, skipped = cookie_header(rows)
+    instagram_header, instagram_used, _ = instagram_cookie_header(rows)
     existing, broken = _read_document(path)
     if existing is None:
         # Someone else's file, in a shape cobalt would reject anyway: report it
         # rather than replace it — a hand-made cookie file is not ours to lose.
         return replace(_read_state(path, sidecar, jar), reason=broken)
-    others = tuple(sorted(key for key in existing if key != SERVICE))
+    # ``instagram`` counts as someone else's until the jar proves otherwise: the
+    # key may hold a session cobalt refreshed for itself, and a jar with no
+    # instagram login has nothing to say about it.
+    managed = {SERVICE} | ({INSTAGRAM_SERVICE} if instagram_used else set())
+    others = tuple(sorted(key for key in existing if key not in managed))
 
     if not used:
         return replace(
@@ -275,6 +333,8 @@ def sync_from_jar(settings: Settings, *, jar_path: Path | None = None) -> Cobalt
         )
 
     document = {**existing, SERVICE: [header]}
+    if instagram_used:
+        document[INSTAGRAM_SERVICE] = [instagram_header]
     text = json.dumps(document, indent=4, ensure_ascii=False) + "\n"
     changed = True
     try:
@@ -309,7 +369,7 @@ def sync_from_jar(settings: Settings, *, jar_path: Path | None = None) -> Cobalt
                     "cookies": used,
                     "missing_login": list(missing),
                     "source": state.source,
-                    "services": [SERVICE],
+                    "services": sorted(managed),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -326,8 +386,9 @@ def sync_from_jar(settings: Settings, *, jar_path: Path | None = None) -> Cobalt
         logger.error("cobalt cookies: %s", problem)
         return replace(state, reason=problem)
     logger.info(
-        "cobalt cookies: %s youtube cookie(s) written to %s%s%s",
+        "cobalt cookies: %s youtube cookie(s)%s written to %s%s%s",
         used,
+        f" + {instagram_used} instagram" if instagram_used else "",
         path,
         f" (skipped {skipped})" if skipped else "",
         f", keeping {', '.join(others)}" if others else "",
@@ -424,9 +485,11 @@ __all__ = [
     "COBALT_FILE_NAME",
     "SIDECAR_FILE_NAME",
     "SERVICE",
+    "INSTAGRAM_SERVICE",
     "CobaltCookieState",
     "cobalt_cookie_paths",
     "cookie_header",
+    "instagram_cookie_header",
     "read_state",
     "restart_needed",
     "sync_from_jar",

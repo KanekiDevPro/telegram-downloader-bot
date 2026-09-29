@@ -199,6 +199,33 @@ def test_error_mapping_recognises_a_post_with_no_video(text: str) -> None:
     assert "ویدیو" in error.message
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # yt-dlp's Instagram extractor answers a login wall, a rate limit and a
+        # silently-refused page with these three sentences. All of them are «the
+        # site refused *this* request», which is what makes the cobalt fallback
+        # worth a turn — without the classification they landed in GENERAL, and
+        # the fallback never ran for an Instagram link at all.
+        "ERROR: [Instagram] abc: Requested content is not available, rate-limit "
+        "reached or login required. Please wait a few minutes and try again, or "
+        "login and try again",
+        "ERROR: [Instagram] abc: login required",
+        "ERROR: [Instagram] abc: Instagram sent an empty media response. Check if "
+        "the post is available",
+    ],
+)
+def test_an_instagram_login_wall_is_a_block_not_a_mystery(text: str) -> None:
+    """The reel/post/story failure, pinned: what the user sees must be the block
+    message (and the worker must hand the link to the fallback), never «unexpected
+    error» — that was the whole of Instagram's failures here."""
+    error = _map_download_error(DownloadError(text))
+
+    assert error.code == "EXTRACTOR_BLOCKED"
+    assert error.code != "GENERAL"
+    assert "مسدود" in error.message
+
+
 def test_error_mapping_falls_back_to_general() -> None:
     error = _map_download_error(DownloadError("something nobody predicted"))
     assert error.code == "GENERAL"
