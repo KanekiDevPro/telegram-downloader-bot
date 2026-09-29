@@ -18,6 +18,12 @@ select = ["E", "F", "I", "W"]
 
 [tool.mypy]
 python_version = "3.11"
+# ``tests/`` has no ``__init__.py``, and one test imports a sibling as
+# ``tests.test_fallback`` — so the same file had two module names and mypy
+# refused to check *anything*. Explicit package bases makes that path the only
+# one it sees, without turning the suite into a package (pytest's import mode
+# would change with it).
+explicit_package_bases = true
 disallow_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true

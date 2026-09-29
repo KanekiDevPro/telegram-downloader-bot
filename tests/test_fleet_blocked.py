@@ -166,12 +166,12 @@ async def test_a_fleet_block_ends_the_job_on_the_first_attempt(
 
     await worker._process_with_retry(
         TASK,
-        env.bot,  # type: ignore[arg-type]
-        env.pool,  # type: ignore[arg-type]
+        env.bot,
+        env.pool,
         _Queue(),  # type: ignore[arg-type]
-        env.extractor,  # type: ignore[arg-type]
+        env.extractor,
         _NeverStopping(),  # type: ignore[arg-type]
-        env.cobalt,  # type: ignore[arg-type]
+        env.cobalt,
     )
 
     assert env.extractor.downloads == 1, "no second attempt, no backoff"
