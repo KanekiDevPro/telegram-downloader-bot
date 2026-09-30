@@ -440,23 +440,21 @@ async def test_a_resolvable_spotify_link_offers_only_deliverable_audio(
     assert t("intake.spotify_note", EN) in bot.texts[0], "the resolver is named honestly"
     rows = _buttons(bot.keyboards[-1])
     data = [item for _, item in rows]
-    assert "audf:mp3" in data, "a deliverable conversion target is offered"
+    assert "fmt:audio:mp3.best" in data, "the HQ transcode is its own row"
+    assert "fmt:audio:best" in data, "the untouched original is its own row"
+    assert "fmt:audio:flac" not in data, "no fake FLAC"
     assert all(
-        item.startswith(("audf:", "fmt:audio:", "menu:")) for item in data
-    ), "…and no format the capability model does not contain"
+        item.startswith(("fmt:audio:", "menu:")) for item in data
+    ), "…and no preset grid, no format the capability model does not contain"
     assert "audf:opus" not in data and "fmt:audio:opus" not in data, (
         "opus is not in this source's deliverable set — it is not advertised"
     )
 
-    await user_module.on_audio_format(_callback(bot, "audf:mp3"), state, lang=EN)
-    level_rows = [item for _, item in _buttons(bot.keyboards[-1])]
-    chosen = next(item for item in level_rows if item.startswith("fmt:audio:"))
-
     await user_module.on_format_chosen(
-        _callback(bot, chosen), state, _user(), object(), queue, cast(Bot, bot), lang=EN
+        _callback(bot, "fmt:audio:mp3.best"), state, _user(), object(), queue, cast(Bot, bot), lang=EN
     )
     assert queue.tasks[-1].media_format == "audio", "menu → callback → task"
-    assert queue.tasks[-1].quality == chosen.removeprefix("fmt:audio:")
+    assert queue.tasks[-1].quality == "mp3.best"
 
 
 # ---------------------------------------------------------------------------

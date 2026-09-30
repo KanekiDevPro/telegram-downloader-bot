@@ -919,14 +919,13 @@ async def test_the_question_matches_the_link(monkeypatch: pytest.MonkeyPatch) ->
     # The resolver is said out loud: a Spotify file comes from its public
     # counterpart, and the quality follows that source.
     assert t("intake.spotify_note", FA) in bot.screens[-1]
-    # The question is the *format* grid — the quality presets are one tap deeper.
-    assert ("🎧 MP3", "audf:mp3") in _buttons(bot.keyboards[-1])
-    assert ("🎧 FLAC", "fmt:audio:flac") in _buttons(bot.keyboards[-1]), (
-        "lossless has no quality knob and submits from here"
-    )
+    # The question is two honest rows: the HQ transcode and the untouched stream.
+    assert ("MP3 · 320 kbps", "fmt:audio:mp3.best") in _buttons(bot.keyboards[-1])
+    assert (t("fmt.spotify_original", FA), "fmt:audio:best") in _buttons(bot.keyboards[-1])
     offered = [data for _label, data in _buttons(bot.keyboards[-1])]
-    assert "audf:m4a" not in offered and "audf:opus" not in offered, "conversions of a conversion"
-    assert "fmt:audio:wav" not in offered, "a track is MP3 or FLAC, never WAV"
+    assert "fmt:audio:flac" not in offered, "no fake FLAC"
+    assert not [data for data in offered if data.startswith("audf:")], "no preset grid"
+    assert "fmt:audio:wav" not in offered, "a track is MP3-HQ or original, never WAV"
     assert not [data for data in offered if data.startswith("fmt:video:")], "no video rungs"
     # Two per row, the way back under them: the two formats pair up.
     assert [len(row) for row in bot.keyboards[-1].inline_keyboard] == [2, 1]
@@ -1183,7 +1182,8 @@ async def test_a_group_message_with_a_link_gets_the_same_question(
     )
 
     assert t("intake.choose_audio", FA) in bot.screens[-1]
-    assert ("🎧 MP3", "audf:mp3") in _buttons(bot.keyboards[-1])
+    assert ("MP3 · 320 kbps", "fmt:audio:mp3.best") in _buttons(bot.keyboards[-1])
+    assert (t("fmt.spotify_original", FA), "fmt:audio:best") in _buttons(bot.keyboards[-1])
 
 
 async def test_a_photo_post_is_downloaded_without_a_format_question(

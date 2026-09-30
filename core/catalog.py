@@ -464,6 +464,14 @@ MESSAGES: Final[Catalog] = {
         "en": "🎵 Audio only (best quality)",
         "fa": "🎵 دانلود فقط صدا (بهترین کیفیت)",
     },
+    # A track's two honest answers: the HQ transcode and the untouched stream.
+    # No FLAC here on purpose — a lossless container around a lossy stand-in
+    # is a bigger file, not better sound.
+    "fmt.spotify_mp3": {"en": "MP3 · 320 kbps", "fa": "MP3 · 320 kbps"},
+    "fmt.spotify_original": {
+        "en": "🎧 Original Audio (Best)",
+        "fa": "🎧 صدای اصلی (بهترین کیفیت)",
+    },
     # The format's quality presets are labelled with their real bitrates in the
     # menu (handlers/user.py) — these keys name the one preset that is not one.
     "audio.choose_level_fmt": {

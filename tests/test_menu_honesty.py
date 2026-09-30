@@ -410,7 +410,10 @@ async def test_a_resolved_spotify_track_says_where_the_audio_comes_from(
     assert t("intake.spotify_note", FA) in bot.screens[-1], (
         "the DRM/counterpart reality is stated before the menu is drawn"
     )
-    assert ("🎧 MP3", "audf:mp3") in _buttons(bot.keyboards[-1])
+    assert ("MP3 · 320 kbps", "fmt:audio:mp3.best") in _buttons(bot.keyboards[-1])
+    assert (t("fmt.spotify_original", FA), "fmt:audio:best") in _buttons(
+        bot.keyboards[-1]
+    )
 
 
 # ---------------------------------------------------------------------------

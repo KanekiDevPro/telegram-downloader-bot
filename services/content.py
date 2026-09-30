@@ -619,10 +619,14 @@ def classify(url: str) -> ContentKind:
 
 
 #: Spotify serves genuine audio only: the mapped YouTube stand-in could produce
-#: anything, but the song the user asked for is an MP3 or a FLAC — never a video
-#: rung, never a dummy row. m4a/opus/wav are conversions of a conversion here,
-#: and the menu does not offer what the song is not.
-SPOTIFY_AUDIO_FORMATS: tuple[str, ...] = ("mp3", "flac")
+#: anything, but the song the user asked for is an MP3 or the untouched stream —
+#: never a video rung, never a dummy row. FLAC is deliberately absent: the
+#: stand-in serves ~160 kbps lossy audio, and a lossless container around it is
+#: a bigger file, not better sound (no fake FLAC). m4a/opus/wav are conversions
+#: of a conversion here, and the menu does not offer what the song is not. The
+#: second row — the untouched original — is drawn by the question itself (see
+#: ``handlers/user.py``), not by this tuple: it needs no codec grid to open.
+SPOTIFY_AUDIO_FORMATS: tuple[str, ...] = ("mp3",)
 
 
 def routing_for(url: str) -> Routing:

@@ -346,15 +346,29 @@ def _question_keyboard(
         # What this source can really become beats the static catalogue — the
         # capability model decides the buttons (services.extractor.audio_capability).
         offered_audio = tuple(codec for codec in offered_audio if codec in capability.formats)
-    for codec in offered_audio:
+    if routing.platform == "spotify":
+        # A track's two honest rows, drawn directly — never a preset grid, never
+        # FLAC. The HQ transcode needs its ffmpeg codec; the untouched original
+        # needs nothing but the stream, so it is always there.
+        if "mp3" in offered_audio:
+            builder.button(
+                text=t("fmt.spotify_mp3", lang),
+                callback_data=_fmt_callback("audio", "mp3.best"),
+            )
         builder.button(
-            text=t(content.AUDIO_FORMAT_LABELS[codec], lang),
-            callback_data=(
-                f"{AUDF_PREFIX}{codec}"
-                if content.audio_level_choices(codec)
-                else _fmt_callback("audio", codec)
-            ),
+            text=t("fmt.spotify_original", lang),
+            callback_data=_fmt_callback("audio", "best"),
         )
+    else:
+        for codec in offered_audio:
+            builder.button(
+                text=t(content.AUDIO_FORMAT_LABELS[codec], lang),
+                callback_data=(
+                    f"{AUDF_PREFIX}{codec}"
+                    if content.audio_level_choices(codec)
+                    else _fmt_callback("audio", codec)
+                ),
+            )
     # The link's own resolutions, one row each, whenever the probe really found
     # them — a post link included, whose route would otherwise bury a valid
     # format list before the screen is ever drawn. An audio link keeps its format
@@ -1705,7 +1719,8 @@ async def _ask_about_link(
         source_kbps_approx=(info.audio_kbps_approx if info is not None else False),
         offered=_offered_tiers(url, options),
         # The router's formats bound the vocabulary: on a Spotify track only
-        # mp3/flac were drawn, so a crafted tap for anything else is refused.
+        # the HQ transcode was drawn from the grid, so a crafted tap for
+        # anything else is refused (the original row has its own rule).
         audio_offered=(
             [codec for codec in capability.formats if codec in routing.audio_formats]
             if routing.audio_formats
@@ -2262,6 +2277,11 @@ async def on_audio_format(
     title = str(data.get("title") or "")
     spec = (cb.data or "")[len(AUDF_PREFIX) :]
     capability = _stored_capability(data)
+    if spotify.is_spotify_url(url):
+        # A track draws two direct rows, never a preset grid — any ``audf:``
+        # tap on it is crafted or stale, and answered instead of run.
+        await cb.answer(t("intake.no_format", lang), show_alert=True)
+        return
     if spec == "back":
         await cb.answer()
         await _edit_or_reply(
@@ -2439,6 +2459,10 @@ def _tap_was_offered(
     """
     if not media_format or not quality:
         return False
+    if media_format == "audio" and quality == "best" and spotify.is_spotify_url(url):
+        # The track's original row is drawn unconditionally (it needs no ladder
+        # and no codec), so its tap is valid whenever the track's menu is up.
+        return True
     if media_format == "video" and data.get("offered") is not None:
         # Every video request is judged by the offered list — "best" included.
         # The automatic row is only in that list when the menu really drew it

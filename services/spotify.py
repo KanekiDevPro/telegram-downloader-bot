@@ -424,10 +424,11 @@ def track_filename(track: SpotifyTrack, suffix: str) -> str:
 #: never minutes — a stuck ffmpeg must not hold a worker slot.
 TAG_TIMEOUT_S = 60.0
 
-#: The containers worth tagging in place. Anything else (a video, a stranger's
-#: container) is left exactly as it arrived rather than rewritten into a shape
-#: the tagging never promised.
-_TAGGABLE_SUFFIXES = frozenset({".mp3", ".flac"})
+#: The containers worth tagging in place. MP3 carries ID3v2.3, M4A its native
+#: atoms, FLAC Vorbis comments — all with the streams copied untouched. Anything
+#: else (a video, a stranger's container) is left exactly as it arrived rather
+#: than rewritten into a shape the tagging never promised.
+_TAGGABLE_SUFFIXES = frozenset({".mp3", ".m4a", ".flac"})
 
 
 def tag_audio(
@@ -436,8 +437,9 @@ def tag_audio(
     """Write the track into its own file: tags and cover art, no re-encode.
 
     ``True`` when the file now carries Spotify's own title, artists, album and
-    year (ID3v2 for MP3, Vorbis comments for FLAC) plus the cover as an attached
-    picture — with the audio streams copied untouched. ``False`` — never a raise
+    year (ID3v2.3 for MP3, native atoms for M4A, Vorbis comments for FLAC) plus
+    the cover as an attached picture — with the audio streams copied untouched.
+    ``False`` — never a raise
     — when there is nothing safe to do (no ffmpeg, a container this does not
     tag, a tag run that failed): the download is still the download, and the
     upload path treats a ``False`` as "send it as it arrived".

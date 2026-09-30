@@ -1,11 +1,12 @@
-"""Spotify is audio, genuinely: MP3 and FLAC only, tagged as the song.
+"""Spotify is audio, genuinely: MP3-320 HQ and the untouched original, tagged as the song.
 
 The mapped YouTube stand-in could produce anything, but the song the user asked
-for is an audio file — never a video rung, never a dummy row. And the file that
-arrives must *be* the song: Spotify's own title, artists, album and cover are
-written into the audio (ID3/Vorbis via ffmpeg, no re-encode) and ride the
-``send_audio`` call, instead of a YouTube-fallback filename with a stranger's
-thumbnail.
+for is an audio file — never a video rung, never a dummy row, and never a fake
+FLAC (a lossless container around lossy audio is a bigger file, not better
+sound). And the file that arrives must *be* the song: Spotify's own title,
+artists, album and cover are written into the audio (ID3/atoms/Vorbis via
+ffmpeg, no re-encode) and ride the ``send_audio`` call, instead of a
+YouTube-fallback filename with a stranger's thumbnail.
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ def _buttons(markup: Any) -> list[tuple[str, str]]:
 
 
 def test_a_spotify_track_is_offered_clean_audio_formats_only() -> None:
-    assert content.routing_for(SPOTIFY_URL).audio_formats == ("mp3", "flac")
+    assert content.routing_for(SPOTIFY_URL).audio_formats == ("mp3",)
 
 
 def test_the_spotify_question_has_no_video_or_dummy_rows() -> None:
@@ -67,12 +68,11 @@ def test_the_spotify_question_has_no_video_or_dummy_rows() -> None:
     keyboard = user_module._question_keyboard(SPOTIFY_URL, "en", capability=capability)
     callbacks = [data for _label, data in _buttons(keyboard)]
 
-    assert "audf:mp3" in callbacks, "MP3 keeps its quality presets"
-    assert "fmt:audio:flac" in callbacks, "FLAC is its own answer"
+    assert "fmt:audio:mp3.best" in callbacks, "the HQ transcode is its own row"
+    assert "fmt:audio:best" in callbacks, "the untouched original is its own row"
+    assert "fmt:audio:flac" not in callbacks, "no fake FLAC"
+    assert not [data for data in callbacks if data.startswith("audf:")], "no preset grid"
     assert not [data for data in callbacks if data.startswith("fmt:video:")], "no video rungs"
-    assert "audf:m4a" not in callbacks
-    assert "audf:opus" not in callbacks
-    assert "audf:wav" not in callbacks
     assert "fmt:audio:wav" not in callbacks
 
 
@@ -87,12 +87,13 @@ def test_an_ordinary_audio_link_keeps_its_full_grid() -> None:
 
 
 def test_a_crafted_non_spotify_codec_is_refused_on_a_track() -> None:
-    data = {"audio_offered": ["mp3", "flac"], "copy_ok": False}
+    data = {"audio_offered": ["mp3"], "copy_ok": False}
 
     assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "opus.balanced", data) is False
     assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "m4a.balanced", data) is False
+    assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "flac", data) is False
     assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "mp3.best", data) is True
-    assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "flac", data) is True
+    assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "best", data) is True
 
 
 # ---------------------------------------------------------------------------
