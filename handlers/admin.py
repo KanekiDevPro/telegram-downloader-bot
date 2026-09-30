@@ -543,11 +543,12 @@ _PANEL_SCREENS: frozenset[str] = frozenset(
         "sources",
         "platforms",
         "looks",
-        # …and the six category submenus themselves.
+        # …and the seven category submenus themselves.
         "cat_users",
         "cat_downloads",
         "cat_sources",
         "cat_messages",
+        "cat_appearance",
         "cat_system",
         "cat_diagnostics",
     }
@@ -570,20 +571,21 @@ _SCREEN_PARENT: dict[str, str] = {
     "users": "cat_users",
     "groups": "cat_users",
     "broadcast": "cat_messages",
-    "texts": "cat_messages",
+    "texts": "cat_appearance",
     "blocks": "cat_diagnostics",
     "system": "cat_system",
     "settings": "cat_system",
     "sources": "cat_sources",
-    "platforms": "cat_downloads",
-    "looks": "cat_system",
+    "platforms": "cat_appearance",
+    "looks": "cat_appearance",
 }
-#: The hub's six categories, in hub order: id → its label key.
+#: The hub's seven categories, in hub order: id → its label key.
 _CATEGORY_LABELS: dict[str, str] = {
     "cat_users": "admin.cat_users",
     "cat_downloads": "admin.cat_downloads",
     "cat_sources": "admin.cat_sources",
     "cat_messages": "admin.cat_messages",
+    "cat_appearance": "admin.cat_appearance",
     "cat_system": "admin.cat_system",
     "cat_diagnostics": "admin.cat_diagnostics",
 }
@@ -605,23 +607,23 @@ _CATEGORY_ITEMS: dict[str, tuple[tuple[str, str], ...]] = {
         ("admin.btn_users", "admin:users"),
         ("admin.btn_groups", "admin:groups"),
     ),
-    "cat_downloads": (
-        ("admin.btn_stats", "admin:stats"),
-        ("admin.btn_platforms", "admin:platforms"),
-    ),
+    "cat_downloads": (("admin.btn_stats", "admin:stats"),),
     "cat_sources": (
         ("admin.btn_doctor", DOCTOR_CALLBACK),
         ("admin.btn_refresh", REFRESH_CALLBACK),
         ("admin.btn_sources", "admin:sources"),
     ),
-    "cat_messages": (
+    "cat_messages": (("admin.btn_broadcast", "admin:broadcast"),),
+    # Every aesthetic and copywriting control in one place: the bot's words,
+    # its button styles and its platform switches — each with exactly one home.
+    "cat_appearance": (
         ("admin.btn_texts", "admin:texts"),
-        ("admin.btn_broadcast", "admin:broadcast"),
+        ("admin.btn_looks", "admin:looks"),
+        ("admin.btn_platforms", "admin:platforms"),
     ),
     "cat_system": (
         ("admin.btn_system", "admin:system"),
         ("admin.btn_settings", "admin:settings"),
-        ("admin.btn_looks", "admin:looks"),
         ("admin.btn_backup", BK_BACKUP),
         ("admin.btn_restore", BK_RESTORE),
     ),
@@ -655,7 +657,7 @@ PLATFORM_MARK_OFF = "❌"
 
 
 def _panel_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """The dashboard hub: six categories in pairs, then the way to the user menu.
+    """The dashboard hub: seven categories in pairs, then the way to the user menu.
 
     Categories, not one giant list — every action lives one screen deep inside
     its category (users with groups, the editable texts with the broadcast, the

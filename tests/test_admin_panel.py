@@ -302,11 +302,12 @@ async def test_every_screen_renders_for_an_admin(
         "settings",
         "texts",
         "sources",
-        # …the six category submenus:
+        # …the seven category submenus:
         "cat_users",
         "cat_downloads",
         "cat_sources",
         "cat_messages",
+        "cat_appearance",
         "cat_system",
         "cat_diagnostics",
         # …and the names an older keyboard still carries:
@@ -482,8 +483,8 @@ def test_every_panel_button_has_somewhere_to_go() -> None:
     assert missing == [], missing
 
 
-def test_the_hub_is_six_categories_and_leaves_to_the_user_menu() -> None:
-    """The dashboard's map, pinned: six categories in pairs, and the one ⬅️ that
+def test_the_hub_is_seven_categories_and_leaves_to_the_user_menu() -> None:
+    """The dashboard's map, pinned: seven categories in pairs, and the one ⬅️ that
     leaves the panel for the user menu every admin also has. The two retired
     buttons (failure trends, recent failures) are gone — their views live on in
     the diagnostics digest."""
@@ -494,6 +495,7 @@ def test_the_hub_is_six_categories_and_leaves_to_the_user_menu() -> None:
         "📥 Downloads and media": "admin:cat_downloads",
         "🌐 Sources and extractors": "admin:cat_sources",
         "✉️ Messages and localization": "admin:cat_messages",
+        "🎨 Appearance &amp; customization": "admin:cat_appearance",
         "🖥 System and configuration": "admin:cat_system",
         "🛠 Diagnostics and maintenance": "admin:cat_diagnostics",
         "⬅️ Back": "menu:home",

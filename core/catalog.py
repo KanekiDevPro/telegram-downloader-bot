@@ -1059,6 +1059,10 @@ MESSAGES: Final[Catalog] = {
         "en": "\u2709\ufe0f Messages and localization",
         "fa": "\u2709\ufe0f پیام‌ها و زبان",
     },
+    "admin.cat_appearance": {
+        "en": "🎨 Appearance &amp; customization",
+        "fa": "🎨 ظاهر، استایل و متون",
+    },
     "admin.cat_system": {
         "en": "🖥 System and configuration",
         "fa": "🖥 سیستم و پیکربندی",
@@ -1068,7 +1072,7 @@ MESSAGES: Final[Catalog] = {
         "fa": "🛠 عیب‌یابی و نگهداری",
     },
     "admin.btn_home": {"en": "🏠 Home", "fa": "🏠 خانه"},
-    "admin.btn_texts": {"en": "📝 Bot texts", "fa": "📝 متن‌های ربات"},
+    "admin.btn_texts": {"en": "🔤 Bot texts &amp; messages", "fa": "🔤 ویرایش متون و پیام‌ها"},
     "admin.btn_sources": {"en": "🌐 Sources status", "fa": "🌐 وضعیت منابع"},
     "admin.texts_reason_locked": {
         "en": "that text is internal or operator-facing and cannot be edited",
@@ -1316,7 +1320,7 @@ MESSAGES: Final[Catalog] = {
     },
     # The Download screen's four switches: what the picker offers is an operator's
     # decision, and the screen says which sections are open right now.
-    "admin.btn_platforms": {"en": "🎛 Platform buttons", "fa": "🎛 دکمه‌های پلتفرم"},
+    "admin.btn_platforms": {"en": "🎛 Platform toggles", "fa": "🎛 کلیدهای فعال پلتفرم‌ها"},
     "admin.platforms_intro": {
         "en": (
             "🎛 <b>Platform buttons</b>\n"
@@ -1326,7 +1330,7 @@ MESSAGES: Final[Catalog] = {
             "answer — the switch is real, not cosmetic.\n"
             "\n"
             "The labels and the intro above the buttons are yours to reword under "
-            "<b>Messages &amp; localization → Bot texts</b> (category «Download»).\n"
+            "<b>Appearance &amp; customization → Bot texts</b> (category «Download»).\n"
             "\n"
             "Open right now: <b>{on}</b> of {total}"
         ),
@@ -1338,7 +1342,7 @@ MESSAGES: Final[Catalog] = {
             "با یک پیام صادقانه رد می‌کند — این کلید واقعی است، نه نمایشی.\n"
             "\n"
             "برچسب‌ها و متن بالای دکمه‌ها را خودت می‌توانی عوض کنی: "
-            "<b>پیام‌ها و زبان‌ها → متن‌های ربات</b> (دستهٔ «دانلود»).\n"
+            "<b>ظاهر، استایل و متون → ویرایش متون و پیام‌ها</b> (دستهٔ «دانلود»).\n"
             "\n"
             "الان باز: <b>{on}</b> از {total}"
         ),
@@ -1348,7 +1352,7 @@ MESSAGES: Final[Catalog] = {
     "admin.platform_state_off": {"en": "closed", "fa": "بسته"},
     # The main buttons' colours and custom emoji: Telegram's own two decoration
     # fields on an inline button (Bot API ``style`` and ``icon_custom_emoji_id``).
-    "admin.btn_looks": {"en": "🎨 Button style", "fa": "🎨 رنگ و آیکن دکمه‌ها"},
+    "admin.btn_looks": {"en": "🎨 Button styles", "fa": "🎨 رنگ و استایل دکمه‌ها"},
     "admin.looks_intro": {
         "en": (
             "🎨 <b>Button style</b>\n"
