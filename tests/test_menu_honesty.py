@@ -178,6 +178,9 @@ def _quiet_costs(monkeypatch: pytest.MonkeyPatch) -> None:
     async def get_daily_usage(pool: Any, telegram_id: int) -> dict[str, Any]:
         return {"daily_downloads": 0, "last_download_date": ""}
 
+    async def get_wallet_balance(pool: Any, telegram_id: int) -> int:
+        return 0
+
     async def no_cache(pool: Any, url: str, *args: Any) -> None:
         return None
 
@@ -185,6 +188,7 @@ def _quiet_costs(monkeypatch: pytest.MonkeyPatch) -> None:
         return True
 
     monkeypatch.setattr(user_module.database, "get_daily_usage", get_daily_usage)
+    monkeypatch.setattr(user_module.database, "get_wallet_balance", get_wallet_balance)
     monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
     monkeypatch.setattr(user_module, "_probe_supported", supported)
     monkeypatch.setattr(user_module, "preflight", _NoRefusal())

@@ -51,6 +51,11 @@ CREATE TABLE IF NOT EXISTS users (
 -- English, which is the product's default anyway.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT NOT NULL DEFAULT 'en';
 
+-- The internal wallet:top-up credit in the smallest currency unit, spent with
+-- ``debit_wallet`` (one guarded UPDATE, so two concurrent taps cannot oversell
+-- it). Existing rows read as empty, which is what they are.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_balance BIGINT NOT NULL DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS subscription_plans (
     id            SERIAL PRIMARY KEY,
     name          TEXT NOT NULL,
@@ -501,6 +506,71 @@ async def decide_transaction(
                     row["duration_days"],
                 )
             return outcome
+
+
+# ---------------------------------------------------------------------------
+# wallet
+# ---------------------------------------------------------------------------
+
+async def get_wallet_balance(pool: asyncpg.Pool, telegram_id: int) -> int:
+    """The user's internal wallet balance (0 for strangers and empty wallets)."""
+    row = await pool.fetchrow(
+        "SELECT wallet_balance FROM users WHERE telegram_id = $1",
+        telegram_id,
+    )
+    return int(row["wallet_balance"] or 0) if row is not None else 0
+
+
+async def add_wallet_credit(pool: asyncpg.Pool, telegram_id: int, amount: int) -> int:
+    """Top the wallet up by ``amount``; returns the new balance."""
+    row = await pool.fetchrow(
+        """
+        UPDATE users
+           SET wallet_balance = wallet_balance + $2
+         WHERE telegram_id = $1
+        RETURNING wallet_balance
+        """,
+        telegram_id,
+        int(amount),
+    )
+    return int(row["wallet_balance"]) if row is not None else 0
+
+
+async def debit_wallet(
+    pool: asyncpg.Pool, telegram_id: int, amount: int
+) -> Optional[int]:
+    """Spend ``amount`` from the wallet; the new balance, or ``None`` when short.
+
+    One guarded UPDATE: the funds check lives in the statement, so two
+    concurrent taps cannot both spend the same credit.
+    """
+    row = await pool.fetchrow(
+        """
+        UPDATE users
+           SET wallet_balance = wallet_balance - $2
+         WHERE telegram_id = $1
+           AND wallet_balance >= $2
+        RETURNING wallet_balance
+        """,
+        telegram_id,
+        int(amount),
+    )
+    return int(row["wallet_balance"]) if row is not None else None
+
+
+async def grant_premium(pool: asyncpg.Pool, telegram_id: int, duration_days: int) -> None:
+    """Activate/extend premium by ``duration_days`` (a wallet purchase's grant)."""
+    await pool.execute(
+        """
+        UPDATE users
+           SET is_premium = TRUE,
+               premium_until = GREATEST(COALESCE(premium_until, now()), now())
+                               + make_interval(days => $2)
+         WHERE telegram_id = $1
+        """,
+        telegram_id,
+        int(duration_days),
+    )
 
 
 # ---------------------------------------------------------------------------

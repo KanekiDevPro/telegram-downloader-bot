@@ -168,12 +168,16 @@ def _cost(monkeypatch: pytest.MonkeyPatch) -> None:
     async def get_daily_usage(pool: Any, telegram_id: int) -> dict[str, Any]:
         return {"daily_downloads": 0, "last_download_date": None}
 
+    async def get_wallet_balance(pool: Any, telegram_id: int) -> int:
+        return 0
+
     def clean_settings() -> Settings:
         return Settings(  # type: ignore[call-arg]
             _env_file=None, COBALT_API_URL="", COOKIE_FILE=None
         )
 
     monkeypatch.setattr(user_module.database, "get_daily_usage", get_daily_usage)
+    monkeypatch.setattr(user_module.database, "get_wallet_balance", get_wallet_balance)
     monkeypatch.setattr(user_module, "get_settings", clean_settings)
 
 

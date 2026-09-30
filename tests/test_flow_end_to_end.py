@@ -299,11 +299,15 @@ def _quiet_edges(monkeypatch: pytest.MonkeyPatch) -> None:
     async def get_daily_usage(pool: Any, telegram_id: int) -> dict[str, Any]:
         return {"daily_downloads": 3, "last_download_date": None}
 
+    async def get_wallet_balance(pool: Any, telegram_id: int) -> int:
+        return 0
+
     def clean_settings() -> Settings:
         return Settings(_env_file=None)  # type: ignore[call-arg]
 
     monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
     monkeypatch.setattr(user_module.database, "get_daily_usage", get_daily_usage)
+    monkeypatch.setattr(user_module.database, "get_wallet_balance", get_wallet_balance)
     monkeypatch.setattr(user_module, "get_settings", clean_settings)
     monkeypatch.setattr(subscription_module, "get_settings", clean_settings)
     monkeypatch.setattr(user_module, "preflight", _NoRefusal())

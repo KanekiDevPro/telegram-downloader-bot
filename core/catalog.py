@@ -79,6 +79,7 @@ MESSAGES: Final[Catalog] = {
     "menu.download": {"en": "📥 Downloads", "fa": "📥 دانلودها"},
     # The one menu button an operator fills in: its target lives in the database.
     "menu.support": {"en": "ℹ️ Help and support", "fa": "ℹ️ راهنما و پشتیبانی"},
+    "menu.topup": {"en": "💳 Top up wallet", "fa": "💳 شارژ کیف پول"},
     "menu.add_group": {"en": "👥 Add to a group", "fa": "👥 افزودن به گروه"},
     # Drawn only for ids in ADMIN_IDS: the panel is not a hidden feature, it is just
     # not a user's business.
@@ -157,6 +158,10 @@ MESSAGES: Final[Catalog] = {
     },
     "profile.queue": {"en": "🕒 Jobs in queue: {depth}", "fa": "🕒 کارهای در صف: {depth}"},
     "profile.language": {"en": "🌐 Language: {language}", "fa": "🌐 زبان: {language}"},
+    "profile.wallet": {
+        "en": "💳 Wallet: {balance} {currency}",
+        "fa": "💳 کیف پول: {balance} {currency}",
+    },
 
     # ---------------------------------------------------------------------
     # Premium pitch
@@ -815,6 +820,50 @@ MESSAGES: Final[Catalog] = {
     "pay.declined_user": {
         "en": "❌ Your payment was rejected. If you think that is wrong, contact support.",
         "fa": "❌ پرداختت رد شد. اگه فکر می‌کنی اشتباهه با پشتیبانی در ارتباط باش.",
+    },
+    "pay.pay_with_wallet": {
+        "en": "💳 Pay with wallet balance",
+        "fa": "💳 خرید با موجودی کیف پول",
+    },
+    "pay.wallet_paid": {
+        "en": (
+            "✅ Paid {price} {currency} from your wallet. "
+            "New balance: {balance} {currency}. VIP is active! 🚀"
+        ),
+        "fa": (
+            "✅ مبلغ {price} {currency} از کیف پولت پرداخت شد. "
+            "موجودی جدید: {balance} {currency}. اشتراک ویژه فعال شد! 🚀"
+        ),
+    },
+    "pay.wallet_short": {
+        "en": "⚠️ Your wallet balance ({balance} {currency}) does not cover this plan ({price} {currency}).",
+        "fa": "⚠️ موجودی کیف پولت ({balance} {currency}) برای این پلن ({price} {currency}) کافی نیست.",
+    },
+    "pay.topup_title": {
+        "en": (
+            "💳 <b>Wallet top-up</b>\n"
+            "\n"
+            "Balance: <b>{balance} {currency}</b>\n"
+            "\n"
+            "{how}"
+        ),
+        "fa": (
+            "💳 <b>شارژ کیف پول</b>\n"
+            "\n"
+            "موجودی: <b>{balance} {currency}</b>\n"
+            "\n"
+            "{how}"
+        ),
+    },
+    "pay.topup_how": {
+        "en": (
+            "To top up, transfer to the card in /subscribe and send the receipt — "
+            "an admin credits your wallet."
+        ),
+        "fa": (
+            "برای شارژ، به کارتی که در /subscribe می‌بینی واریز کن و رسید رو بفرست — "
+            "ادمین کیف پولت رو شارژ می‌کنه."
+        ),
     },
 
     # ---------------------------------------------------------------------

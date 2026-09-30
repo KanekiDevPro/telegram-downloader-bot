@@ -527,16 +527,17 @@ def _language_keyboard(
 def _profile_keyboard(
     lang: str, *, admin: bool = False, looks: ui.Looks | None = None
 ) -> InlineKeyboardMarkup:
-    """Profile's own actions: VIP (not for an admin), support, back.
+    """Profile's own actions: VIP (not for an admin), wallet top-up, back.
 
     Two per row: the shortcuts read as one small panel instead of a column every
     one of which needs a scroll to reach. The order is the reading order — VIP
-    and the support contact on the first row, the way back under them (an admin
-    loses the VIP button, and support and back then share the row). Premium is
-    the same button the menu used to carry — moved, not removed. The language
-    switch deliberately left: it is a *fix*, and a wrong language is noticed at
-    Home, so Home draws it (old keyboards that still carry «profile:language»
-    keep working — ``on_profile_language`` is still routed).
+    and the wallet top-up on the first row, the way back under them (an admin
+    loses the VIP button, and top-up and back then share the row). Premium is
+    the same button the menu used to carry — moved, not removed. Support lives
+    on Home alone now: it was a duplicate route here. The language switch
+    deliberately left: it is a *fix*, and a wrong language is noticed at Home,
+    so Home draws it (old keyboards that still carry «profile:language» keep
+    working — ``on_profile_language`` is still routed).
     """
     builder = InlineKeyboardBuilder()
     if not admin:
@@ -548,11 +549,11 @@ def _profile_keyboard(
             style=style,
             icon_custom_emoji_id=emoji,
         )
-    style, emoji = ui.look_for(looks, "menu:support")
+    style, emoji = ui.look_for(looks, "menu:topup")
     ui.add_button(
         builder,
-        t("menu.support", lang),
-        callback_data="menu:support",
+        t("menu.topup", lang),
+        callback_data="menu:topup",
         style=style,
         icon_custom_emoji_id=emoji,
     )
@@ -944,6 +945,38 @@ async def on_menu_support(
     await _edit_or_reply(message, text, reply_markup=_back_to_menu(lang))
 
 
+@router.callback_query(F.data == "menu:topup")
+async def on_menu_topup(
+    cb: CallbackQuery,
+    user: asyncpg.Record,
+    pool: asyncpg.Pool,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """The wallet top-up: the balance, and how to fill it.
+
+    Topping up stays manual (card transfer + receipt, credited by an admin) —
+    this screen names the balance and the one route to grow it, and hands back
+    to the profile it was opened from.
+    """
+    message = callback_message(cb)
+    if message is None:
+        await cb.answer(t("intake.stale", lang), show_alert=True)
+        return
+    await cb.answer()
+    balance = await database.get_wallet_balance(pool, user["telegram_id"])
+    await _edit_or_reply(
+        message,
+        t(
+            "pay.topup_title",
+            lang,
+            balance=f"{balance:,}",
+            currency=t("pay.currency", lang),
+            how=t("pay.topup_how", lang),
+        ),
+        reply_markup=_back_to_menu(lang, to="menu:profile"),
+    )
+
+
 @router.message(Command("support"))
 async def cmd_support(
     message: Message,
@@ -1186,6 +1219,7 @@ async def _profile_text(
     )
     depth = await queue.depth() if queue is not None else 0
     username = f"@{user['username']}" if user["username"] else "—"
+    balance = await database.get_wallet_balance(pool, user["telegram_id"])
     return "\n".join(
         (
             t("profile.title", lang),
@@ -1193,6 +1227,12 @@ async def _profile_text(
             t("profile.id", lang, telegram_id=user["telegram_id"]),
             t("profile.username", lang, username=escape_html(username)),
             t("profile.status", lang, status=_status_line(user, lang)),
+            t(
+                "profile.wallet",
+                lang,
+                balance=f"{balance:,}",
+                currency=t("pay.currency", lang),
+            ),
             _quota_line(user, lang, used),
             t("profile.queue", lang, depth=depth),
             t("profile.language", lang, language=lang_button(lang)),

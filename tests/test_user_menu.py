@@ -197,10 +197,14 @@ def _quiet_cost(monkeypatch: pytest.MonkeyPatch) -> None:
     async def get_daily_usage(pool: Any, telegram_id: int) -> dict[str, Any]:
         return {"daily_downloads": 3, "last_download_date": today}
 
+    async def get_wallet_balance(pool: Any, telegram_id: int) -> int:
+        return 0
+
     def clean_settings() -> Settings:
         return Settings(_env_file=None)  # type: ignore[call-arg]
 
     monkeypatch.setattr(user_module.database, "get_daily_usage", get_daily_usage)
+    monkeypatch.setattr(user_module.database, "get_wallet_balance", get_wallet_balance)
     monkeypatch.setattr(user_module, "get_settings", clean_settings)
     monkeypatch.setattr(subscription_module, "get_settings", clean_settings)
 
@@ -285,7 +289,7 @@ def test_an_admins_profile_does_not_offer_the_store_either() -> None:
     assert "menu:premium" not in offered.values()
     assert dict(_buttons(user_module._profile_keyboard(FA))) == {
         "💎 ارتقا به ویژه (VIP)": "menu:premium",
-        "ℹ️ راهنما و پشتیبانی": "menu:support",
+        "💳 شارژ کیف پول": "menu:topup",
         "⬅️ بازگشت": "menu:home",
     }
     assert "menu:language" not in offered.values(), "the switch lives on Home"
@@ -339,7 +343,8 @@ def test_the_language_and_support_buttons_live_on_home_now() -> None:
 
     profile = dict(_buttons(user_module._profile_keyboard(FA)))
 
-    assert profile["ℹ️ راهنما و پشتیبانی"] == "menu:support"
+    assert profile["💳 شارژ کیف پول"] == "menu:topup"
+    assert "menu:support" not in profile.values(), "support lives on Home alone now"
     assert "menu:language" not in profile.values()
     assert "profile:language" not in profile.values(), "no second language route"
 
@@ -598,10 +603,10 @@ async def test_the_profile_shows_id_username_status_and_quota() -> None:
     assert "سهمیهٔ امروز: 3 از 10" in text and "7 باقی مانده" in text
     assert "کارهای در صف: 2" in text
     assert "🇮🇷 فارسی" in text, "the language row still names the account's language"
-    # The screen owns its account actions: VIP and support, two per row.
+    # The screen owns its account actions: VIP and the wallet top-up, two per row.
     assert dict(_buttons(bot.keyboards[-1])) == {
         "💎 ارتقا به ویژه (VIP)": "menu:premium",
-        "ℹ️ راهنما و پشتیبانی": "menu:support",
+        "💳 شارژ کیف پول": "menu:topup",
         "⬅️ بازگشت": "menu:home",
     }
 
@@ -2067,7 +2072,7 @@ async def test_an_audio_menu_is_refused_on_a_link_that_has_none() -> None:
 
 async def test_entering_a_screen_replaces_the_whole_keyboard() -> None:
     """The navigation promise, pinned: a screen swap carries *only* that screen's
-    controls — Profile keeps VIP/Support/Back and nothing from Home survives."""
+    controls — Profile keeps VIP/Top-up/Back and nothing from Home survives."""
     bot = RecordingBot()
 
     await user_module.on_menu_profile(
@@ -2076,7 +2081,7 @@ async def test_entering_a_screen_replaces_the_whole_keyboard() -> None:
 
     assert dict(_buttons(bot.keyboards[-1])) == {
         "💎 ارتقا به ویژه (VIP)": "menu:premium",
-        "ℹ️ راهنما و پشتیبانی": "menu:support",
+        "💳 شارژ کیف پول": "menu:topup",
         "⬅️ بازگشت": "menu:home",
     }
     assert bot.texts == [], "the same message, edited"

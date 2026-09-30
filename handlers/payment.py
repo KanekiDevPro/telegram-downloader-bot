@@ -159,18 +159,102 @@ async def on_plan_selected(
             plan = plan_row
 
     settings = get_settings()
+    price = int(txn["amount"])
+    keyboard = await _pay_options_keyboard(pool, user, plan, price, lang)
     await message.answer(
         t(
             "pay.card_title",
             lang,
             plan=escape_html(plan_name(plan["name"], lang)),
-            price=f"{int(txn['amount']):,}",
+            price=f"{price:,}",
             currency=t("pay.currency", lang),
             holder=escape_html(settings.manual_card_holder or "—"),
             card=escape_html(settings.manual_card_number or "—"),
-        )
+        ),
+        reply_markup=keyboard,
     )
     await cb.answer()
+
+
+async def _pay_options_keyboard(
+    pool: asyncpg.Pool,
+    user: asyncpg.Record,
+    plan: asyncpg.Record,
+    price: int,
+    lang: str,
+) -> InlineKeyboardMarkup | None:
+    """The card's keyboard: the wallet tap, when the wallet covers the plan.
+
+    The wallet is an *explicit* option, never a default: a buyer who would
+    rather keep the credit still has the receipt route (the card text), and a
+    short wallet is simply not offered a tap that could only refuse it.
+    """
+    balance = await database.get_wallet_balance(pool, user["telegram_id"])
+    if balance < price:
+        return None
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=t("pay.pay_with_wallet", lang),
+        callback_data=f"pay_wallet:{plan['id']}",
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+@router.callback_query(F.data.startswith("pay_wallet:"))
+async def on_pay_with_wallet(
+    cb: CallbackQuery,
+    pool: asyncpg.Pool,
+    user: asyncpg.Record,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """Buy the plan with the internal wallet: one guarded debit, then the grant.
+
+    The debit is atomic (``debit_wallet`` refuses a short wallet itself), so a
+    balance that shrank between the card and the tap lands on the honest refusal
+    instead of a negative wallet — and a debited wallet is always followed by
+    its grant on this same path.
+    """
+    message = callback_message(cb)
+    if message is None:
+        await cb.answer(t("pay.stale", lang), show_alert=True)
+        return
+    try:
+        plan_id = int((cb.data or "").split(":", 1)[1])
+    except (ValueError, IndexError):
+        await cb.answer(t("pay.plan_invalid", lang), show_alert=True)
+        return
+    plan = await database.get_plan(pool, plan_id)
+    if plan is None:
+        await cb.answer(t("pay.plan_missing", lang), show_alert=True)
+        return
+    price = int(plan["price"])
+    telegram_id = user["telegram_id"]
+    new_balance = await database.debit_wallet(pool, telegram_id, price)
+    if new_balance is None:
+        balance = await database.get_wallet_balance(pool, telegram_id)
+        await cb.answer(
+            t(
+                "pay.wallet_short",
+                lang,
+                balance=f"{balance:,}",
+                price=f"{price:,}",
+                currency=t("pay.currency", lang),
+            ),
+            show_alert=True,
+        )
+        return
+    await database.grant_premium(pool, telegram_id, int(plan["duration_days"]))
+    await cb.answer()
+    await message.answer(
+        t(
+            "pay.wallet_paid",
+            lang,
+            price=f"{price:,}",
+            balance=f"{new_balance:,}",
+            currency=t("pay.currency", lang),
+        )
+    )
 
 
 @router.message(PaymentStates.waiting_receipt, F.photo)
