@@ -39,6 +39,7 @@ import yt_dlp  # noqa: E402
 from core.config import get_settings  # noqa: E402
 from core.logging import force_utf8_console  # noqa: E402
 from services.extractor import ExtractorService  # noqa: E402
+from services.telemetry import safe_mbps  # noqa: E402
 
 DEFAULT_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
@@ -114,6 +115,8 @@ def _run_once(url: str, quality: str, fragments: int, workdir: Path) -> dict[str
         "postprocess_s": round(post_s, 1),
         "avg_mbps": round(size / download_s / 1e6, 2) if download_s > 0 and size else 0.0,
         "peak_mbps": round(peak / 1e6, 2),
+        "avg_megabits": safe_mbps(size, download_s),
+        "peak_megabits": safe_mbps(int(peak), 1.0) if peak > 0 else 0.0,
         "hook_errors": errors,
     }
 

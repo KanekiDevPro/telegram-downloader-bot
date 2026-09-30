@@ -10,7 +10,10 @@ what this keeps, in a table the operator can also query by hand.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, tzinfo
@@ -575,3 +578,180 @@ async def _stamp(pool: asyncpg.Pool, key: str, now: datetime) -> None:
         await database.set_state(pool, key, now.isoformat())
     except Exception:
         logger.exception("could not record when %s was sent", key)
+
+
+# ---------------------------------------------------------------------------
+# Download-stage telemetry (Track B): where the time goes, per completed job.
+# ---------------------------------------------------------------------------
+#
+# One lightweight record per completed job — monotonic timestamps taken at the
+# stage boundaries the worker already owns, byte counts from files already
+# stat'ed, speeds derived only when both exist (else ``None``, never a guess).
+# Identity is a SHA-256 prefix of the URL, never the URL: no tokens, cookies,
+# headers or signed query strings can reach the log through it. Emitting never
+# raises, so a telemetry blip can never fail, retry or cancel a download.
+
+
+@dataclass
+class JobTimings:
+    """Monotonic stage boundaries for one job attempt (seconds, ``time.monotonic``).
+
+    ``received_at`` is the gateway's enqueue wall time (``time.time``) when the
+    task carried one — kept for correlation, never mixed into durations.
+    ``started_at`` is the worker's own monotonic start and anchors ``total_ms``
+    (wall and monotonic clocks must never meet in one subtraction).
+    ``completed_at`` is a monotonic stamp like the rest; unset stages stay
+    ``None`` and read back as ``None`` metrics, never zeroes.
+    """
+
+    received_at: float = 0.0
+    started_at: float | None = None
+    probe_started_at: float | None = None
+    probe_finished_at: float | None = None
+    download_started_at: float | None = None
+    download_finished_at: float | None = None
+    processing_started_at: float | None = None
+    processing_finished_at: float | None = None
+    upload_started_at: float | None = None
+    upload_finished_at: float | None = None
+    completed_at: float | None = None
+    download_bytes: int | None = None
+    upload_bytes: int | None = None
+    cache_hit: bool = False
+
+
+def new_timings(received_at: float = 0.0) -> JobTimings:
+    """A fresh timing record, anchored at the gateway enqueue time when known."""
+    try:
+        anchor = float(received_at)
+    except (TypeError, ValueError):
+        anchor = 0.0
+    return JobTimings(received_at=anchor)
+
+
+def _as_seconds(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _span_s(start: object, end: object) -> float | None:
+    """Seconds between two stamps — ``None`` when unmeasurable."""
+    first, last = _as_seconds(start), _as_seconds(end)
+    if first is None or last is None or last < first:
+        return None
+    return last - first
+
+
+def stage_ms(start: object, end: object) -> float | None:
+    """Milliseconds between two stamps — ``None`` when unmeasurable.
+
+    Missing, non-numeric or backwards stamps read as ``None`` (a clock that
+    ran backwards measured nothing); an instant stage is honestly ``0.0``.
+    """
+    span = _span_s(start, end)
+    return span * 1000.0 if span is not None else None
+
+
+def safe_mbps(byte_count: object, seconds: object) -> float | None:
+    """Megabits per second — ``None`` when bytes or time are unavailable.
+
+    A zero-byte delivery over a real window is honestly ``0.0``; a missing or
+    non-positive window measured no speed at all.
+    """
+    if isinstance(byte_count, bool) or not isinstance(byte_count, (int, float)):
+        return None
+    window = _as_seconds(seconds)
+    if window is None or window <= 0 or byte_count < 0:
+        return None
+    return byte_count * 8.0 / 1_000_000.0 / window
+
+
+def _safe_bytes(value: object) -> int | None:
+    """A byte count worth reporting — ``None`` for anything else."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def url_digest(url: object) -> str:
+    """The log-safe identity of a URL: SHA-256, first 16 hex chars.
+
+    Stable per URL (one job's stages join on it), one-way, and free of query
+    strings, signatures and tokens by construction. Non-strings digest to ``""``.
+    """
+    if not isinstance(url, str) or not url:
+        return ""
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+
+def download_metrics_record(
+    *,
+    platform: str,
+    url_hash: str,
+    timings: JobTimings | None,
+    ok: bool,
+    error_code: str = "",
+) -> dict[str, object]:
+    """One structured diagnostic record for a completed job — safe keys only.
+
+    Never raises: hostile timing values degrade to ``None`` metrics, never to
+    an exception in the download path.
+    """
+    try:
+        t = timings if isinstance(timings, JobTimings) else JobTimings()
+        download_s = _span_s(t.download_started_at, t.download_finished_at)
+        upload_s = _span_s(t.upload_started_at, t.upload_finished_at)
+        return {
+            "platform": str(platform or ""),
+            "url_hash": str(url_hash or ""),
+            "ok": bool(ok),
+            "error_code": str(error_code or ""),
+            "cache_hit": bool(t.cache_hit),
+            "probe_ms": stage_ms(t.probe_started_at, t.probe_finished_at),
+            "download_ms": stage_ms(t.download_started_at, t.download_finished_at),
+            "processing_ms": stage_ms(t.processing_started_at, t.processing_finished_at),
+            "upload_ms": stage_ms(t.upload_started_at, t.upload_finished_at),
+            "total_ms": stage_ms(t.started_at, t.completed_at),
+            "download_bytes": _safe_bytes(t.download_bytes),
+            "upload_bytes": _safe_bytes(t.upload_bytes),
+            "download_mbps": safe_mbps(
+                t.download_bytes if isinstance(t.download_bytes, int) else None, download_s
+            ),
+            "upload_mbps": safe_mbps(
+                t.upload_bytes if isinstance(t.upload_bytes, int) else None, upload_s
+            ),
+        }
+    except Exception:
+        logger.debug("could not build the download-metrics record", exc_info=True)
+        return {
+            "platform": "",
+            "url_hash": "",
+            "ok": bool(ok),
+            "error_code": "",
+            "cache_hit": False,
+            "probe_ms": None,
+            "download_ms": None,
+            "processing_ms": None,
+            "upload_ms": None,
+            "total_ms": None,
+            "download_bytes": None,
+            "upload_bytes": None,
+            "download_mbps": None,
+            "upload_mbps": None,
+        }
+
+
+def emit_download_metrics(record: dict[str, object]) -> None:
+    """Log one job's metrics line — and never raise, whatever it is given."""
+    try:
+        logger.info("download_metrics=%s", json.dumps(record, ensure_ascii=False, default=str))
+    except Exception:
+        logger.debug("could not emit the download-metrics record", exc_info=True)
+
+
+def now_monotonic() -> float:
+    """The clock every stage stamp uses (kept here so tests read one place)."""
+    return time.monotonic()

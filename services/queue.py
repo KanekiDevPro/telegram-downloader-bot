@@ -135,6 +135,10 @@ class DownloadTask:
     #: spent (the user got their file). Transient accounting; it rides the
     #: payload only so a requeued job's books survive the hand-back.
     quota_held: bool = False
+    #: Gateway wall time (``time.time``) when the task was enqueued — the
+    #: telemetry anchor for end-to-end totals. ``0.0`` means "unknown" (older
+    #: payloads); stage durations never use it, only the monotonic stamps do.
+    queued_at: float = 0.0
 
     def to_payload(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)

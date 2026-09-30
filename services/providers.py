@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import replace
 from typing import Optional, Protocol, Sequence
 
 from services import spotify
@@ -62,14 +63,63 @@ class ProviderRegistry:
         return tuple(self._providers)
 
     async def candidates(self, identity: TrackIdentity) -> list[AudioCandidate]:
-        """Every provider's scored candidates for this identity, failures aside."""
+        """ISRC-exact matches first, then every provider's metadata candidates.
+
+        The recording id is the strongest identity signal this layer has, so a
+        provider that indexes it answers before any title search runs — and a
+        leg that fails (ISRC or metadata alike) is logged and skipped, never
+        raised through the others. Duplicates keep their ISRC reading.
+        """
         found: list[AudioCandidate] = []
+        if identity.isrc:
+            for name, provider in self._providers.items():
+                try:
+                    found.extend(
+                        _as_isrc_match(candidate)
+                        for candidate in await provider.search_by_isrc(identity.isrc)
+                    )
+                except Exception:
+                    logger.warning(
+                        "audio provider %r failed — skipping it", name, exc_info=True
+                    )
+        seen = {(candidate.provider_name, candidate.provider_track_id) for candidate in found}
         for name, provider in self._providers.items():
             try:
-                found.extend(await provider.search_by_metadata(identity))
+                for candidate in await provider.search_by_metadata(identity):
+                    if (candidate.provider_name, candidate.provider_track_id) in seen:
+                        continue
+                    seen.add((candidate.provider_name, candidate.provider_track_id))
+                    found.append(candidate)
             except Exception:
                 logger.warning("audio provider %r failed — skipping it", name, exc_info=True)
         return found
+
+
+#: The identity confidence an exact ISRC match carries: above any metadata
+#: score (0.99 is the fetched-evidence ceiling in ``score_hit``), below the
+#: platform's own id (1.0). The number says *which recording*, never how good
+#: its bytes are — the engine still ranks audio facts underneath it.
+ISRC_MATCH_CONFIDENCE = 0.98
+
+
+def _as_isrc_match(candidate: AudioCandidate) -> AudioCandidate:
+    """Stamp the exact-recording signal; the audio facts ride through untouched.
+
+    Only the signal changes (method, and a floor under the confidence) — the
+    codec, bitrate, lossless flags and duration stay exactly what the provider
+    reported, so a doubtful file can never dress as a verified one.
+    """
+    if candidate.match_method == "isrc":
+        return candidate
+    try:
+        confidence = float(candidate.match_confidence or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return replace(
+        candidate,
+        match_method="isrc",
+        match_confidence=max(confidence, ISRC_MATCH_CONFIDENCE),
+    )
 
 
 def spotify_track_identity(track: spotify.SpotifyTrack) -> TrackIdentity:

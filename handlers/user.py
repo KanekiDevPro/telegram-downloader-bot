@@ -1594,10 +1594,14 @@ async def _intake_flow(
         return
     mode = await _maybe_auto_unlock(state, user["telegram_id"])
     if not download_mode.is_compatible(mode, url):
-        # Wrong source for the active mode: answered fast, before the delete,
-        # the cache, the resolver and the probe — a rejected link must leave
-        # no queue entry, no cache row and no yt-dlp call behind. The mode is
-        # preserved so the next (correct) link keeps working without reselect.
+        # Wrong source for the active mode: answered fast, before the cache,
+        # the resolver and the probe — a rejected link must leave no queue
+        # entry, no cache row and no yt-dlp call behind. The rejected user
+        # message itself is removed (fire-and-forget courtesy: silent when
+        # Telegram refuses, never blocking, never touching anything else).
+        # The mode is preserved so the next (correct) link keeps working
+        # without reselect.
+        _forget_raw_link(message)
         await message.answer(
             t(download_mode.wrong_source_key(mode), lang), link_preview_options=_NO_PREVIEW
         )
@@ -2787,6 +2791,7 @@ async def _submit(
         chat_title=(getattr(message.chat, "title", "") or ""),
         is_live=is_live,
         size_estimate=size_estimate,
+        queued_at=time.time(),
     )
 
     # 2) Smart cache hit → resend the previous file_id instantly, no re-download.

@@ -43,6 +43,7 @@ from core.utils import (
 )
 from services import cache as cache_service
 from services import (
+    content,
     cookie_refresh,
     download_mode,
     fallback,
@@ -514,6 +515,24 @@ async def process_download_task(
     settings = get_settings()
     lang = task.lang or DEFAULT_LANG
     started = time.monotonic()
+    # Stage telemetry: monotonic stamps at the boundaries this function owns.
+    # One record per completed job, emitted below; never raises, never blocks.
+    timings = telemetry.new_timings(getattr(task, "queued_at", 0.0) or 0.0)
+    timings.started_at = started
+    platform_name = content.platform_for(task.url)
+
+    def _emit_metrics(ok: bool, error_code: str = "") -> None:
+        timings.completed_at = telemetry.now_monotonic()
+        telemetry.emit_download_metrics(
+            telemetry.download_metrics_record(
+                platform=platform_name,
+                url_hash=telemetry.url_digest(task.url),
+                timings=timings,
+                ok=ok,
+                error_code=error_code,
+            )
+        )
+
     if status is None:
         card = _task_card(task, lang)
         status = await _open_status(task, bot, card)
@@ -534,11 +553,15 @@ async def process_download_task(
         # arriving is the whole message, exactly as for a fresh download. Its
         # caption is the same media card, and the row still holds the URL it
         # came from.
+        timings.cache_hit = True
+        timings.upload_started_at = telemetry.now_monotonic()
         if await send_cached_file(
             bot, task.chat_id, cached, caption=replay_caption(cached, lang)
         ):
             # A replay is a delivery too: the file landed, so the status message
             # goes with it (the same rule as the fresh upload below).
+            timings.upload_finished_at = telemetry.now_monotonic()
+            _emit_metrics(True)
             await _retire_status(status, card=card)
             return
         await cache_service.forget(
@@ -552,6 +575,8 @@ async def process_download_task(
     #     on the mapped video, while the cache key stays the link the user sent.
     target_url = task.url
     track: spotify.SpotifyTrack | None = None
+    # The probe window covers identity resolution (Spotify) plus extraction.
+    timings.probe_started_at = telemetry.now_monotonic()
     if spotify.is_spotify_url(task.url):
         # A Spotify link is resolved before it can be fetched (the route is the
         # plumbing's business — see services/spotify.py); while that runs the card
@@ -605,7 +630,10 @@ async def process_download_task(
             target_url=target_url,
             track=track,
         )
+        timings.probe_finished_at = telemetry.now_monotonic()
+        _emit_metrics(True)
         return
+    timings.probe_finished_at = telemetry.now_monotonic()
     probe_s = time.monotonic() - probe_started
     if is_live:
         await _edit(status, _on_card(card, t("work.live", lang)))
@@ -634,6 +662,7 @@ async def process_download_task(
     # 4) Download (threaded + throttled ⏳ edits — the card's one compact state).
     progress = _ProgressEditor(status, lang, card)
     download_started = time.monotonic()
+    timings.download_started_at = download_started
     try:
         async with ActionPulse(bot, task.chat_id):
             result = await extractor.download(
@@ -663,10 +692,22 @@ async def process_download_task(
             target_url=target_url,
             track=track,
         )
+        _emit_metrics(True)
         return
 
+    timings.download_finished_at = telemetry.now_monotonic()
+    try:
+        timings.download_bytes = sum(
+            path.stat().st_size
+            for path in (result.file_path, *result.extra_paths)
+            if path.is_file()
+        )
+    except OSError:
+        timings.download_bytes = None
     download_s = time.monotonic() - download_started
-    upload_s = await _finish_upload(task, bot, pool, status, result, card=card, track=track)
+    upload_s = await _finish_upload(
+        task, bot, pool, status, result, card=card, track=track, timings=timings
+    )
     # The job's bill of time — the evidence any "make it faster" claim owes.
     logger.info(
         "stages probe=%.1fs download=%.1fs upload=%.1fs total=%.1fs | %.60s",
@@ -676,6 +717,7 @@ async def process_download_task(
         time.monotonic() - started,
         task.url,
     )
+    _emit_metrics(True)
     if target_url != task.url:
         # A *mapped* link just went through YouTube anonymously (search and all), so
         # "YouTube refuses anonymous requests here" is no longer true.
@@ -748,6 +790,7 @@ async def _finish_upload(
     *,
     card: str = "",
     track: spotify.SpotifyTrack | None = None,
+    timings: telemetry.JobTimings | None = None,
 ) -> float:
     """Ceiling check, upload, cache the file_id — and always drop the job dir.
 
@@ -762,6 +805,8 @@ async def _finish_upload(
     settings = get_settings()
     lang = task.lang or DEFAULT_LANG
     upload_started = time.monotonic()
+    if timings is not None and timings.processing_started_at is None:
+        timings.processing_started_at = upload_started
     verify_task: asyncio.Task[tuple[str | None, verify.MediaFacts | None]] | None = None
     #: What the delivery probe measured (the inline player's metadata, F2) —
     #: ``None`` when verification was unavailable, which sends exactly as before.
@@ -868,6 +913,9 @@ async def _finish_upload(
             # file it under its own name and tag it before the send. Best-effort:
             # the upload below sends whatever this returns, tagged or not.
             result = await _prepare_track_file(result, track, cover)
+        if timings is not None:
+            timings.processing_finished_at = telemetry.now_monotonic()
+            timings.upload_started_at = telemetry.now_monotonic()
         async with ActionPulse(
             bot, task.chat_id, upload_action(_delivery_kind(files[0], result.media_format))
         ):
@@ -911,6 +959,9 @@ async def _finish_upload(
             # if the bookkeeping below blips (a cache write after the bytes
             # landed is not a delivery failure).
             task.quota_held = False
+            if timings is not None:
+                timings.upload_finished_at = telemetry.now_monotonic()
+                timings.upload_bytes = actual_size
         if delivered is not None and delivered.cacheable:
             # The canonical name this file goes by — the song for a track, the
             # media's own title otherwise — so a replay's card is the first send's
