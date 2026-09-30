@@ -40,6 +40,17 @@ class PaymentStates(StatesGroup):
     waiting_receipt = State()
 
 
+class WalletStates(StatesGroup):
+    waiting_custom_amount = State()
+    waiting_receipt = State()
+
+
+#: The predefined top-up grid, smallest currency unit (Toman).
+WALLET_AMOUNTS: tuple[int, ...] = (50_000, 100_000, 200_000, 500_000)
+#: Below this a card transfer costs more attention than it is worth.
+WALLET_MIN_AMOUNT = 10_000
+
+
 
 
 
@@ -161,19 +172,141 @@ async def on_plan_selected(
     settings = get_settings()
     price = int(txn["amount"])
     keyboard = await _pay_options_keyboard(pool, user, plan, price, lang)
+    card = t(
+        "pay.card_title",
+        lang,
+        plan=escape_html(plan_name(plan["name"], lang)),
+        price=f"{price:,}",
+        currency=t("pay.currency", lang),
+        holder=escape_html(settings.manual_card_holder or "—"),
+        card=escape_html(settings.manual_card_number or "—"),
+    )
+    balance = await database.get_wallet_balance(pool, user["telegram_id"])
+    if balance < price:
+        # The deficit, named honestly: what is missing, not just what is there.
+        card = (
+            f"{card}\n\n"
+            + t(
+                "pay.wallet_deficit",
+                lang,
+                deficit=f"{price - balance:,}",
+                balance=f"{balance:,}",
+                price=f"{price:,}",
+                currency=t("pay.currency", lang),
+            )
+        )
+    await message.answer(card, reply_markup=keyboard)
+    await cb.answer()
+
+
+def wallet_amount_keyboard(lang: str = DEFAULT_LANG) -> InlineKeyboardMarkup:
+    """The top-up grid: predefined amounts, a custom-amount row, and the way back."""
+    builder = InlineKeyboardBuilder()
+    currency = t("pay.currency", lang)
+    for amount in WALLET_AMOUNTS:
+        builder.button(
+            text=f"{amount:,} {currency}",
+            callback_data=f"topup:{amount}",
+        )
+    builder.button(text=t("pay.topup_custom", lang), callback_data="topup:custom")
+    builder.button(text=t("menu.back", lang), callback_data="menu:profile")
+    builder.adjust(2, 2, 1, 1)
+    return builder.as_markup()
+
+
+def _mint_topup_ref() -> str:
+    """The unique tracking reference the buyer writes on the transfer."""
+    return uuid.uuid4().hex[:8].upper()
+
+
+async def _send_topup_card(
+    message: Message,
+    state: FSMContext,
+    amount: int,
+    lang: str,
+) -> None:
+    """The card screen: official card, amount, and a fresh tracking reference.
+
+    The reference is minted per choice (two identical amounts still differ on
+    the statement), and the wait for the receipt starts here — a photo sent
+    before this has no purchase to attach to.
+    """
+    settings = get_settings()
+    ref = _mint_topup_ref()
+    await state.set_state(WalletStates.waiting_receipt)
+    await state.update_data(wallet_amount=amount, wallet_ref=ref)
     await message.answer(
         t(
-            "pay.card_title",
+            "pay.topup_card",
             lang,
-            plan=escape_html(plan_name(plan["name"], lang)),
-            price=f"{price:,}",
+            amount=f"{amount:,}",
             currency=t("pay.currency", lang),
             holder=escape_html(settings.manual_card_holder or "—"),
             card=escape_html(settings.manual_card_number or "—"),
-        ),
-        reply_markup=keyboard,
+            ref=escape_html(ref),
+        )
     )
+
+
+def _parse_topup_amount(value: str) -> int | None:
+    try:
+        amount = int(value.replace(",", "").replace(" ", "").strip())
+    except (ValueError, AttributeError):
+        return None
+    return amount if amount >= WALLET_MIN_AMOUNT else None
+
+
+@router.callback_query(F.data.startswith("topup:"))
+async def on_topup_amount(
+    cb: CallbackQuery,
+    state: FSMContext,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """An amount tap: the card for a number, the prompt for ``custom``."""
+    message = callback_message(cb)
+    if message is None:
+        await cb.answer(t("pay.stale", lang), show_alert=True)
+        return
+    payload = (cb.data or "").split(":", 1)[1] if ":" in (cb.data or "") else ""
+    if payload == "custom":
+        await state.set_state(WalletStates.waiting_custom_amount)
+        await cb.answer()
+        await message.answer(
+            t(
+                "pay.topup_custom_prompt",
+                lang,
+                currency=t("pay.currency", lang),
+                minimum=f"{WALLET_MIN_AMOUNT:,}",
+            )
+        )
+        return
+    amount = _parse_topup_amount(payload)
+    if amount is None:
+        await cb.answer(t("pay.topup_invalid", lang, minimum=f"{WALLET_MIN_AMOUNT:,}"), show_alert=True)
+        return
     await cb.answer()
+    await _send_topup_card(message, state, amount, lang)
+
+
+@router.message(WalletStates.waiting_custom_amount)
+async def on_topup_custom_amount(
+    message: Message,
+    state: FSMContext,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """The typed amount: a number mints the card, garbage re-asks."""
+    amount = _parse_topup_amount(message.text or "")
+    if amount is None:
+        await message.answer(
+            t(
+                "pay.topup_invalid",
+                lang,
+                minimum=f"{WALLET_MIN_AMOUNT:,}",
+                currency=t("pay.currency", lang),
+            )
+        )
+        return
+    await _send_topup_card(message, state, amount, lang)
 
 
 async def _pay_options_keyboard(
@@ -182,21 +315,23 @@ async def _pay_options_keyboard(
     plan: asyncpg.Record,
     price: int,
     lang: str,
-) -> InlineKeyboardMarkup | None:
-    """The card's keyboard: the wallet tap, when the wallet covers the plan.
+) -> InlineKeyboardMarkup:
+    """The card's keyboard: the wallet tap is always shown, never hidden.
 
     The wallet is an *explicit* option, never a default: a buyer who would
-    rather keep the credit still has the receipt route (the card text), and a
-    short wallet is simply not offered a tap that could only refuse it.
+    rather keep the credit still has the receipt route (the card text). A
+    short wallet keeps the tap — tapping it answers the honest refusal — and
+    gains the top-up shortcut, so the deficit is one tap away from being
+    fixed instead of a dead end.
     """
-    balance = await database.get_wallet_balance(pool, user["telegram_id"])
-    if balance < price:
-        return None
     builder = InlineKeyboardBuilder()
     builder.button(
         text=t("pay.pay_with_wallet", lang),
         callback_data=f"pay_wallet:{plan['id']}",
     )
+    balance = await database.get_wallet_balance(pool, user["telegram_id"])
+    if balance < price:
+        builder.button(text=t("menu.topup", lang), callback_data="menu:topup")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -329,6 +464,178 @@ async def on_receipt_photo(
         return
 
     await message.answer(t("pay.receipt_received", lang))
+
+
+def _wallet_approval_keyboard(user_id: int, amount: int, ref: str, lang: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=t("pay.wallet_approve", lang),
+        callback_data=f"wallet_approve:{user_id}:{amount}:{ref}",
+    )
+    builder.button(
+        text=t("pay.wallet_reject", lang),
+        callback_data=f"wallet_reject:{user_id}:{amount}:{ref}",
+    )
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+@router.message(WalletStates.waiting_receipt, F.photo)
+async def on_wallet_receipt(
+    message: Message,
+    state: FSMContext,
+    pool: asyncpg.Pool,
+    bot: Bot,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    """The top-up's proof: the receipt photo, forwarded with who paid what.
+
+    The pending purchase lives in the FSM (amount + tracking ref from the card
+    screen) — a photo with no card first has nothing to attach to. The state
+    clears on receipt so a second photo starts a fresh top-up instead of
+    double-forwarding the same one.
+    """
+    photos = message.photo
+    from_user = message.from_user
+    if not photos or from_user is None:  # F.photo already guarantees both
+        return
+
+    data = await state.get_data()
+    try:
+        amount = int(data.get("wallet_amount", 0))
+    except (ValueError, TypeError):
+        amount = 0
+    ref = str(data.get("wallet_ref", "") or "")
+    if amount <= 0 or not ref:
+        await message.answer(t("pay.txn_invalid", lang))
+        return
+    await state.clear()
+
+    settings = get_settings()
+    user_name = f"@{from_user.username}" if from_user.username else str(from_user.id)
+    photo_file_id = photos[-1].file_id
+
+    notified = 0
+    for admin_id, admin_lang in await recipients.targets(
+        pool, settings.admin_ids, fallback=lang
+    ):
+        caption = t(
+            "pay.wallet_receipt_caption",
+            admin_lang,
+            user=escape_html(user_name),
+            telegram_id=from_user.id,
+            amount=f"{amount:,}",
+            currency=t("pay.currency", admin_lang),
+            ref=escape_html(ref),
+        )
+        try:
+            await bot.send_photo(
+                admin_id,
+                photo_file_id,
+                caption=caption,
+                reply_markup=_wallet_approval_keyboard(from_user.id, amount, ref, admin_lang),
+            )
+            notified += 1
+        except Exception:
+            logger.exception("failed to forward top-up receipt to admin %s", admin_id)
+    if notified == 0:
+        logger.warning("top-up receipt accepted but no admin notified — check ADMIN_IDS in .env")
+        await message.answer(t("pay.receipt_unreachable", lang))
+        return
+
+    await message.answer(t("pay.receipt_received", lang))
+
+
+def _parse_wallet_decision(cb: CallbackQuery) -> tuple[int, int, str] | None:
+    """``wallet_approve:<user_id>:<amount>:<ref>`` — or ``None`` when crafted."""
+    try:
+        _, user_id, amount, ref = (cb.data or "").split(":", 3)
+        return int(user_id), int(amount), ref
+    except (ValueError, IndexError):
+        return None
+
+
+async def _wallet_decide(
+    cb: CallbackQuery,
+    bot: Bot,
+    pool: asyncpg.Pool,
+    *,
+    approved: bool,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    settings = get_settings()
+    if not settings.is_admin(cb.from_user.id):
+        await cb.answer(t("pay.admin_only", lang), show_alert=True)
+        return
+
+    parsed = _parse_wallet_decision(cb)
+    if parsed is None or parsed[1] <= 0 or not parsed[2]:
+        await cb.answer(t("pay.txn_invalid", lang), show_alert=True)
+        return
+    user_id, amount, _ref = parsed
+
+    status = t("pay.approved_note" if approved else "pay.rejected_note", lang)
+    await cb.answer(status)
+
+    message = callback_message(cb)
+    caption = message.caption if message is not None else None
+    if message is not None and caption is not None:
+        try:
+            decided = t(
+                "pay.decided_by",
+                lang,
+                status=status,
+                admin=escape_html(cb.from_user.full_name),
+            )
+            await message.edit_caption(
+                caption=f"{caption}\n\n{decided}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+            )
+        except Exception:
+            logger.debug("could not edit admin caption", exc_info=True)
+
+    # The *buyer's* language, not the admin's: this line lands in the buyer's chat.
+    buyer_lang = await _buyer_language(pool, user_id, fallback=lang)
+    try:
+        if approved:
+            # The atomic credit: one guarded UPDATE, logged, then confirmed.
+            new_balance = await database.add_wallet_credit(pool, user_id, amount)
+            logger.info("wallet top-up approved: user=%s amount=%s", user_id, amount)
+            await bot.send_message(
+                user_id,
+                t(
+                    "pay.wallet_credited",
+                    buyer_lang,
+                    amount=f"{amount:,}",
+                    balance=f"{new_balance:,}",
+                    currency=t("pay.currency", buyer_lang),
+                ),
+            )
+        else:
+            logger.info("wallet top-up rejected: user=%s amount=%s", user_id, amount)
+            await bot.send_message(user_id, t("pay.wallet_rejected", buyer_lang))
+    except Exception:
+        logger.exception("could not notify user %s", user_id)
+
+
+@router.callback_query(F.data.startswith("wallet_approve:"))
+async def on_wallet_approve(
+    cb: CallbackQuery,
+    bot: Bot,
+    pool: asyncpg.Pool,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    await _wallet_decide(cb, bot, pool, approved=True, lang=lang)
+
+
+@router.callback_query(F.data.startswith("wallet_reject:"))
+async def on_wallet_reject(
+    cb: CallbackQuery,
+    bot: Bot,
+    pool: asyncpg.Pool,
+    lang: str = DEFAULT_LANG,
+) -> None:
+    await _wallet_decide(cb, bot, pool, approved=False, lang=lang)
 
 
 async def _buyer_language(pool: asyncpg.Pool, telegram_id: int, *, fallback: str) -> str:

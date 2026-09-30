@@ -225,13 +225,20 @@ async def test_a_funded_wallet_is_offered_at_checkout() -> None:
     ) or any("pay_wallet" in data for _, data in _buttons(bot.keyboards[-1]))
 
 
-async def test_a_short_wallet_is_not_offered_at_checkout() -> None:
+async def test_a_short_wallet_keeps_the_wallet_row_with_a_topup_link() -> None:
+    """The wallet tap is always shown: a short wallet keeps it and gains top-up.
+
+    Hiding the row left a buyer with no way forward; the deficit line on the
+    card names what is missing and the top-up shortcut fixes it in one tap.
+    """
     bot = RecordingBot()
 
     await _select_plan(bot, _CheckoutPool(balance=1_000))
 
     offered = [data for kb in bot.keyboards for _, data in _buttons(kb)]
-    assert "pay_wallet:1" not in offered
+    assert "pay_wallet:1" in offered, "the wallet tap stays visible when short"
+    assert "menu:topup" in offered, "a short wallet needs the top-up shortcut"
+    assert any("49,000" in text for text in bot.texts), "the card names the deficit"
 
 
 async def test_paying_with_the_wallet_debits_and_grants_the_plan() -> None:

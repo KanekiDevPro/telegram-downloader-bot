@@ -1572,6 +1572,8 @@ class _Verdict:
 _ANSWERS_VIA: dict[str, str] = {
     "on_admin_approve": "_admin_decide",
     "on_admin_reject": "_admin_decide",
+    "on_wallet_approve": "_wallet_decide",
+    "on_wallet_reject": "_wallet_decide",
 }
 
 

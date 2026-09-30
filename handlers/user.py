@@ -58,7 +58,7 @@ from core.utils import (
     today_local,
     validate_url,
 )
-from handlers.payment import plans_keyboard
+from handlers.payment import plans_keyboard, wallet_amount_keyboard
 from services import cache as cache_service
 from services import content, preflight, spotify
 from services.delivery import (
@@ -986,11 +986,12 @@ async def on_menu_topup(
     pool: asyncpg.Pool,
     lang: str = DEFAULT_LANG,
 ) -> None:
-    """The wallet top-up: the balance, and how to fill it.
+    """The wallet top-up: the balance, and the amount grid that fills it.
 
     Topping up stays manual (card transfer + receipt, credited by an admin) —
-    this screen names the balance and the one route to grow it, and hands back
-    to the profile it was opened from.
+    this screen names the balance and offers the predefined amounts plus a
+    custom one. The chosen amount opens the card with its tracking reference
+    (see ``handlers.payment``); the way back is the profile it opened from.
     """
     message = callback_message(cb)
     if message is None:
@@ -1001,15 +1002,12 @@ async def on_menu_topup(
     await _edit_or_reply(
         message,
         t(
-            "pay.topup_title",
+            "pay.topup_amounts",
             lang,
             balance=f"{balance:,}",
             currency=t("pay.currency", lang),
-            how=t("pay.topup_how", lang),
         ),
-        reply_markup=_back_to_menu(
-            lang, to="menu:profile", looks=await _button_looks(pool)
-        ),
+        reply_markup=wallet_amount_keyboard(lang),
     )
 
 

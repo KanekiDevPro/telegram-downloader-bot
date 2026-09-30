@@ -865,6 +865,99 @@ MESSAGES: Final[Catalog] = {
             "ادمین کیف پولت رو شارژ می‌کنه."
         ),
     },
+    "pay.topup_amounts": {
+        "en": (
+            "💳 <b>Wallet top-up</b>\n"
+            "\n"
+            "Balance: <b>{balance} {currency}</b>\n"
+            "\n"
+            "Pick an amount 👇"
+        ),
+        "fa": (
+            "💳 <b>شارژ کیف پول</b>\n"
+            "\n"
+            "موجودی: <b>{balance} {currency}</b>\n"
+            "\n"
+            "مبلغ رو انتخاب کن 👇"
+        ),
+    },
+    "pay.topup_custom": {"en": "✏️ Custom amount", "fa": "✏️ مبلغ دلخواه"},
+    "pay.topup_custom_prompt": {
+        "en": "Type the top-up amount in {currency} (minimum {minimum}) 👇",
+        "fa": "مبلغ شارژ رو به {currency} بنویس (حداقل {minimum}) 👇",
+    },
+    "pay.topup_invalid": {
+        "en": "⚠️ That amount does not look right — type a number of at least {minimum} {currency}.",
+        "fa": "⚠️ این مبلغ درست به نظر نمی‌رسه — عددی حداقل {minimum} {currency} بنویس.",
+    },
+    "pay.topup_card": {
+        "en": (
+            "💳 <b>Wallet top-up: {amount} {currency}</b>\n"
+            "\n"
+            "Card holder: {holder}\n"
+            "Card number: <code>{card}</code>\n"
+            "Tracking ref: <code>{ref}</code>\n"
+            "\n"
+            "Transfer exactly <b>{amount} {currency}</b>, then send the <b>receipt photo</b> here.\n"
+            "Write the ref on the transfer description when you can.\n"
+            "To cancel: /cancel"
+        ),
+        "fa": (
+            "💳 <b>شارژ کیف پول: {amount} {currency}</b>\n"
+            "\n"
+            "به نام: {holder}\n"
+            "شماره کارت: <code>{card}</code>\n"
+            "کد پیگیری: <code>{ref}</code>\n"
+            "\n"
+            "دقیقاً <b>{amount} {currency}</b> واریز کن، بعد <b>عکس رسید</b> رو همین‌جا بفرست.\n"
+            "اگه می‌تونی کد پیگیری رو تو شرح واریز بنویس.\n"
+            "برای انصراف: /cancel"
+        ),
+    },
+    "pay.wallet_receipt_caption": {
+        "en": (
+            "🧾 <b>Wallet top-up receipt</b>\n"
+            "\n"
+            "User: {user} (ID: <code>{telegram_id}</code>)\n"
+            "Amount: {amount} {currency}\n"
+            "Ref: <code>{ref}</code>\n"
+            "Method: card to card"
+        ),
+        "fa": (
+            "🧾 <b>رسید شارژ کیف پول</b>\n"
+            "\n"
+            "کاربر: {user} (ID: <code>{telegram_id}</code>)\n"
+            "مبلغ: {amount} {currency}\n"
+            "کد پیگیری: <code>{ref}</code>\n"
+            "روش: کارت به کارت"
+        ),
+    },
+    "pay.wallet_approve": {"en": "✅ Approve + credit", "fa": "✅ تایید و شارژ"},
+    "pay.wallet_reject": {"en": "❌ Reject request", "fa": "❌ رد درخواست"},
+    "pay.wallet_credited": {
+        "en": (
+            "✅ Wallet credited with {amount} {currency}. "
+            "New balance: {balance} {currency}. 🎉"
+        ),
+        "fa": (
+            "✅ کیف پولت {amount} {currency} شارژ شد. "
+            "موجودی جدید: {balance} {currency}. 🎉"
+        ),
+    },
+    "pay.wallet_rejected": {
+        "en": "❌ Your top-up request was rejected. If you think that is wrong, contact support.",
+        "fa": "❌ درخواست شارژت رد شد. اگه فکر می‌کنی اشتباهه با پشتیبانی در ارتباط باش.",
+    },
+    "pay.wallet_deficit": {
+        "en": (
+            "⚠️ Short by <b>{deficit} {currency}</b> "
+            "(balance {balance}, plan {price}) — top up first, then pay in one tap. 👇"
+        ),
+        "fa": (
+            "⚠️ مبلغ <b>{deficit} {currency}</b> کم داری "
+            "(موجودی {balance}، پلن {price}) — اول شارژ کن، بعد با یک ضربه بخر. 👇"
+        ),
+    },
 
     # ---------------------------------------------------------------------
     # Admin panel
