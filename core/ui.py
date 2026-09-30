@@ -45,15 +45,25 @@ BUTTON_STYLES: tuple[str, ...] = ("primary", "success", "danger")
 
 #: The buttons an admin may dress, in menu order: ``(callback, label key)``. The
 #: label key is what the operator sees in the panel — the *same* text the menu
-#: draws the button from, so a renamed button is renamed in both places. The five
-#: are the destinations a user meets first: the four on Home and the store on
-#: Profile (VIP is an account action, not a navigation one).
+#: draws the button from, so a renamed button is renamed in both places. Every
+#: primary menu is covered: the four on Home, the two account actions on
+#: Profile (VIP is an account action, not a navigation one — the top-up is its
+#: neighbour), the four Download sections, and the two Back buttons (a Back
+#: button wears its destination's look: ``menu:home`` wherever ⬅️ leads home,
+#: ``audf:back`` on the audio presets).
 MAIN_BUTTONS: tuple[tuple[str, str], ...] = (
     ("menu:download", "menu.download"),
     ("menu:profile", "menu.profile"),
     ("menu:language", "menu.language"),
     ("menu:support", "menu.support"),
     ("menu:premium", "menu.premium"),
+    ("menu:topup", "menu.topup"),
+    ("menu:platform:youtube", "download.youtube"),
+    ("menu:platform:instagram", "download.instagram"),
+    ("menu:platform:spotify", "download.spotify"),
+    ("menu:platform:tiktok", "download.tiktok"),
+    ("menu:home", "menu.back"),
+    ("audf:back", "menu.back"),
 )
 
 #: One button's looks: the colour and the custom emoji id, both ``""`` when

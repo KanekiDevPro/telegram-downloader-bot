@@ -82,15 +82,23 @@ def test_a_url_button_keeps_being_a_url_button() -> None:
 
 
 def test_the_recolourable_set_is_the_main_buttons() -> None:
-    """One list, pinned: the buttons an admin may dress are the destinations a
-    user meets first — the four on Home and the store on Profile — and each entry
-    names the text it is drawn from, so the panel and the menus cannot drift."""
+    """One list, pinned: every primary-menu button an admin may dress — the
+    four on Home, the two account actions on Profile, the four Download
+    sections, and the two Back buttons — each naming the text it is drawn
+    from, so the panel and the menus cannot drift."""
     assert [callback for callback, _label_key in ui.MAIN_BUTTONS] == [
         "menu:download",
         "menu:profile",
         "menu:language",
         "menu:support",
         "menu:premium",
+        "menu:topup",
+        "menu:platform:youtube",
+        "menu:platform:instagram",
+        "menu:platform:spotify",
+        "menu:platform:tiktok",
+        "menu:home",
+        "audf:back",
     ]
     assert [label_key for _callback, label_key in ui.MAIN_BUTTONS] == [
         "menu.download",
@@ -98,6 +106,13 @@ def test_the_recolourable_set_is_the_main_buttons() -> None:
         "menu.language",
         "menu.support",
         "menu.premium",
+        "menu.topup",
+        "download.youtube",
+        "download.instagram",
+        "download.spotify",
+        "download.tiktok",
+        "menu.back",
+        "menu.back",
     ]
 
 
@@ -111,6 +126,74 @@ def test_a_stored_look_is_read_back_with_its_defaults() -> None:
     assert ui.look_for({"menu:download": ("rainbow", "abc")}, "menu:download") == ("", "")
     hand_edited: Any = {"menu:download": "primary"}
     assert ui.look_for(hand_edited, "menu:download") == ("", "")
+
+
+def test_the_download_sections_wear_the_colours_the_operator_chose() -> None:
+    """A stored platform look reaches the Downloads picker — and only its own
+    section button."""
+    from handlers import user as user_module
+
+    markup = user_module._download_keyboard(
+        "en", looks={"menu:platform:spotify": ("success", "")}
+    )
+    buttons = [button for row in markup.inline_keyboard for button in row]
+    spotify = next(
+        item for item in buttons if item.callback_data == "menu:platform:spotify"
+    )
+
+    assert spotify.style == "success"
+    assert all(
+        item.style is None
+        for item in buttons
+        if item.callback_data != "menu:platform:spotify"
+    )
+
+
+def test_a_back_button_wears_its_destination_s_colour() -> None:
+    """Back is a button too: the look stored for its destination dresses it,
+    and no stored look leaves it plain."""
+    from handlers import user as user_module
+
+    def _style(markup: Any) -> Any:
+        return markup.inline_keyboard[0][0].style
+
+    assert (
+        _style(user_module._back_to_menu("en", looks={"menu:home": ("danger", "")}))
+        == "danger"
+    )
+    assert _style(user_module._back_to_menu("en")) is None
+    assert (
+        _style(
+            user_module._back_to_menu(
+                "en", to="menu:profile", looks={"menu:profile": ("primary", "")}
+            )
+        )
+        == "primary"
+    )
+
+
+def test_a_garbage_look_on_a_new_button_stays_plain() -> None:
+    """The fallback covers the whole set: nonsense for a platform or a Back
+    button renders plain instead of breaking the keyboard."""
+    from handlers import user as user_module
+
+    assert ui.look_for({"menu:platform:tiktok": ("rainbow", "xx")}, "menu:platform:tiktok") == (
+        "",
+        "",
+    )
+    markup = user_module._download_keyboard(
+        "en", looks={"menu:platform:tiktok": ("rainbow", "xx")}
+    )
+    tiktok = next(
+        button
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data == "menu:platform:tiktok"
+    )
+
+    assert tiktok.style is None and tiktok.icon_custom_emoji_id is None
+    back = user_module._back_to_menu("en", looks={"menu:home": ("rainbow", "xx")})
+    assert back.inline_keyboard[0][0].style is None
 
 
 def test_the_next_colour_in_the_cycle_is_telegram_s_own_order() -> None:

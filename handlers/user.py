@@ -147,7 +147,8 @@ def _main_menu(
     # button. Drawn here, on the screen every user opens: a look nobody sees is
     # not a look, it is a setting (see ``core.ui`` for what reaches Telegram).
     # The first four of the panel's list are this grid (see ``core.ui.MAIN_BUTTONS``:
-    # the four destinations, then the store that lives on Profile).
+    # the four destinations, then the account actions, the Download sections and
+    # the Back buttons further down the same list).
     for callback, label_key in ui.MAIN_BUTTONS[:4]:
         style, emoji = ui.look_for(looks, callback)
         ui.add_button(
@@ -192,15 +193,25 @@ async def _button_looks(pool: asyncpg.Pool | None) -> ui.Looks:
     return await database.get_button_looks(pool)
 
 
-def _back_to_menu(lang: str, *, to: str = "menu:home") -> InlineKeyboardMarkup:
+def _back_to_menu(
+    lang: str, *, to: str = "menu:home", looks: ui.Looks | None = None
+) -> InlineKeyboardMarkup:
     """Every screen but the menu itself carries its way back.
 
     ``to`` names the *previous* screen — every screen knows its parent and back
     is that parent, never a hardcoded "home". No dead ends, and no deep
-    navigation stack to keep track of either.
+    navigation stack to keep track of either. The button wears its destination's
+    look (``None`` reads as plain, like every undressed button).
     """
     builder = InlineKeyboardBuilder()
-    builder.button(text=t("menu.back", lang), callback_data=to)
+    style, emoji = ui.look_for(looks, to)
+    ui.add_button(
+        builder,
+        t("menu.back", lang),
+        callback_data=to,
+        style=style,
+        icon_custom_emoji_id=emoji,
+    )
     builder.adjust(1)
     return builder.as_markup()
 
@@ -586,7 +597,11 @@ async def _disabled_platforms(pool: asyncpg.Pool | None) -> tuple[str, ...]:
 
 
 def _download_keyboard(
-    lang: str, *, platform: str | None = None, disabled: Sequence[str] = ()
+    lang: str,
+    *,
+    platform: str | None = None,
+    disabled: Sequence[str] = (),
+    looks: ui.Looks | None = None,
 ) -> InlineKeyboardMarkup:
     """The download screen's own controls: the platforms, and the way back.
 
@@ -606,16 +621,26 @@ def _download_keyboard(
     if platform is None:
         names = [name for name, _shapes in content.visible_sections(disabled)]
         for name in names:
-            builder.button(
-                text=t(f"download.{name}", lang),
-                callback_data=f"{PLATFORM_PREFIX}{name}",
+            callback = f"{PLATFORM_PREFIX}{name}"
+            style, emoji = ui.look_for(looks, callback)
+            ui.add_button(
+                builder,
+                t(f"download.{name}", lang),
+                callback_data=callback,
+                style=style,
+                icon_custom_emoji_id=emoji,
             )
         rows = [2] * (len(names) // 2) + ([1] if len(names) % 2 else [])
     else:
         rows = []
-    builder.button(
-        text=t("menu.back", lang),
-        callback_data="menu:home" if platform is None else "menu:download",
+    back_to = "menu:home" if platform is None else "menu:download"
+    style, emoji = ui.look_for(looks, back_to)
+    ui.add_button(
+        builder,
+        t("menu.back", lang),
+        callback_data=back_to,
+        style=style,
+        icon_custom_emoji_id=emoji,
     )
     builder.adjust(*(rows + [1]))
     return builder.as_markup()
@@ -837,7 +862,9 @@ async def on_menu_download(
     await _reset_to_text(
         message,
         "\n".join(lines),
-        reply_markup=_download_keyboard(lang, disabled=disabled),
+        reply_markup=_download_keyboard(
+            lang, disabled=disabled, looks=await _button_looks(pool)
+        ),
     )
     await state.set_state(DownloadStates.picking_platform)
 
@@ -876,7 +903,9 @@ async def on_menu_platform(
     await _edit_or_reply(
         message,
         _platform_text(name, lang),
-        reply_markup=_download_keyboard(lang, platform=name, disabled=disabled),
+        reply_markup=_download_keyboard(
+            lang, platform=name, disabled=disabled, looks=await _button_looks(pool)
+        ),
     )
 
 
@@ -943,7 +972,11 @@ async def on_menu_support(
     await cb.answer()
     contact = await database.get_support_contact(pool) if pool is not None else ""
     text = _support_line(contact, lang) if contact else t("support.unset", lang)
-    await _edit_or_reply(message, text, reply_markup=_back_to_menu(lang))
+    await _edit_or_reply(
+        message,
+        text,
+        reply_markup=_back_to_menu(lang, looks=await _button_looks(pool)),
+    )
 
 
 @router.callback_query(F.data == "menu:topup")
@@ -974,7 +1007,9 @@ async def on_menu_topup(
             currency=t("pay.currency", lang),
             how=t("pay.topup_how", lang),
         ),
-        reply_markup=_back_to_menu(lang, to="menu:profile"),
+        reply_markup=_back_to_menu(
+            lang, to="menu:profile", looks=await _button_looks(pool)
+        ),
     )
 
 
@@ -988,7 +1023,9 @@ async def cmd_support(
     """``/support`` — the same screen, for someone who types instead of tapping."""
     contact = await database.get_support_contact(pool) if pool is not None else ""
     text = _support_line(contact, lang) if contact else t("support.unset", lang)
-    await message.answer(text, reply_markup=_back_to_menu(lang))
+    await message.answer(
+        text, reply_markup=_back_to_menu(lang, looks=await _button_looks(pool))
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2618,7 +2655,9 @@ async def _submit(
         await _edit_or_reply(
             message,
             f"{card}\n\n{t('intake.quota_exhausted', lang, used=used, limit=limit)}",
-            reply_markup=_back_to_menu(lang, to="menu:download"),
+            reply_markup=_back_to_menu(
+                lang, to="menu:download", looks=await _button_looks(pool)
+            ),
             link_preview_options=_NO_PREVIEW,
         )
         return
