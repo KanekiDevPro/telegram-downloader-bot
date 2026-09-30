@@ -1687,8 +1687,9 @@ async def test_the_quality_menu_shows_what_the_link_actually_has(
         "fmt:video:720",
         "fmt:video:360",
         "fmt:video:240",
+        "fmt:audio:best",
         "menu:download",
-    ], "the ladder, best first — whatever order the extractor said"
+    ], "the ladder, best first — whatever order the extractor said — then audio-only"
     assert rows[0] == ("1080p · ~14 MB", "fmt:video:1080"), (
         "resolution is the headline, and an estimate says ~"
     )
@@ -1698,9 +1699,10 @@ async def test_the_quality_menu_shows_what_the_link_actually_has(
     assert rows[3] == ("240p · حجم نامشخص", "fmt:video:240"), (
         "a size the site never reported says so — the resolution is real and stays"
     )
-    assert [len(row) for row in bot.keyboards[-1].inline_keyboard] == [1] * 5, (
-        "one per row: quality is the headline, the size is secondary"
-    )
+    assert [len(row) for row in bot.keyboards[-1].inline_keyboard] == [1] * 6, (
+            "one per row: quality is the headline, the size is secondary — "
+            "audio-only and back each stand alone too"
+        )
     card_groups = bot.texts[0].split("\n\n")[:2]
     assert card_groups == ["🎬 A Clip", "🔗 https://youtu.be/abc"], (
         "the card names the media and its origin — and claims no quality yet: "

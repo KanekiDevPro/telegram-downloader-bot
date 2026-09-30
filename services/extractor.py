@@ -2454,7 +2454,31 @@ class ExtractorService:
         # Both legs failed — the plain probe is the fallback of last resort: the
         # configured list whole, retries and all, its error untouched.
         logger.info("the raced probe (%s) both failed — falling back to the full list", ", ".join(raced))
-        return await asyncio.to_thread(self._extract_sync, url)
+        try:
+            return await asyncio.to_thread(self._extract_sync, url)
+        except Exception as full_list_error:
+            # A cold URL's last chance: one poisoned leg can spoil the whole
+            # request, so every configured client the race did not already try
+            # solo gets its own attempt, in configured order (the streaming
+            # fallbacks — ios, android — answer metadata precisely where the
+            # metadata-fast clients are refused). Whoever answers first draws
+            # the menu; the full list's error is what the user sees when none
+            # of them answers either.
+            raced_bases = {client.split(".", 1)[0] for client in raced}
+            for client in self.youtube_clients:
+                if client.split(".", 1)[0] in raced_bases:
+                    continue
+                try:
+                    return await asyncio.to_thread(
+                        self._extract_sync, url, youtube_clients=(client,)
+                    )
+                except Exception:
+                    logger.info(
+                        "cold probe: solo attempt with %s failed — trying the next client",
+                        client,
+                    )
+                    continue
+            raise full_list_error
 
     def _with_retries(self, what: str, attempt_fn: Callable[[], T]) -> T:
         """Run ``attempt_fn``, retrying only the failures that deserve it.

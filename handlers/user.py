@@ -372,6 +372,16 @@ def _question_keyboard(
         # One per row when the ladder is long (mobile width fits the label);
         # a short list shares rows so the screen is not three lonely strips.
         row_width = 2 if len(sized) <= 2 else 1
+    if options and not routing.audio_formats:
+        # The audio-only row: a video link draws no audio grid, but its sound
+        # is still wanted — the site's best audio stream, copied untouched, no
+        # video stream ever downloaded for it. Drawn only with a discovered
+        # ladder, so the button never promises what the probe did not find.
+        builder.button(
+            text=t("fmt.audio_best", lang),
+            callback_data=_fmt_callback("audio", "best"),
+        )
+        row_width = 1  # the audio row and the way back each stand alone
     # The way out leads to the Download screen — this question is its child (and
     # the retry's ⬅️ lands there too), never to an unrelated screen.
     builder.button(text=t("menu.back", lang), callback_data="menu:download")
@@ -2442,6 +2452,11 @@ def _tap_was_offered(
             quality.split(".", 1)[0] in [str(item) for item in data["audio_offered"]]
             and not (audio_is_original(quality) and data.get("copy_ok") is False)
         )
+    if media_format == "audio" and quality == "best" and data.get("options"):
+        # The quality menu's audio-only row: a video link draws no audio grid
+        # (``audio_offered`` is ``None`` there), so the row is valid exactly
+        # when the discovered ladder it was drawn with is still in state.
+        return True
     return content.find_choice(url, media_format, quality) is not None
 
 

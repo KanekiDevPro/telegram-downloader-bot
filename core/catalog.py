@@ -458,6 +458,12 @@ MESSAGES: Final[Catalog] = {
     "fmt.fmt_opus": {"en": "🎧 OPUS", "fa": "🎧 OPUS"},
     "fmt.fmt_wav": {"en": "🎧 WAV", "fa": "🎧 WAV"},
     "fmt.fmt_flac": {"en": "🎧 FLAC", "fa": "🎧 FLAC"},
+    # The video menu's audio-only row: the site's best audio stream, copied
+    # untouched — no video stream is ever downloaded for it.
+    "fmt.audio_best": {
+        "en": "🎵 Audio only (best quality)",
+        "fa": "🎵 دانلود فقط صدا (بهترین کیفیت)",
+    },
     # The format's quality presets are labelled with their real bitrates in the
     # menu (handlers/user.py) — these keys name the one preset that is not one.
     "audio.choose_level_fmt": {
