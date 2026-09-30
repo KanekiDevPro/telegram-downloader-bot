@@ -42,7 +42,16 @@ from core.utils import (
     today_local,
 )
 from services import cache as cache_service
-from services import cookie_refresh, fallback, preflight, recipients, spotify, telemetry, verify
+from services import (
+    cookie_refresh,
+    download_mode,
+    fallback,
+    preflight,
+    recipients,
+    spotify,
+    telemetry,
+    verify,
+)
 from services import providers as providers_module
 from services.audio_models import AudioMode, OutputAudio, SourceAudio
 from services.cobalt import CobaltError, CobaltService, audio_format_param
@@ -217,6 +226,12 @@ async def _settle(queue: TaskQueue, task: DownloadTask) -> None:
         await queue.release(task)
     except Exception:
         logger.exception("could not settle the job claim for %s", task.url)
+    # The mode unlocks when its jobs are gone: every settled outcome counts
+    # down, no requeue path does (a requeued job is still one job in flight).
+    try:
+        download_mode.job_settled_for_url(task.telegram_id, task.url)
+    except Exception:
+        logger.debug("could not settle the mode count for %s", task.url, exc_info=True)
 
 
 async def _requeue_for_shutdown(

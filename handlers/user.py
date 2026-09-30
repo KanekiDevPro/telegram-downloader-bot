@@ -60,7 +60,7 @@ from core.utils import (
 )
 from handlers.payment import plans_keyboard, wallet_amount_keyboard
 from services import cache as cache_service
-from services import content, preflight, spotify
+from services import content, download_mode, preflight, spotify
 from services.delivery import (
     ActionPulse,
     format_duration,
@@ -119,6 +119,67 @@ class DownloadStates(StatesGroup):
 
     picking_platform = State()
     waiting_format = State()
+
+
+async def _get_mode(state: FSMContext) -> str:
+    """The user's current download mode (``NONE`` when none or unknown).
+
+    The mode lives in the user's own FSM data — one value per user, never
+    global — so two users never share it. Unknown payloads read as ``NONE``:
+    a mode is a constraint, and a constraint must never come from garbage.
+    """
+    try:
+        data = await state.get_data()
+    except Exception:
+        return download_mode.NONE
+    return download_mode.normalize(data.get(download_mode.MODE_KEY))
+
+
+async def _clear_format_state(state: FSMContext) -> None:
+    """Drop the pending link/format step but keep the download mode.
+
+    ``state.clear()`` wipes the FSM data wholesale — including the mode. Every
+    path that clears a *question* (a tap was made, a solo link auto-queued)
+    must keep the *session*: the mode's lifecycle is the jobs, not the menus.
+    """
+    mode = await _get_mode(state)
+    await state.clear()
+    if mode != download_mode.NONE:
+        await state.update_data({download_mode.MODE_KEY: mode})
+
+
+async def _maybe_auto_unlock(state: FSMContext, user_id: int) -> str:
+    """Unlock the mode when no relevant work remains; returns the live mode.
+
+    A mode unlocks only when its jobs are truly gone (nothing queued,
+    downloading, processing, uploading or retrying — see
+    ``services/download_mode.py``). A format menu that is still up keeps its
+    mode even with zero jobs: the choice it waits for belongs to this mode,
+    so unlocking under it would strand the tap it is about to receive.
+    """
+    data = await state.get_data()
+    mode = download_mode.normalize(data.get(download_mode.MODE_KEY))
+    if mode == download_mode.NONE:
+        return mode
+    if download_mode.has_active(user_id, mode):
+        return mode
+    if not download_mode.was_used(user_id, mode):
+        # The session just opened: zero jobs means "nothing sent yet", not
+        # "everything finished" — the mode must survive until real work runs.
+        return mode
+    if await state.get_state() == DownloadStates.waiting_format.state and data.get("url"):
+        return mode
+    await state.update_data({download_mode.MODE_KEY: download_mode.NONE})
+    return download_mode.NONE
+
+
+def _mode_label(mode: str, lang: str) -> str:
+    """The human name of a mode, for the "still in progress" answer."""
+    if mode == download_mode.SPOTIFY:
+        return t("download.spotify", lang)
+    if mode == download_mode.YOUTUBE:
+        return t("download.youtube", lang)
+    return t("download.title", lang)
 
 
 def _main_menu(
@@ -924,8 +985,25 @@ async def on_menu_platform(
     if name not in {section for section, _shapes in _platform_sections()}:
         await cb.answer(t("intake.stale", lang), show_alert=True)
         return
+    user_id = cb.from_user.id if cb.from_user is not None else 0
+    current = await _maybe_auto_unlock(state, user_id)
+    requested = download_mode.mode_for_platform(name)
+    if (
+        current != download_mode.NONE
+        and current != requested
+        and download_mode.has_active(user_id, current)
+    ):
+        # Another mode's downloads are still running: the switch is refused
+        # and the current mode (and its session) stays exactly as it was.
+        await cb.answer(
+            t("download.mode_busy", lang, mode=_mode_label(current, lang)),
+            show_alert=True,
+        )
+        return
     await cb.answer()
     await state.set_state(None)
+    await state.update_data({download_mode.MODE_KEY: requested})
+    download_mode.begin_session(user_id)
     await _edit_or_reply(
         message,
         _platform_text(name, lang),
@@ -1514,6 +1592,16 @@ async def _intake_flow(
     if not validate_url(url):
         await message.answer(t("intake.invalid_link", lang), link_preview_options=_NO_PREVIEW)
         return
+    mode = await _maybe_auto_unlock(state, user["telegram_id"])
+    if not download_mode.is_compatible(mode, url):
+        # Wrong source for the active mode: answered fast, before the delete,
+        # the cache, the resolver and the probe — a rejected link must leave
+        # no queue entry, no cache row and no yt-dlp call behind. The mode is
+        # preserved so the next (correct) link keeps working without reselect.
+        await message.answer(
+            t(download_mode.wrong_source_key(mode), lang), link_preview_options=_NO_PREVIEW
+        )
+        return
     _forget_raw_link(message)
     # One explicit yield before anything else: the delete is a task, and a task
     # only runs when the loop gets control back. Everything below is eager work
@@ -1556,7 +1644,7 @@ async def _intake_flow(
         # copy left the chat the moment it was recognized.
         return
     if routing.solo is not None:
-        await state.clear()
+        await _clear_format_state(state)
         status = await message.answer(
             media_card(url=url, lang=lang), link_preview_options=_NO_PREVIEW
         )
@@ -1585,7 +1673,7 @@ async def _intake_flow(
         # nothing. The automatic request goes straight to the card and the
         # worker's engines (yt-dlp, then the cobalt fallback) fetch the best
         # they can get.
-        await state.clear()
+        await _clear_format_state(state)
         status = await message.answer(
             media_card(url=url, lang=lang), link_preview_options=_NO_PREVIEW
         )
@@ -2427,7 +2515,15 @@ async def on_format_chosen(
     url = data.get("url")
     if not url:
         await cb.answer(t("intake.link_expired", lang), show_alert=True)
-        await state.clear()
+        await _clear_format_state(state)
+        return
+    mode = await _maybe_auto_unlock(state, user["telegram_id"])
+    if not download_mode.is_compatible(mode, str(url)):
+        # A stale callback from an earlier mode (the user switched sections
+        # after this menu was drawn): rejected safely — nothing is queued,
+        # nothing downloads the wrong media, the current mode stays live.
+        await cb.answer(t("intake.stale", lang), show_alert=True)
+        await _clear_format_state(state)
         return
     media_format, quality = _parse_format(cb.data)
     if not _tap_was_offered(url, media_format, quality, data):
@@ -2440,7 +2536,7 @@ async def on_format_chosen(
     if message is None:
         await cb.answer(t("intake.stale", lang), show_alert=True)
         return
-    await state.clear()
+    await _clear_format_state(state)
     await _submit(
         bot,
         message,
@@ -2786,6 +2882,9 @@ async def _submit(
     #    delivery, no matter how many times or how concurrently it is asked for.
     if await queue.enqueue(task) < 0:
         return
+    # The mode's lifecycle is the jobs: one more relevant job is in flight, so
+    # the mode stays locked until the worker settles it (see _settle).
+    download_mode.job_started(user["telegram_id"], download_mode.mode_for_url(url))
 
 
 def _parse_format(data: str | None) -> tuple[str, str]:
@@ -2802,5 +2901,12 @@ def _parse_format(data: str | None) -> tuple[str, str]:
 
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext, lang: str = DEFAULT_LANG) -> None:
+    mode = await _get_mode(state)
     await state.clear()
+    if mode != download_mode.NONE:
+        user_id = message.from_user.id if message.from_user is not None else 0
+        if download_mode.has_active(user_id, mode):
+            # Downloads of this mode are still running: /cancel drops the
+            # pending question, never the session guarding those jobs.
+            await state.update_data({download_mode.MODE_KEY: mode})
     await message.answer(t("intake.cancelled", lang), link_preview_options=_NO_PREVIEW)

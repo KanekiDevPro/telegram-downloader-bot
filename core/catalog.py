@@ -298,6 +298,63 @@ MESSAGES: Final[Catalog] = {
             "— یکی از آن‌ها را بفرست."
         ),
     },
+    # Shown when a link from the wrong source arrives while a download mode is
+    # active: the mode stays, nothing is queued, and the message names both the
+    # active mode and where the other source lives.
+    "download.wrong_source_spotify": {
+        "en": (
+            "⚠️ Spotify download mode is active.\n\n"
+            "Please send a Spotify link.\n\n"
+            "To download from elsewhere, wait for the Spotify downloads to "
+            "finish, then pick another section from the main menu."
+        ),
+        "fa": (
+            "⚠️ حالت دانلود اسپاتیفای فعاله\n\n"
+            "لطفاً لینک اسپاتیفای ارسال کنید.\n\n"
+            "برای دانلود از یوتیوب، ابتدا دانلودهای اسپاتیفای را تمام کنید و سپس "
+            "از منوی اصلی گزینه YouTube را انتخاب کنید."
+        ),
+    },
+    "download.wrong_source_youtube": {
+        "en": (
+            "⚠️ YouTube download mode is active.\n\n"
+            "Please send a YouTube link.\n\n"
+            "To download from elsewhere, wait for the YouTube downloads to "
+            "finish, then pick another section from the main menu."
+        ),
+        "fa": (
+            "⚠️ حالت دانلود یوتیوب فعاله\n\n"
+            "لطفاً لینک یوتیوب ارسال کنید.\n\n"
+            "برای دانلود از اسپاتیفای، ابتدا دانلودهای یوتیوب را تمام کنید و سپس "
+            "از منوی اصلی گزینه Spotify را انتخاب کنید."
+        ),
+    },
+    "download.wrong_source_generic": {
+        "en": (
+            "⚠️ This download mode only takes Instagram, TikTok and other "
+            "generic links.\n\n"
+            "Spotify and YouTube links have their own sections — wait for the "
+            "current downloads to finish, then pick one from the main menu."
+        ),
+        "fa": (
+            "⚠️ این حالت دانلود فقط لینک اینستاگرام، تیک‌تاک و سایر لینک‌های "
+            "عمومی را می‌گیرد.\n\n"
+            "لینک‌های اسپاتیفای و یوتیوب بخش خودشان را دارند — ابتدا دانلودهای "
+            "فعلی تمام شود، بعد از منوی اصلی انتخاب کنید."
+        ),
+    },
+    # Shown when the user taps another platform section while the current
+    # mode's downloads are still running: the switch is refused, the mode stays.
+    "download.mode_busy": {
+        "en": (
+            "⏳ The {mode} downloads are still in progress. "
+            "You can switch after they finish."
+        ),
+        "fa": (
+            "⏳ دانلودهای {mode} هنوز در جریان است. "
+            "بعد از اتمام می‌توانید تغییر دهید."
+        ),
+    },
     "download.how": {
         "en": (
             "Send me a link from <b>YouTube, Instagram, Spotify or TikTok</b> — "
