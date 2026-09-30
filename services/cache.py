@@ -24,10 +24,13 @@ import asyncpg
 from core import database
 from core.utils import canonical_url, quality_key, sha256_hex
 from services.extractor import VideoOption
+from services.quality import LOSSLESS_QUALIFIER
 
 __all__ = [
     "cache_key",
     "forget",
+    "parse_request",
+    "qualifier_for",
     "get_cached",
     "get_cached_rows",
     "memorize",
@@ -53,9 +56,52 @@ def url_key(url: str) -> str:
     return sha256_hex(canonical_url(url))
 
 
-def cache_key(url: str, media_format: str = "video", quality: object = "") -> str:
-    """Stable cache key for ``url`` + the requested format and quality tier."""
-    return sha256_hex(f"{canonical_url(url)}|{request_key(media_format, quality)}")
+def cache_key(
+    url: str, media_format: str = "video", quality: object = "", *, qualifier: str = ""
+) -> str:
+    """Stable cache key for ``url`` + the requested format and quality tier.
+
+    ``qualifier`` names a delivery promise the tier alone cannot carry — today
+    only ``"verified-lossless"`` (see services/quality.py): a lossy artifact
+    cached under the bare tier must never satisfy a lossless request, so the
+    two never share a key. Empty keeps the exact key older rows already own.
+    """
+    request = request_key(media_format, quality)
+    if qualifier:
+        request = f"{request}:{qualifier}"
+    return sha256_hex(f"{canonical_url(url)}|{request}")
+
+
+def qualifier_for(media_format: str, quality: object, *, audio_mode: str = "") -> str:
+    """The cache qualifier a request reads and writes under — one derivation.
+
+    Only an explicit ``"true_lossless"`` mode earns the verified-lossless key:
+    every menu the bot draws today passes ``""`` and keeps the exact legacy
+    keys. Reads and writes must both come through here, or a lossless ask
+    could one day be answered from a lossy row.
+    """
+    if media_format == "audio" and audio_mode == "true_lossless":
+        return LOSSLESS_QUALIFIER
+    return ""
+
+
+def parse_request(request: str) -> tuple[str, str, str]:
+    """A stored request back into ``(media_format, tier, qualifier)``.
+
+    ``"audio:mp3.best:verified-lossless"`` → ``("audio", "mp3.best",
+    "verified-lossless")``; anything without a known qualifier keeps its full
+    spelling as the tier, so rows from before qualifiers existed parse exactly
+    as they always did.
+    """
+    media_format, _, rest = (request or "").partition(":")
+    if not media_format:
+        return "", "", ""
+    tier, _, tail = rest.partition(":")
+    if tail == LOSSLESS_QUALIFIER:
+        return media_format, tier, tail
+    if tail:
+        return media_format, f"{tier}:{tail}", ""
+    return media_format, tier, ""
 
 
 def serialize_ladder(options: Sequence[VideoOption]) -> str:
@@ -111,10 +157,17 @@ async def get_cached_rows(pool: asyncpg.Pool, url: str) -> list[asyncpg.Record]:
 
 
 async def get_cached(
-    pool: asyncpg.Pool, url: str, media_format: str = "video", quality: object = ""
+    pool: asyncpg.Pool,
+    url: str,
+    media_format: str = "video",
+    quality: object = "",
+    *,
+    qualifier: str = "",
 ) -> asyncpg.Record | None:
     """Return the cached file entry for this exact request, or None."""
-    return await database.get_cached_file(pool, cache_key(url, media_format, quality))
+    return await database.get_cached_file(
+        pool, cache_key(url, media_format, quality, qualifier=qualifier)
+    )
 
 
 async def memorize(
@@ -128,6 +181,7 @@ async def memorize(
     title: str = "",
     label: str = "",
     ladder: Sequence[VideoOption] = (),
+    qualifier: str = "",
 ) -> None:
     """Store a fresh file_id for a URL after a successful upload.
 
@@ -142,6 +196,8 @@ async def memorize(
     from — stored so the next ask can draw every rung with zero network
     (see :func:`serialize_ladder`).
     """
+    if qualifier:
+        request = f"{request}:{qualifier}"
     await database.store_cached_file(
         pool,
         url_hash=sha256_hex(f"{canonical_url(url)}|{request}"),
@@ -158,7 +214,14 @@ async def memorize(
 
 
 async def forget(
-    pool: asyncpg.Pool, url: str, media_format: str = "video", quality: object = ""
+    pool: asyncpg.Pool,
+    url: str,
+    media_format: str = "video",
+    quality: object = "",
+    *,
+    qualifier: str = "",
 ) -> None:
     """Remove a (possibly stale) cache entry for this exact request."""
-    await database.delete_cached_file(pool, cache_key(url, media_format, quality))
+    await database.delete_cached_file(
+        pool, cache_key(url, media_format, quality, qualifier=qualifier)
+    )

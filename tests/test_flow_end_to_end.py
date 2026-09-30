@@ -293,7 +293,7 @@ def _quiet_edges(monkeypatch: pytest.MonkeyPatch) -> None:
     cache lookups, the preflight verdict — and clean settings in both modules
     that read them."""
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     async def get_daily_usage(pool: Any, telegram_id: int) -> dict[str, Any]:
@@ -441,7 +441,7 @@ async def test_a_resolvable_spotify_link_offers_only_deliverable_audio(
     rows = _buttons(bot.keyboards[-1])
     data = [item for _, item in rows]
     assert "fmt:audio:mp3.best" in data, "the HQ transcode is its own row"
-    assert "fmt:audio:best" in data, "the untouched original is its own row"
+    assert "fmt:audio:m4a" in data, "the untouched original is its own row"
     assert "fmt:audio:flac" not in data, "no fake FLAC"
     assert all(
         item.startswith(("fmt:audio:", "menu:")) for item in data

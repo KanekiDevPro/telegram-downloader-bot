@@ -74,7 +74,7 @@ def test_the_spotify_question_is_two_honest_rows() -> None:
     datas = [data for _, data in rows]
 
     assert "fmt:audio:mp3.best" in datas, f"the HQ transcode row is missing: {rows!r}"
-    assert "fmt:audio:best" in datas, f"the original-audio row is missing: {rows!r}"
+    assert "fmt:audio:m4a" in datas, f"the original-audio row is missing: {rows!r}"
     assert "fmt:audio:flac" not in datas, "fake FLAC must not be offered"
     assert not [data for data in datas if data.startswith("audf:")], (
         f"no preset grid on a track — the tiers are the two rows: {rows!r}"
@@ -88,7 +88,7 @@ def test_the_two_rows_wear_their_honest_labels() -> None:
     names = dict(_buttons(user_module._question_keyboard(SPOTIFY_URL, EN, capability=capability)))
 
     assert names.get(t("fmt.spotify_mp3", EN)) == "fmt:audio:mp3.best"
-    assert names.get(t("fmt.spotify_original", EN)) == "fmt:audio:best"
+    assert names.get(t("fmt.spotify_original", EN)) == "fmt:audio:m4a"
 
 
 def test_spotify_taps_are_judged_by_the_two_rows() -> None:
@@ -96,10 +96,10 @@ def test_spotify_taps_are_judged_by_the_two_rows() -> None:
     data = {"offered": [], "audio_offered": ["mp3"], "options": [], "copy_ok": True}
 
     assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "mp3.best", data) is True
-    assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "best", data) is True
+    assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "m4a", data) is True
     assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "flac", data) is False
     assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "opus.balanced", data) is False
-    assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "m4a", data) is False
+    assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "best", data) is False
 
 
 class RecordingBot:

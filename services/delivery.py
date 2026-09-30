@@ -267,6 +267,9 @@ _AUDIO_EXT_NAMES: dict[str, str] = {
     ".aac": "M4A",
     ".opus": "OPUS",
     ".ogg": "OPUS",
+    # The container a natively copied opus stream arrives in — a produced file
+    # must be named by what it is, never by the tier that asked for it.
+    ".webm": "OPUS",
     ".wav": "WAV",
     ".flac": "FLAC",
 }

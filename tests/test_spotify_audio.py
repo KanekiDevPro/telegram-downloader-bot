@@ -69,7 +69,7 @@ def test_the_spotify_question_has_no_video_or_dummy_rows() -> None:
     callbacks = [data for _label, data in _buttons(keyboard)]
 
     assert "fmt:audio:mp3.best" in callbacks, "the HQ transcode is its own row"
-    assert "fmt:audio:best" in callbacks, "the untouched original is its own row"
+    assert "fmt:audio:m4a" in callbacks, "the untouched original is its own row"
     assert "fmt:audio:flac" not in callbacks, "no fake FLAC"
     assert not [data for data in callbacks if data.startswith("audf:")], "no preset grid"
     assert not [data for data in callbacks if data.startswith("fmt:video:")], "no video rungs"
@@ -93,7 +93,8 @@ def test_a_crafted_non_spotify_codec_is_refused_on_a_track() -> None:
     assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "m4a.balanced", data) is False
     assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "flac", data) is False
     assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "mp3.best", data) is True
-    assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "best", data) is True
+    assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "m4a", data) is True
+    assert user_module._tap_was_offered(SPOTIFY_URL, "audio", "best", data) is False
 
 
 # ---------------------------------------------------------------------------

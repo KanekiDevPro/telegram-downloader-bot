@@ -153,6 +153,9 @@ _CONTAINER_CODECS: dict[str, frozenset[str]] = {
     ".aac": frozenset({"aac", "alac"}),
     ".opus": frozenset({"opus", "vorbis"}),
     ".ogg": frozenset({"opus", "vorbis"}),
+    # A natively copied opus stream keeps its own container (see
+    # services/delivery.py): an opus codec inside it is the file kept honest.
+    ".webm": frozenset({"opus", "vorbis"}),
     ".flac": frozenset({"flac"}),
     ".wav": frozenset(),  # family: pcm_*
 }

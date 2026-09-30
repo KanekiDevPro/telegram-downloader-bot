@@ -144,6 +144,10 @@ class SpotifyTrack:
     duration_s: Optional[int]
     album: str = ""
     year: Optional[int] = None
+    #: The recording's ISRC when the page carried one — best-effort identity,
+    #: never a blocker: most payloads omit it, and a track without one still
+    #: downloads (see services/providers.py: it only ever strengthens a match).
+    isrc: Optional[str] = None
     #: ``(width, url)`` for every size Spotify published, widest last.
     covers: tuple[tuple[int, str], ...] = ()
 
@@ -288,6 +292,8 @@ def _read_track(html: str, track_id_: str) -> SpotifyTrack:
     )
     if not title:
         raise _lookup_failed("عنوان این آهنگ در پاسخ اسپاتیفای نبود.")
+    raw_isrc = entity.get("isrc") or entity.get("ISRC")
+    isrc = str(raw_isrc).strip() or None if isinstance(raw_isrc, str) else None
     return SpotifyTrack(
         track_id=track_id_,
         title=title,
@@ -295,6 +301,7 @@ def _read_track(html: str, track_id_: str) -> SpotifyTrack:
         duration_s=duration_s,
         year=_year(entity.get("releaseDate")),
         covers=_covers(entity.get("visualIdentity")),
+        isrc=isrc,
     )
 
 

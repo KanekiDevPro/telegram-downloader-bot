@@ -921,7 +921,7 @@ async def test_the_question_matches_the_link(monkeypatch: pytest.MonkeyPatch) ->
     assert t("intake.spotify_note", FA) in bot.screens[-1]
     # The question is two honest rows: the HQ transcode and the untouched stream.
     assert ("MP3 · 320 kbps", "fmt:audio:mp3.best") in _buttons(bot.keyboards[-1])
-    assert (t("fmt.spotify_original", FA), "fmt:audio:best") in _buttons(bot.keyboards[-1])
+    assert (t("fmt.spotify_original", FA), "fmt:audio:m4a") in _buttons(bot.keyboards[-1])
     offered = [data for _label, data in _buttons(bot.keyboards[-1])]
     assert "fmt:audio:flac" not in offered, "no fake FLAC"
     assert not [data for data in offered if data.startswith("audf:")], "no preset grid"
@@ -1183,7 +1183,7 @@ async def test_a_group_message_with_a_link_gets_the_same_question(
 
     assert t("intake.choose_audio", FA) in bot.screens[-1]
     assert ("MP3 · 320 kbps", "fmt:audio:mp3.best") in _buttons(bot.keyboards[-1])
-    assert (t("fmt.spotify_original", FA), "fmt:audio:best") in _buttons(bot.keyboards[-1])
+    assert (t("fmt.spotify_original", FA), "fmt:audio:m4a") in _buttons(bot.keyboards[-1])
 
 
 async def test_a_photo_post_is_downloaded_without_a_format_question(
@@ -1194,7 +1194,7 @@ async def test_a_photo_post_is_downloaded_without_a_format_question(
     async def supported(url: str) -> bool:
         return True
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(user_module, "_probe_supported", supported)
@@ -1349,7 +1349,7 @@ async def test_a_file_link_is_never_handed_to_the_extractor_probe(
         asked.append(url)
         return False  # what the real probe says about a CDN file URL
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(user_module, "_probe_supported", probe)
@@ -1436,7 +1436,7 @@ async def test_a_tap_is_acknowledged_silently_and_the_card_takes_over(
     """TAP → WAIT → VIDEO. The callback is answered with silence, the keyboard
     dies on the spot, and not one status message is sent — the card that carried
     the question becomes the job's card."""
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
@@ -1471,7 +1471,7 @@ async def test_a_tier_that_was_never_offered_is_not_queued(
 ) -> None:
     """A crafted callback must not run a download the menu never showed."""
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
@@ -1490,7 +1490,7 @@ async def test_a_tier_that_was_never_offered_is_not_queued(
 async def test_an_exhausted_quota_is_answered_with_an_alert_and_a_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     async def used_up(pool: Any, telegram_id: int) -> dict[str, Any]:
@@ -1516,7 +1516,9 @@ async def test_a_cache_hit_replays_the_file_and_says_so(
 ) -> None:
     sent: list[Any] = []
 
-    async def cached(pool: Any, url: str, media_format: str = "", quality: str = "") -> Any:
+    async def cached(
+        pool: Any, url: str, media_format: str = "", quality: str = "", *, qualifier: str = ""
+    ) -> Any:
         sent.append((media_format, quality))
         return {
             "url_hash": "x",
@@ -1687,7 +1689,7 @@ async def test_the_quality_menu_shows_what_the_link_actually_has(
         "fmt:video:720",
         "fmt:video:360",
         "fmt:video:240",
-        "fmt:audio:best",
+        "fmt:audio:m4a",
         "menu:download",
     ], "the ladder, best first — whatever order the extractor said — then audio-only"
     assert rows[0] == ("1080p · ~14 MB", "fmt:video:1080"), (
@@ -1716,7 +1718,7 @@ async def test_the_chosen_card_shows_the_size_the_menu_promised(
     """After the tap, the card says quality • size — the same estimate the menu
     showed (its ``~`` included), before the file exists to say the real one."""
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
@@ -1742,7 +1744,7 @@ async def test_a_size_the_site_never_reported_stays_off_the_card(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
@@ -1763,7 +1765,7 @@ async def test_a_tap_may_choose_only_what_the_menu_offered(
 ) -> None:
     """A crafted height is data: the offered list on the FSM decides."""
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
@@ -1796,7 +1798,7 @@ async def test_the_same_tap_twice_is_one_download(
     tap, and a second callback for the same request is acknowledged quietly and
     never reaches the queue."""
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
@@ -1967,7 +1969,7 @@ async def test_a_failed_download_offers_a_retry_only_its_owner_can_press(
     )
     retry_data = buttons[0].callback_data
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     async def no_forget(pool: Any, url: str, *args: Any) -> None:
@@ -2621,7 +2623,9 @@ async def test_a_tap_on_the_cached_menu_replays_instead_of_downloading(
     user_module._recent_requests.clear()
     monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
 
-    async def get_cached(pool: Any, url: str, media_format: str, quality: object) -> Any:
+    async def get_cached(
+        pool: Any, url: str, media_format: str, quality: object, *, qualifier: str = ""
+    ) -> Any:
         return {"telegram_file_id": "v-1", "kind": "video", "quality": "video:720"}
 
     sent: list[Any] = []
@@ -2659,7 +2663,9 @@ async def test_the_tapped_menu_leaves_once_the_cached_file_lands(
     user_module._recent_requests.clear()
     monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
 
-    async def get_cached(pool: Any, url: str, media_format: str, quality: object) -> Any:
+    async def get_cached(
+        pool: Any, url: str, media_format: str, quality: object, *, qualifier: str = ""
+    ) -> Any:
         return {"telegram_file_id": "v-1", "kind": "video", "quality": "video:720"}
 
     sent: list[Any] = []
@@ -2698,7 +2704,9 @@ async def test_a_menu_the_chat_refuses_to_delete_still_delivers_its_file(
     user_module._recent_requests.clear()
     monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
 
-    async def get_cached(pool: Any, url: str, media_format: str, quality: object) -> Any:
+    async def get_cached(
+        pool: Any, url: str, media_format: str, quality: object, *, qualifier: str = ""
+    ) -> Any:
         return {"telegram_file_id": "v-1", "kind": "video", "quality": "video:720"}
 
     sent = _replay_recorder(monkeypatch)
@@ -2781,7 +2789,7 @@ def _replay_recorder(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     return sent
 
 
-async def no_cached_row(pool: Any, url: str, *args: Any) -> None:
+async def no_cached_row(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
     return None
 
 
@@ -2834,7 +2842,9 @@ async def test_a_dead_cached_row_is_dropped_and_the_solo_link_downloads(
     monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
     forgotten: list[tuple[str, str]] = []
 
-    async def forget(pool: Any, url: str, media_format: str, quality: object) -> None:
+    async def forget(
+        pool: Any, url: str, media_format: str, quality: object, *, qualifier: str = ""
+    ) -> None:
         forgotten.append((media_format, str(quality)))
 
     async def dead(
@@ -2866,7 +2876,7 @@ async def test_the_same_link_while_it_downloads_is_never_queued_twice(
     so it survives the job *leaving* it (the worker between dequeue and
     delivery). Only once the job settles may the request run again."""
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
@@ -2900,7 +2910,9 @@ async def test_rapid_taps_on_a_cached_menu_deliver_the_file_once(
     concurrently and the guard is decided before the first await."""
     monkeypatch.setattr(user_module.cache_service, "get_cached_rows", _cached_rows_for)
 
-    async def hit(pool: Any, url: str, media_format: str, quality: object) -> Any:
+    async def hit(
+        pool: Any, url: str, media_format: str, quality: object, *, qualifier: str = ""
+    ) -> Any:
         return {"telegram_file_id": "v-1", "kind": "video", "quality": "video:720"}
 
     monkeypatch.setattr(user_module.cache_service, "get_cached", hit)
@@ -3065,7 +3077,9 @@ async def test_a_cached_solo_link_still_sends_itself_instead_of_asking(
             }
         ]
 
-    async def no_get_cached(pool: Any, url: str, media_format: str, quality: object) -> None:
+    async def no_get_cached(
+        pool: Any, url: str, media_format: str, quality: object, *, qualifier: str = ""
+    ) -> None:
         return None
 
     async def replay(
@@ -3105,7 +3119,9 @@ async def test_a_cached_solo_link_still_sends_itself_instead_of_asking(
 def _queueing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cached menus, no cache replay, no preflight refusals — taps reach the queue."""
 
-    async def no_get_cached(pool: Any, url: str, media_format: str, quality: object) -> None:
+    async def no_get_cached(
+        pool: Any, url: str, media_format: str, quality: object, *, qualifier: str = ""
+    ) -> None:
         return None
 
     class _NoRefusal:
@@ -3329,12 +3345,16 @@ async def test_a_dead_cached_rung_still_delivers_by_downloading(
         user_module.cache_service, "get_cached_rows", _rows_returning(_ladder_rows())
     )
 
-    async def get_cached(pool: Any, url: str, media_format: str, quality: object) -> Any:
+    async def get_cached(
+        pool: Any, url: str, media_format: str, quality: object, *, qualifier: str = ""
+    ) -> Any:
         return {"telegram_file_id": "v-1", "kind": "video", "quality": "video:720"}
 
     forgotten: list[tuple[str, str]] = []
 
-    async def forget(pool: Any, url: str, media_format: str, quality: object) -> None:
+    async def forget(
+        pool: Any, url: str, media_format: str, quality: object, *, qualifier: str = ""
+    ) -> None:
         forgotten.append((media_format, str(quality)))
 
     async def dead(
@@ -3524,7 +3544,7 @@ async def test_an_instagram_link_is_downloaded_without_being_asked_about(
             video_options=(VideoOption(1080, 5 * 1024 * 1024, True),),
         )
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(user_module, "_probe_supported", supported)
@@ -3569,7 +3589,7 @@ async def test_a_tiktok_video_is_never_asked_about_either(
     async def supported(url: str) -> bool:
         return True
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(user_module, "_probe_supported", supported)
@@ -3614,7 +3634,7 @@ async def test_an_ambiguous_link_keeps_its_own_menu_without_the_retry_screen(
     async def no_probe(bot: Bot, url: str) -> None:
         return None
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> list[Any]:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> list[Any]:
         return []
 
     monkeypatch.setattr(user_module, "_probe_supported", supported)

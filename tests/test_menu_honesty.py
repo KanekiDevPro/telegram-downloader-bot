@@ -181,7 +181,7 @@ def _quiet_costs(monkeypatch: pytest.MonkeyPatch) -> None:
     async def get_wallet_balance(pool: Any, telegram_id: int) -> int:
         return 0
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     async def supported(url: str) -> bool:
@@ -411,7 +411,7 @@ async def test_a_resolved_spotify_track_says_where_the_audio_comes_from(
         "the DRM/counterpart reality is stated before the menu is drawn"
     )
     assert ("MP3 · 320 kbps", "fmt:audio:mp3.best") in _buttons(bot.keyboards[-1])
-    assert (t("fmt.spotify_original", FA), "fmt:audio:best") in _buttons(
+    assert (t("fmt.spotify_original", FA), "fmt:audio:m4a") in _buttons(
         bot.keyboards[-1]
     )
 

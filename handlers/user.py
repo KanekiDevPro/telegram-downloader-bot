@@ -357,7 +357,7 @@ def _question_keyboard(
             )
         builder.button(
             text=t("fmt.spotify_original", lang),
-            callback_data=_fmt_callback("audio", "best"),
+            callback_data=_fmt_callback("audio", "m4a"),
         )
     else:
         for codec in offered_audio:
@@ -389,11 +389,13 @@ def _question_keyboard(
     if options and not routing.audio_formats:
         # The audio-only row: a video link draws no audio grid, but its sound
         # is still wanted — the site's best audio stream, copied untouched, no
-        # video stream ever downloaded for it. Drawn only with a discovered
+        # video stream ever downloaded for it. The ``m4a`` tier *is* the
+        # no-conversion tier (no postprocessor entry, no ffmpeg needed), so the
+        # file arrives as the site served it. Drawn only with a discovered
         # ladder, so the button never promises what the probe did not find.
         builder.button(
             text=t("fmt.audio_best", lang),
-            callback_data=_fmt_callback("audio", "best"),
+            callback_data=_fmt_callback("audio", "m4a"),
         )
         row_width = 1  # the audio row and the way back each stand alone
     # The way out leads to the Download screen — this question is its child (and
@@ -1808,9 +1810,29 @@ def _request_parts(request: str) -> tuple[str, str]:
     ``"audio:mp3.best"`` → ``("audio", "mp3.best")``; a request with no tier
     names its format's default — the exact spelling ``request_key`` folds it
     back to, so a cached menu's tap is the very request the row remembers.
+    A qualified row (``"audio:mp3.best:verified-lossless"``) taps its bare
+    tier: the qualifier is a cache identity, never a button, and the tap can
+    only ever replay what the exact-key read allows (which is nothing, for a
+    lossless row under a lossy tap — the safe direction).
     """
-    media_format, _, tier = (request or "").partition(":")
+    media_format, tier, _qualifier = cache_service.parse_request(request)
     return media_format, tier or default_quality(media_format)
+
+
+def _audio_cache_qualifier(quality: object, audio_mode: str = "") -> str:
+    """The cache qualifier for an audio read — the same one writes stored under."""
+    return cache_service.qualifier_for("audio", quality, audio_mode=audio_mode)
+
+
+def _audio_sibling_may_replay(current_request: str, row_request: str) -> bool:
+    """Whether an audio sibling row may answer this request — exact match only.
+
+    The auto-best sibling net exists for the media family that has no tier of
+    its own (solo video links); audio tiers are promises (Original vs MP3 320
+    vs True Lossless), and a sibling tier answering across them would hand a
+    lossy file to a lossless ask. Video rows keep the old leniency.
+    """
+    return current_request == row_request
 
 
 async def _cached_rows(pool: asyncpg.Pool, url: str) -> list[Any]:
@@ -2459,9 +2481,11 @@ def _tap_was_offered(
     """
     if not media_format or not quality:
         return False
-    if media_format == "audio" and quality == "best" and spotify.is_spotify_url(url):
+    if media_format == "audio" and quality == "m4a" and spotify.is_spotify_url(url):
         # The track's original row is drawn unconditionally (it needs no ladder
         # and no codec), so its tap is valid whenever the track's menu is up.
+        # The ``m4a`` tier copies the source stream untouched — no container is
+        # promised, so no container honesty applies to it here.
         return True
     if media_format == "video" and data.get("offered") is not None:
         # Every video request is judged by the offered list — "best" included.
@@ -2476,7 +2500,7 @@ def _tap_was_offered(
             quality.split(".", 1)[0] in [str(item) for item in data["audio_offered"]]
             and not (audio_is_original(quality) and data.get("copy_ok") is False)
         )
-    if media_format == "audio" and quality == "best" and data.get("options"):
+    if media_format == "audio" and quality == "m4a" and data.get("options"):
         # The quality menu's audio-only row: a video link draws no audio grid
         # (``audio_offered`` is ``None`` there), so the row is valid exactly
         # when the discovered ladder it was drawn with is still in state.
@@ -2659,13 +2683,16 @@ async def _submit(
     #    a video, and a 480p ask never replays the 1080p file. The replay carries
     #    the same media card, so the user cannot tell (and should not have to care)
     #    whether this file was fetched now or the first time somebody asked.
-    cached = await cache_service.get_cached(pool, url, media_format, quality)
+    read_qualifier = _audio_cache_qualifier(quality) if media_format == "audio" else ""
+    cached = await cache_service.get_cached(
+        pool, url, media_format, quality, qualifier=read_qualifier
+    )
     if cached is not None:
         if await send_cached_file(bot, chat_id, cached, caption=replay_caption(cached, lang)):
             await _forget_menu(message)  # the file landed; the tapped menu goes
             return
         # dead file_id → drop it and fall through to a real download
-        await cache_service.forget(pool, url, media_format, quality)
+        await cache_service.forget(pool, url, media_format, quality, qualifier=read_qualifier)
 
     # 2b) Zero-wait for the auto-best path (solo links): the request has no tier
     #     the user chose, so a stored sibling of the same media family answers it
@@ -2675,9 +2702,20 @@ async def _submit(
     #     only for the request where the engine picks and the caption names what
     #     actually arrived. Dead rows are forgotten and the next one tried.
     if fallback_any_tier:
+        current_request = cache_service.request_key(media_format, quality)
+        if read_qualifier:
+            current_request = f"{current_request}:{read_qualifier}"
         for row in await _cached_rows(pool, url):
-            row_format, row_tier = _request_parts(str(row["quality"] or ""))
+            row_request = str(row["quality"] or "")
+            row_format, row_tier = _request_parts(row_request)
             if row_format != media_format:
+                continue
+            if media_format == "audio" and not _audio_sibling_may_replay(
+                current_request, row_request
+            ):
+                # Audio tiers never borrow each other's rows (see
+                # _audio_sibling_may_replay); the exact-key read above is the
+                # only replay an audio tap gets.
                 continue
             if await send_cached_file(bot, chat_id, row, caption=replay_caption(row, lang)):
                 await _forget_menu(message)  # the file landed; the tapped menu goes

@@ -111,14 +111,16 @@ class _Cache:
         self.forgot: list[str] = []
 
     async def get_cached(
-        self, pool: Any, url: str, media_format: str = "video", quality: object = ""
+        self, pool: Any, url: str, media_format: str = "video", quality: object = "",
+        *, qualifier: str = ""
     ) -> Any:
-        return self.rows.get(cache_service.cache_key(url, media_format, quality))
+        return self.rows.get(cache_service.cache_key(url, media_format, quality, qualifier=qualifier))
 
     async def forget(
-        self, pool: Any, url: str, media_format: str = "video", quality: object = ""
+        self, pool: Any, url: str, media_format: str = "video", quality: object = "",
+        *, qualifier: str = ""
     ) -> None:
-        key = cache_service.cache_key(url, media_format, quality)
+        key = cache_service.cache_key(url, media_format, quality, qualifier=qualifier)
         self.forgot.append(key)
         self.rows.pop(key, None)
 

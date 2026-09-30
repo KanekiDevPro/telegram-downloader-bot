@@ -604,6 +604,16 @@ MESSAGES: Final[Catalog] = {
         "en": "The file that came back is not the format you chose — try another option.",
         "fa": "فایلی که برگشت فرمت انتخابی تو نبود — یک گزینهٔ دیگر رو امتحان کن.",
     },
+    "err.LOSSLESS_UNAVAILABLE": {
+        "en": (
+            "No verified lossless source exists for this track right now — "
+            "the original or MP3 320 will still sound as good as the source."
+        ),
+        "fa": (
+            "فعلاً منبع lossless تأییدشده‌ای برای این آهنگ نیست — "
+            "نسخهٔ اصلی یا MP3 320 هم‌کیفیتِ خودِ منبع است."
+        ),
+    },
     "err.FILE_TOO_LARGE": {
         "en": "The finished file is bigger than Telegram accepts here — pick a smaller quality.",
         "fa": "حجم فایل نهایی از سقف آپلود تلگرام بیشتر است — کیفیت کوچک‌تری را انتخاب کن.",

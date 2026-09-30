@@ -137,7 +137,7 @@ async def test_a_tiktok_video_goes_straight_to_best(monkeypatch: pytest.MonkeyPa
     async def get_daily_usage(pool: Any, telegram_id: int) -> dict[str, Any]:
         return {"daily_downloads": 0, "last_download_date": None}
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(user_module, "_probe_supported", supported)

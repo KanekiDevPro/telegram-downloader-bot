@@ -43,6 +43,8 @@ from core.utils import (
 )
 from services import cache as cache_service
 from services import cookie_refresh, fallback, preflight, recipients, spotify, telemetry, verify
+from services import providers as providers_module
+from services.audio_models import AudioMode, OutputAudio, SourceAudio
 from services.cobalt import CobaltError, CobaltService, audio_format_param
 from services.delivery import (
     ActionPulse,
@@ -66,6 +68,7 @@ from services.extractor import (
     login_looking_block,
     youtube_login_hint,
 )
+from services.quality import LOSSLESS_QUALIFIER, FakeLosslessRejected, QualityEngine, finalize_output
 from services.queue import DownloadTask, TaskQueue
 from services.subscription import effective_daily_limit
 
@@ -501,7 +504,16 @@ async def process_download_task(
         status = await _open_status(task, bot, card)
 
     # 1) Cache re-check (worker-side, guards concurrent duplicate requests).
-    cached = await cache_service.get_cached(pool, task.url, task.media_format, task.quality)
+    #    The read carries the same qualifier the write stored under, so a True
+    #    Lossless ask can never be answered from a lossy row (and vice versa).
+    read_qualifier = (
+        _audio_cache_qualifier(task.quality, task.audio_mode)
+        if task.media_format == "audio"
+        else ""
+    )
+    cached = await cache_service.get_cached(
+        pool, task.url, task.media_format, task.quality, qualifier=read_qualifier
+    )
     if cached is not None:
         # The replay is the answer — no "sending from the cache" line: the file
         # arriving is the whole message, exactly as for a fresh download. Its
@@ -514,7 +526,9 @@ async def process_download_task(
             # goes with it (the same rule as the fresh upload below).
             await _retire_status(status, card=card)
             return
-        await cache_service.forget(pool, task.url, task.media_format, task.quality)
+        await cache_service.forget(
+            pool, task.url, task.media_format, task.quality, qualifier=read_qualifier
+        )
 
     # 1b) Neither engine can fetch a Spotify link (yt-dlp refuses the site by
     #     policy, Cobalt has no Spotify service), so the *link* is rewritten to the
@@ -531,9 +545,18 @@ async def process_download_task(
         # No language argument on purpose: a mapping failure is translated from its
         # *code* by ``error_message`` below, so the Spotify module keeps saying what
         # it diagnosed (Persian, for the log) and the user reads their own language.
-        target = await spotify.youtube_target(task.url, extractor)
+        # Resolved through the audio pipeline (metadata → identity → registry
+        # → engine → URL), never around it: the extractor below downloads
+        # whatever the selected candidate resolved to, nothing else.
+        target = await providers_module.spotify_audio_target(task.url, extractor)
         target_url = target.url
         track = target.track
+        if task.media_format == "audio":
+            # Fake-lossless requests die here, before any extraction, quota or
+            # fallback work: the source facts are still unknown, and the gate
+            # needs none of them (unverified is unverified). Honest tiers plan
+            # through untouched.
+            spotify_audio_plan(SourceAudio(), task.quality, explicit_mode=task.audio_mode)
 
     # 2) Metadata extraction (threaded, non-blocking). A site that refuses *this
     #    request* is the one failure a different address fixes, so it goes to the
@@ -638,6 +661,34 @@ async def process_download_task(
         # A *mapped* link just went through YouTube anonymously (search and all), so
         # "YouTube refuses anonymous requests here" is no longer true.
         preflight.clear_anonymous_refusal()
+
+
+def _audio_cache_qualifier(quality: object, audio_mode: str = "") -> str:
+    """The cache qualifier for an audio read — the same one writes stored under.
+
+    One derivation lives in :func:`services.cache.qualifier_for`; this is its
+    audio-shaped alias so reads never drift from writes by spelling it twice.
+    """
+    return cache_service.qualifier_for("audio", quality, audio_mode=audio_mode)
+
+
+def spotify_audio_plan(
+    source: SourceAudio, tier: object, *, explicit_mode: str = ""
+) -> OutputAudio:
+    """Plan a track's audio request — or refuse fake lossless as an error.
+
+    ``explicit_mode == "true_lossless"`` (a menu row that promises it) forces
+    the strict gate however the tier reads; otherwise the tier decides
+    (``flac``/``wav`` tiers are lossless expectations and face the same gate).
+    A refusal is :class:`ExtractionError` with ``LOSSLESS_UNAVAILABLE`` — the
+    existing error architecture names it to the user, nothing here invents UI.
+    """
+    try:
+        if explicit_mode == AudioMode.TRUE_LOSSLESS.value:
+            return QualityEngine.plan(source, AudioMode.TRUE_LOSSLESS)
+        return QualityEngine.plan_for_tier(source, tier)
+    except FakeLosslessRejected as exc:
+        raise ExtractionError("LOSSLESS_UNAVAILABLE", str(exc)) from exc
 
 
 async def _claim_quota(
@@ -746,6 +797,36 @@ async def _finish_upload(
             verify_task = None
             if mismatch:
                 raise ExtractionError("CONVERSION_MISMATCH", mismatch)
+        #: The lossless qualifier a verified delivery is cached under — empty
+        #: for everything the pipeline can produce today (no verified source
+        #: exists yet), so today's keys are byte-for-byte the legacy ones.
+        qualifier = ""
+        if track is not None and result.media_format == "audio":
+            # Provenance, recorded where the measured file is known: the source
+            # is what the extraction reported (never verified lossless here),
+            # the plan is the gate's own decision, and ffprobe has the last
+            # word on what the bytes became.
+            provenance_source = SourceAudio(
+                container=(
+                    f".{result.info.audio_ext}" if result.info.audio_ext else None
+                ),
+                bitrate_bps=(
+                    int(result.info.audio_kbps) * 1000 if result.info.audio_kbps else None
+                ),
+            )
+            planned = spotify_audio_plan(
+                provenance_source, task.quality, explicit_mode=task.audio_mode
+            )
+            output = finalize_output(provenance_source, facts, planned)
+            logger.info(
+                "audio provenance for %r: %s (transcoded=%s true_lossless=%s)",
+                track.credit,
+                output.provenance.value,
+                output.transcoded,
+                output.true_lossless,
+            )
+            if output.true_lossless:
+                qualifier = LOSSLESS_QUALIFIER
         # What this file may be *called*: the resolution the probe measured, in
         # the caption's own vocabulary (the short edge names a portrait reel).
         # ``None`` when nothing was measured — the caption then falls back to the
@@ -813,6 +894,7 @@ async def _finish_upload(
                     platform=result.info.platform,
                     telegram_file_id=delivered.file_id,
                     request=cache_service.request_key(task.media_format, task.quality),
+                    qualifier=qualifier,
                     kind=delivered.kind,
                     title=media_title,
                     label=produced_quality_label(

@@ -161,8 +161,8 @@ def test_youtube_ladder_carries_an_audio_only_row() -> None:
     )
 
     rows = _buttons(keyboard)
-    assert "fmt:audio:best" in [data for _, data in rows], f"no audio-only row: {rows!r}"
-    label = next(text for text, data in rows if data == "fmt:audio:best")
+    assert "fmt:audio:m4a" in [data for _, data in rows], f"no audio-only row: {rows!r}"
+    label = next(text for text, data in rows if data == "fmt:audio:m4a")
     assert label == t("fmt.audio_best", FA), f"the row must wear its own label: {label!r}"
 
 
@@ -170,7 +170,7 @@ def test_audio_only_row_needs_a_discovered_ladder() -> None:
     """No ladder, no row: without formats the button would promise nothing."""
     keyboard = user_module._question_keyboard(YOUTUBE, FA, options=(), capability=None)
 
-    assert "fmt:audio:best" not in [data for _, data in _buttons(keyboard)]
+    assert "fmt:audio:m4a" not in [data for _, data in _buttons(keyboard)]
 
 
 def test_audio_best_tap_is_honoured_only_with_a_discovered_ladder() -> None:
@@ -183,8 +183,8 @@ def test_audio_best_tap_is_honoured_only_with_a_discovered_ladder() -> None:
     }
     without_ladder = {"offered": ["best"], "audio_offered": None, "options": []}
 
-    assert user_module._tap_was_offered(YOUTUBE, "audio", "best", with_ladder) is True
-    assert user_module._tap_was_offered(YOUTUBE, "audio", "best", without_ladder) is False
+    assert user_module._tap_was_offered(YOUTUBE, "audio", "m4a", with_ladder) is True
+    assert user_module._tap_was_offered(YOUTUBE, "audio", "m4a", without_ladder) is False
 
 
 class RecordingBot:
@@ -269,7 +269,7 @@ def _quiet_costs(monkeypatch: pytest.MonkeyPatch) -> None:
     async def get_wallet_balance(pool: Any, telegram_id: int) -> int:
         return 0
 
-    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+    async def no_cache(pool: Any, url: str, *args: Any, **kwargs: Any) -> None:
         return None
 
     async def supported(url: str) -> bool:
@@ -309,10 +309,10 @@ async def test_audio_only_tap_queues_best_audio_without_video() -> None:
         queue=cast(Any, queue),
     )
     first_menu = [data for kb in bot.keyboards for _, data in _buttons(kb)]
-    assert "fmt:audio:best" in first_menu, "cold links must draw the audio row immediately"
+    assert "fmt:audio:m4a" in first_menu, "cold links must draw the audio row immediately"
 
     await user_module.on_format_chosen(
-        _callback(bot, "fmt:audio:best"),
+        _callback(bot, "fmt:audio:m4a"),
         state,
         _user(),
         object(),
@@ -323,4 +323,4 @@ async def test_audio_only_tap_queues_best_audio_without_video() -> None:
 
     assert len(queue.tasks) == 1, "the audio tap queues exactly one job"
     assert queue.tasks[0].media_format == "audio"
-    assert queue.tasks[0].quality == "best"
+    assert queue.tasks[0].quality == "m4a"

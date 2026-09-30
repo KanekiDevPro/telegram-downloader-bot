@@ -277,7 +277,8 @@ def _install(
     claims = 0
 
     async def get_cached(
-        pool: Any, url: str, media_format: str = "video", quality: str = ""
+        pool: Any, url: str, media_format: str = "video", quality: str = "",
+        *, qualifier: str = ""
     ) -> None:
         return None
 
@@ -372,6 +373,7 @@ async def test_a_blocked_extraction_is_served_by_the_fallback(
             "platform": "youtube",
             "telegram_file_id": "file-1",
             "request": "video",
+            "qualifier": "",
             "kind": "video",
             "title": "Big Buck Bunny",
             "label": "",
@@ -521,6 +523,7 @@ async def test_an_image_post_is_sent_as_a_photo(
             "platform": "twitter",
             "telegram_file_id": "photo-1",
             "request": "video",
+            "qualifier": "",
             "kind": "photo",
             "title": "twitter_123",
             "label": "",
@@ -553,6 +556,7 @@ async def test_a_post_with_several_pictures_arrives_as_one_album(
             "platform": "twitter",
             "telegram_file_id": join_file_ids(["photo-1", "photo-2"]),
             "request": "video",
+            "qualifier": "",
             "kind": "photo_group",
             "title": "twitter_1",
             "label": "",
@@ -655,7 +659,7 @@ MAPPED_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 
 def _target() -> Any:
-    """What ``spotify.youtube_target`` answers: a track and the video standing in."""
+    """What the Spotify→provider mapping answers: a track and the video standing in."""
     from services.spotify import SpotifyTarget, SpotifyTrack
 
     track = SpotifyTrack(
@@ -673,13 +677,13 @@ def _patch_mapping(monkeypatch: pytest.MonkeyPatch, *, error: Optional[Extractio
     """Stand in for the Spotify lookup + search (pinned in test_spotify)."""
     asked: list[str] = []
 
-    async def youtube_target(url: str, extractor: Any, **kwargs: Any) -> Any:
+    async def spotify_audio_target(url: str, extractor: Any, **kwargs: Any) -> Any:
         asked.append(url)
         if error is not None:
             raise error
         return _target()
 
-    monkeypatch.setattr(worker.spotify, "youtube_target", youtube_target)
+    monkeypatch.setattr(worker.providers_module, "spotify_audio_target", spotify_audio_target)
     return asked
 
 
@@ -705,6 +709,7 @@ async def test_a_spotify_link_is_rewritten_before_anything_is_tried(
             "platform": "youtube",
             "telegram_file_id": "file-1",
             "request": "video",
+            "qualifier": "",
             "kind": "video",
             "title": "Never Gonna Give You Up",  # the song, so a replay names it too
             "label": "",

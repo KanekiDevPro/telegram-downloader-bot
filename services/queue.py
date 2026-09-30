@@ -124,6 +124,11 @@ class DownloadTask:
     #: the task so one job costs one extraction, not two.
     is_live: Optional[bool] = None
     size_estimate: Optional[int] = None
+    #: Explicit audio mode (``"true_lossless"``) — set only by a menu row that
+    #: promises it. Empty means "derive from the tier" (every menu today): the
+    #: worker plans ``flac``/``wav`` tiers as lossless expectations and honest
+    #: transcodes otherwise. Old payloads carry nothing and keep working.
+    audio_mode: str = ""
 
     #: Quota bookkeeping (worker-internal): the daily slot this run claimed
     #: and has not yet either refunded (it failed before any delivery) or
