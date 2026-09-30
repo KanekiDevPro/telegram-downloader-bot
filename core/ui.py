@@ -29,7 +29,7 @@ import secrets
 import time
 from typing import Any, Mapping, NamedTuple
 
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -200,6 +200,27 @@ async def edit_or_reply(message: Message, text: str, **kwargs: Any) -> None:
         if "message is not modified" in str(exc):
             return
         await message.answer(text, **kwargs)
+
+
+async def reset_to_text(message: Message, text: str, **kwargs: Any) -> None:
+    """Back-navigation: the previous menu as text, never a caption under a photo.
+
+    A question asked as a photo (the link's own thumbnail) cannot become a text
+    menu by editing — a caption rewrite would leave the old picture standing
+    next to a screen that no longer belongs to it. So a media message is
+    deleted and the menu answered fresh, while a text message is edited in
+    place like every other screen. A delete the chat refuses falls back to the
+    caption rewrite: navigating with the old picture beats stranding the user.
+    """
+    if not _is_media(message):
+        await edit_or_reply(message, text, **kwargs)
+        return
+    try:
+        await message.delete()
+    except (TelegramBadRequest, TelegramRetryAfter):
+        await edit_or_reply(message, text, **kwargs)
+        return
+    await message.answer(text, **kwargs)
 
 
 async def show_screen(message: Message, screen: Screen) -> None:

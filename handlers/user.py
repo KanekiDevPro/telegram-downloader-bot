@@ -49,6 +49,7 @@ from core.i18n import (
 )
 from core.ui import RETRY_PREFIX, callback_message, remember_retry, retry_keyboard, take_retry
 from core.ui import edit_or_reply as _edit_or_reply
+from core.ui import reset_to_text as _reset_to_text
 from core.utils import (
     default_quality,
     escape_html,
@@ -789,7 +790,7 @@ async def on_menu_home(
         return
     await cb.answer()
     await state.set_state(None)
-    await _edit_or_reply(
+    await _reset_to_text(
         message,
         _welcome_text(user["username"] or t("misc.friend", lang), lang),
         reply_markup=_menu_for(user, lang, looks=await _button_looks(pool)),
@@ -833,7 +834,7 @@ async def on_menu_download(
             if not content.visible_sections(disabled)
             else t("download.some_off", lang),
         ]
-    await _edit_or_reply(
+    await _reset_to_text(
         message,
         "\n".join(lines),
         reply_markup=_download_keyboard(lang, disabled=disabled),
@@ -1515,14 +1516,15 @@ async def _intake_flow(
             fallback_any_tier=True,
         )
         return
-    if routing.platform == "instagram":
-        # Instagram is the one section this bot promises a straight download on.
-        # A reel, a post and a story each hold a single file, and the resolutions
-        # a reel *does* have sit behind a login wall — so the ladder here is a
-        # menu of «best» drawn from a lookup that mostly fails, and the honest
-        # answer is to ask nothing. The automatic request goes straight to the
-        # card and the worker's engines (yt-dlp, then the cobalt fallback) fetch
-        # the best they can get.
+    if routing.platform in ("instagram", "tiktok"):
+        # Instagram and TikTok are the sections this bot promises a straight
+        # download on. A reel, a post, a story, a TikTok video — each holds a
+        # single file, and the resolutions a reel or a TikTok *does* have sit
+        # behind a login wall — so the ladder here is a menu of «best» drawn
+        # from a lookup that mostly fails, and the honest answer is to ask
+        # nothing. The automatic request goes straight to the card and the
+        # worker's engines (yt-dlp, then the cobalt fallback) fetch the best
+        # they can get.
         await state.clear()
         status = await message.answer(
             media_card(url=url, lang=lang), link_preview_options=_NO_PREVIEW

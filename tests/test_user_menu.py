@@ -3553,41 +3553,47 @@ async def test_an_instagram_link_is_downloaded_without_being_asked_about(
     ), "nothing was offered, so nothing can be tapped"
 
 
-async def test_a_failed_probe_on_a_claimed_platform_draws_the_automatic_row(
+async def test_a_tiktok_video_is_never_asked_about_either(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """BUG 3, pinned on a TikTok link: the menu probe never consulted the
-    fallback, so a blocked link stalled at probe_failed while the download path —
-    which *does* fall back to cobalt — would have served it. The failed probe
-    now draws the automatic row (spelled automatic) alongside the retry.
-
-    Instagram is no longer the example here: it is never asked at all, on any
-    probe outcome (see the test above).
+    """TikTok joins Instagram: a video holds one file behind a login wall, so
+    the probe is never consulted and no ladder is drawn — the link goes
+    straight to the automatic best download (the old probe-failed screen with
+    its automatic row belonged to the asking era).
     """
     async def supported(url: str) -> bool:
         return True
 
+    async def no_cache(pool: Any, url: str, *args: Any) -> None:
+        return None
+
     monkeypatch.setattr(user_module, "_probe_supported", supported)
+    monkeypatch.setattr(user_module.cache_service, "get_cached", no_cache)
     bot = RecordingBot()
     url = "https://www.tiktok.com/@user/video/123"
     message = _message(url, bot)
+    state = await _state(url)
+    queue = _fake_queue()
 
     await user_module._queue_url_flow(
         message,
-        await _state(url),
+        state,
         _user(),
         url,
         FA,
         bot=cast(Bot, bot),
         pool=object(),
-        queue=_fake_queue(),
+        queue=queue,
     )
 
-    rows = _buttons(bot.keyboards[-1])
-    assert (t("intake.probe_retry_btn", FA), user_module.PROBE_CALLBACK) in rows
-    assert (t("intake.auto_best_btn", FA), "fmt:video:best") in rows, (
-        "a video link with no ladder still gets the fallback's door"
-    )
+    assert len(queue.tasks) == 1, "asked nothing — queued directly"
+    assert (queue.tasks[0].media_format, queue.tasks[0].quality) == ("video", "best")
+    assert await state.get_state() is None, "no format question is left open"
+    assert all(
+        user_module.PROBE_CALLBACK not in data
+        for kb in bot.keyboards
+        for _label, data in _buttons(kb)
+    ), "the probe screen never appears for a TikTok video"
 
 
 async def test_an_ambiguous_link_keeps_its_own_menu_without_the_retry_screen(
