@@ -648,6 +648,20 @@ MESSAGES: Final[Catalog] = {
         "en": "Something went wrong on our side.",
         "fa": "یه مشکلی سمت ما پیش اومد.",
     },
+    # Shown when a tap or link names a job the single-flight queue already holds:
+    # nothing new is queued, so the card must say where the file will actually
+    # arrive — the first card's message. True whether that job later succeeds or
+    # fails; it never promises an outcome, only where to look.
+    "work.already_running": {
+        "en": (
+            "⏳ This download is already running.\n"
+            "It will arrive in its original message — no need to send the link again."
+        ),
+        "fa": (
+            "⏳ این دانلود در حال انجاست.\n"
+            "نتیجه توی همون پیام اصلی میاد — لازم نیست لینک را دوباره بفرستی."
+        ),
+    },
     "work.login_block": {
         "en": (
             "🔒 This link can only be downloaded with a signed-in account, and the bot's "

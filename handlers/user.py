@@ -2892,6 +2892,22 @@ async def _submit(
     #    back as -1 and this trigger is dropped — one request, one download, one
     #    delivery, no matter how many times or how concurrently it is asked for.
     if await queue.enqueue(task) < 0:
+        # Single-flight refusal: the same logical job is already in the air (a
+        # re-sent link past the double-tap window). The card was already edited
+        # to the wait state above, so it must reach a terminal state here — one
+        # that stays true whether the first job later succeeds or fails: the
+        # file lands in the *first* card's message, and this one only says so.
+        # Nothing else changes on this path: no mode counter was touched
+        # (job_started runs below), no quota was claimed (worker-side only),
+        # and no second download exists. Note the claim's TTL is the only clock
+        # here — a crashed first job holds its claim until it expires (see
+        # services/queue.claim_ttl), during which this message over-promises;
+        # that staleness is reported separately, not redesigned here.
+        await _edit_or_reply(
+            message,
+            f"{card}\n\n{t('work.already_running', lang)}",
+            link_preview_options=_NO_PREVIEW,
+        )
         return
     # The mode's lifecycle is the jobs: one more relevant job is in flight, so
     # the mode stays locked until the worker settles it (see _settle).
