@@ -29,7 +29,7 @@ from core.utils import escape_html, utcnow
 from services import helper_watch
 from services.doctor import describe_age
 from services.extractor import ExtractionError, classify_block, url_host
-from services.queue import DownloadTask
+from services.queue import BOOT_ID, DownloadTask
 
 logger = logging.getLogger(__name__)
 
@@ -600,11 +600,16 @@ class JobTimings:
     task carried one — kept for correlation, never mixed into durations.
     ``started_at`` is the worker's own monotonic start and anchors ``total_ms``
     (wall and monotonic clocks must never meet in one subtraction).
+    ``enqueued_mono``/``enqueued_by`` carry the gateway's monotonic enqueue
+    stamp and its maker's token — the queue-wait anchor, read only through
+    :func:`queue_wait_ms`.
     ``completed_at`` is a monotonic stamp like the rest; unset stages stay
     ``None`` and read back as ``None`` metrics, never zeroes.
     """
 
     received_at: float = 0.0
+    enqueued_mono: float | None = None
+    enqueued_by: str = ""
     started_at: float | None = None
     probe_started_at: float | None = None
     probe_finished_at: float | None = None
@@ -653,6 +658,29 @@ def stage_ms(start: object, end: object) -> float | None:
     """
     span = _span_s(start, end)
     return span * 1000.0 if span is not None else None
+
+
+def queue_wait_ms(
+    enqueued_mono: object, enqueued_by: object, started_at: object, own_boot_id: object
+) -> float | None:
+    """Milliseconds a job waited between enqueue and worker start — ``None`` when
+    unmeasurable.
+
+    Measurable needs all three: a positive enqueue stamp (``0.0`` is the
+    documented "unknown" sentinel, never a real reading), a maker token equal
+    to this process's own (a monotonic stamp is only valid where it was taken —
+    a task that crossed a restart reads as unknown), and a worker start at or
+    after it. Anything else — missing, foreign, hostile or backwards stamps —
+    reads as ``None``, never a guess and never negative.
+    """
+    if not isinstance(enqueued_by, str) or not enqueued_by:
+        return None
+    if not isinstance(own_boot_id, str) or enqueued_by != own_boot_id:
+        return None
+    stamp = _as_seconds(enqueued_mono)
+    if stamp is None or stamp <= 0:
+        return None
+    return stage_ms(stamp, started_at)
 
 
 def safe_mbps(byte_count: object, seconds: object) -> float | None:
@@ -710,6 +738,9 @@ def download_metrics_record(
             "ok": bool(ok),
             "error_code": str(error_code or ""),
             "cache_hit": bool(t.cache_hit),
+            "queue_wait_ms": queue_wait_ms(
+                t.enqueued_mono, t.enqueued_by, t.started_at, BOOT_ID
+            ),
             "probe_ms": stage_ms(t.probe_started_at, t.probe_finished_at),
             "download_ms": stage_ms(t.download_started_at, t.download_finished_at),
             "processing_ms": stage_ms(t.processing_started_at, t.processing_finished_at),
@@ -732,6 +763,7 @@ def download_metrics_record(
             "ok": bool(ok),
             "error_code": "",
             "cache_hit": False,
+            "queue_wait_ms": None,
             "probe_ms": None,
             "download_ms": None,
             "processing_ms": None,

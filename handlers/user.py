@@ -82,7 +82,7 @@ from services.extractor import (
     audio_is_original,
     audio_size_estimate,
 )
-from services.queue import DownloadTask, TaskQueue
+from services.queue import BOOT_ID, DownloadTask, TaskQueue
 from services.subscription import effective_daily_limit, is_admin, is_premium_active
 
 logger = logging.getLogger(__name__)
@@ -2792,6 +2792,12 @@ async def _submit(
         is_live=is_live,
         size_estimate=size_estimate,
         queued_at=time.time(),
+        # Queue-wait anchor: this process's monotonic now plus its maker token.
+        # The worker only subtracts it from its own stamps when the token
+        # matches (see telemetry.queue_wait_ms) — a task that crosses a restart
+        # reads its wait as unknown instead of a cross-clock fiction.
+        enqueued_mono=time.monotonic(),
+        enqueued_by=BOOT_ID,
     )
 
     # 2) Smart cache hit → resend the previous file_id instantly, no re-download.

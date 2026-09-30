@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
@@ -86,6 +87,13 @@ def create_redis_client(url: str) -> aioredis.Redis:
     )
 
 
+#: This process's identity for monotonic stamps. A ``time.monotonic`` reading is
+#: only valid inside the process that took it, so every stamp carries the token
+#: of its maker and a wait is only measurable when the two match. Set once at
+#: import and never mutated — an equality token, not shared coordination state.
+BOOT_ID: str = uuid.uuid4().hex
+
+
 @dataclass(slots=True)
 class DownloadTask:
     """One queued download request (serialized as JSON in the queue).
@@ -139,6 +147,15 @@ class DownloadTask:
     #: telemetry anchor for end-to-end totals. ``0.0`` means "unknown" (older
     #: payloads); stage durations never use it, only the monotonic stamps do.
     queued_at: float = 0.0
+    #: Gateway monotonic stamp (``time.monotonic``) taken when the task was
+    #: enqueued — the queue-wait anchor. ``0.0`` means "unknown" (older
+    #: payloads); only ever subtracted from stamps carrying the same
+    #: ``enqueued_by`` token, never from wall time.
+    enqueued_mono: float = 0.0
+    #: The process token (``BOOT_ID``) that took ``enqueued_mono``. A task that
+    #: crossed a restart — or a second process — carries a foreign token and its
+    #: wait reads as unknown, never as a guessed number.
+    enqueued_by: str = ""
 
     def to_payload(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)

@@ -519,6 +519,12 @@ async def process_download_task(
     # One record per completed job, emitted below; never raises, never blocks.
     timings = telemetry.new_timings(getattr(task, "queued_at", 0.0) or 0.0)
     timings.started_at = started
+    # The queue-wait anchor rides the task: the gateway's monotonic enqueue
+    # stamp and its maker's token. Only this process's own stamps may meet in
+    # one subtraction — foreign or missing stamps read as None downstream (see
+    # telemetry.queue_wait_ms), never as a number.
+    timings.enqueued_mono = getattr(task, "enqueued_mono", 0.0) or 0.0
+    timings.enqueued_by = getattr(task, "enqueued_by", "") or ""
     platform_name = content.platform_for(task.url)
 
     def _emit_metrics(ok: bool, error_code: str = "") -> None:
