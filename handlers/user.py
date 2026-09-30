@@ -1659,7 +1659,13 @@ async def _ask_about_link(
         source_kbps=(info.audio_kbps if info is not None else None),
         source_kbps_approx=(info.audio_kbps_approx if info is not None else False),
         offered=_offered_tiers(url, options),
-        audio_offered=(list(capability.formats) if routing.audio_formats else None),
+        # The router's formats bound the vocabulary: on a Spotify track only
+        # mp3/flac were drawn, so a crafted tap for anything else is refused.
+        audio_offered=(
+            [codec for codec in capability.formats if codec in routing.audio_formats]
+            if routing.audio_formats
+            else None
+        ),
         copy_ok=capability.copy_ok,
         live=(info.is_live if info is not None else None),
         size_guess=(info.filesize_approx if info is not None else None),

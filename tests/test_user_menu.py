@@ -924,11 +924,12 @@ async def test_the_question_matches_the_link(monkeypatch: pytest.MonkeyPatch) ->
     assert ("🎧 FLAC", "fmt:audio:flac") in _buttons(bot.keyboards[-1]), (
         "lossless has no quality knob and submits from here"
     )
-    assert ("🎧 WAV", "fmt:audio:wav") in _buttons(bot.keyboards[-1]), (
-        "wav has no quality knob and submits from here"
-    )
-    # Two per row, the way back filling the last one: the formats pair up.
-    assert [len(row) for row in bot.keyboards[-1].inline_keyboard] == [2, 2, 2]
+    offered = [data for _label, data in _buttons(bot.keyboards[-1])]
+    assert "audf:m4a" not in offered and "audf:opus" not in offered, "conversions of a conversion"
+    assert "fmt:audio:wav" not in offered, "a track is MP3 or FLAC, never WAV"
+    assert not [data for data in offered if data.startswith("fmt:video:")], "no video rungs"
+    # Two per row, the way back under them: the two formats pair up.
+    assert [len(row) for row in bot.keyboards[-1].inline_keyboard] == [2, 1]
     # One message: the media card on top, the question under it.
     assert len(bot.screens) == 1
     assert bot.screens[0].splitlines()[0].startswith("🔗 https://open.spotify.com")

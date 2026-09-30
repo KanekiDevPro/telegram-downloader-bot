@@ -41,6 +41,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass, replace
 from html import unescape as _unescape
 from pathlib import Path
@@ -49,6 +51,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+from core.utils import sanitize_filename
 from services.extractor import ExtractionError, ExtractorService, SearchHit, url_host
 
 logger = logging.getLogger(__name__)
@@ -402,6 +405,105 @@ async def download_cover(
         logger.info("could not write the cover art for %s (%r)", track.track_id, exc)
         return None
     return path
+
+
+def track_filename(track: SpotifyTrack, suffix: str) -> str:
+    """The file this song is stored under: ``Artist — Title`` plus the container.
+
+    Sanitized, never the fallback's title: a YouTube rip arrives named like a
+    video ("Official Video", a channel name, re-upload noise), while the song
+    the user asked for is named like a song. An empty credit falls back to the
+    bare title rather than to an empty name.
+    """
+    stem = track.credit.strip() or track.title.strip() or "track"
+    ext = suffix if suffix.startswith(".") else f".{suffix}"
+    return sanitize_filename(stem) + ext
+
+
+#: How long the tagging ffmpeg may take. Metadata-only (``-c copy``): seconds,
+#: never minutes — a stuck ffmpeg must not hold a worker slot.
+TAG_TIMEOUT_S = 60.0
+
+#: The containers worth tagging in place. Anything else (a video, a stranger's
+#: container) is left exactly as it arrived rather than rewritten into a shape
+#: the tagging never promised.
+_TAGGABLE_SUFFIXES = frozenset({".mp3", ".flac"})
+
+
+def tag_audio(
+    path: Path, track: SpotifyTrack, cover: Optional[Path] = None
+) -> bool:
+    """Write the track into its own file: tags and cover art, no re-encode.
+
+    ``True`` when the file now carries Spotify's own title, artists, album and
+    year (ID3v2 for MP3, Vorbis comments for FLAC) plus the cover as an attached
+    picture — with the audio streams copied untouched. ``False`` — never a raise
+    — when there is nothing safe to do (no ffmpeg, a container this does not
+    tag, a tag run that failed): the download is still the download, and the
+    upload path treats a ``False`` as "send it as it arrived".
+
+    Any artwork the fallback left in the file goes with the rewrite: the mapping
+    is ``-map 0:a``, so a YouTube thumbnail riding the rip is dropped and only
+    the track's own cover (when one was fetched) is attached.
+    """
+    if path.suffix.lower() not in _TAGGABLE_SUFFIXES:
+        return False
+    if not track.title.strip() and not track.artists:
+        return False
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        logger.info("no ffmpeg — sending the Spotify file untagged")
+        return False
+    command = [ffmpeg, "-y", "-v", "error", "-i", str(path)]
+    if cover is not None and cover.is_file():
+        command += ["-i", str(cover)]
+    command += ["-map", "0:a", "-c", "copy"]
+    if path.suffix.lower() == ".mp3":
+        command += ["-id3v2_version", "3"]
+    command += ["-metadata", f"title={track.title}"]
+    if track.artist:
+        command += ["-metadata", f"artist={track.artist}"]
+    if track.album:
+        command += ["-metadata", f"album={track.album}"]
+    if track.year:
+        command += ["-metadata", f"date={track.year}"]
+    if cover is not None and cover.is_file():
+        command += [
+            "-map",
+            "1",
+            "-disposition:v",
+            "attached_pic",
+            "-metadata:s:v",
+            'title="Album cover"',
+            "-metadata:s:v",
+            'comment="Cover (front)"',
+        ]
+    staged = path.with_name(f"{path.name}.tagged{path.suffix}")
+    command.append(str(staged))
+    try:
+        subprocess.run(command, check=True, timeout=TAG_TIMEOUT_S, capture_output=True)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning(
+            "tagging %s as %r failed (%r) — sending it as it arrived",
+            path.name,
+            track.credit,
+            exc,
+        )
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    try:
+        staged.replace(path)
+    except OSError as exc:
+        logger.warning("could not install the tags for %s (%r)", path.name, exc)
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------

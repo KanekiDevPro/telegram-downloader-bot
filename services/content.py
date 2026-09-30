@@ -618,16 +618,28 @@ def classify(url: str) -> ContentKind:
     return "media"
 
 
+#: Spotify serves genuine audio only: the mapped YouTube stand-in could produce
+#: anything, but the song the user asked for is an MP3 or a FLAC — never a video
+#: rung, never a dummy row. m4a/opus/wav are conversions of a conversion here,
+#: and the menu does not offer what the song is not.
+SPOTIFY_AUDIO_FORMATS: tuple[str, ...] = ("mp3", "flac")
+
+
 def routing_for(url: str) -> Routing:
     """The header and the buttons this link deserves."""
     kind = classify(url)
+    platform = platform_for(url)
+    if platform == "spotify" and kind in _AUDIO_MENU_KINDS:
+        audio_formats: tuple[str, ...] = SPOTIFY_AUDIO_FORMATS
+    else:
+        audio_formats = AUDIO_FORMATS if kind in _AUDIO_MENU_KINDS else ()
     return Routing(
         kind=kind,
-        platform=platform_for(url),
+        platform=platform,
         header_key=_HEADERS[kind],
         choices=_CHOICES[kind],
         media_choice=_MEDIA_CHOICE if kind == "media" else None,
-        audio_formats=AUDIO_FORMATS if kind in _AUDIO_MENU_KINDS else (),
+        audio_formats=audio_formats,
     )
 
 

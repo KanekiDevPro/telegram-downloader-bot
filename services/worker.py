@@ -12,7 +12,7 @@ import logging
 import shutil
 import time
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -751,6 +751,11 @@ async def _finish_upload(
         # ``None`` when nothing was measured — the caption then falls back to the
         # metadata, exactly as it always did.
         measured_p = verify.measured_label_p(facts) if facts is not None else None
+        if track is not None and result.media_format == "audio":
+            # A mapped song arrives named like the video it was fetched through;
+            # file it under its own name and tag it before the send. Best-effort:
+            # the upload below sends whatever this returns, tagged or not.
+            result = await _prepare_track_file(result, track, cover)
         async with ActionPulse(
             bot, task.chat_id, upload_action(_delivery_kind(files[0], result.media_format))
         ):
@@ -1282,6 +1287,37 @@ async def _send_photos(bot: Bot, chat_id: int, images: list[Path], caption: str)
     if len(ids) != len(images):  # pragma: no cover — Telegram answers one per photo
         logger.warning("sent %s photos but got %s ids back", len(images), len(ids))
     return Delivered(file_id=join_file_ids(ids), kind="photo_group")
+
+
+async def _prepare_track_file(
+    result: DownloadResult,
+    track: spotify.SpotifyTrack,
+    cover: Path | None,
+) -> DownloadResult:
+    """File the song under its own name and tag it — best-effort, never fatal.
+
+    The rename drops the fallback's video-shaped filename ("Official Video",
+    channel noise) for ``Artist — Title``; the tagging writes Spotify's own
+    metadata and cover into the bytes (see :func:`services.spotify.tag_audio`).
+    Either step failing leaves the download itself untouched: the file still
+    uploads, under its old name when the rename refused, untagged when ffmpeg
+    could not run. Runs after verification on purpose — an attached picture is
+    a stream the delivery probe was never asked to measure.
+    """
+    target = result.file_path.with_name(
+        spotify.track_filename(track, result.file_path.suffix)
+    )
+    if target != result.file_path:
+        try:
+            result.file_path.rename(target)
+        except OSError:
+            logger.warning("could not rename %s as %r", result.file_path.name, track.credit)
+            return result
+        result = replace(result, file_path=target)
+    tagged = await asyncio.to_thread(spotify.tag_audio, result.file_path, track, cover)
+    if not tagged:
+        logger.info("sending %s untagged", result.file_path.name)
+    return result
 
 
 async def _send_file(
