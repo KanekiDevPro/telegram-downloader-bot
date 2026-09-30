@@ -644,18 +644,27 @@ def _answer(title: str) -> MediaInfo:
     )
 
 
-def test_the_metadata_probe_races_the_fast_clients_and_takes_the_first_answer(
+def test_the_metadata_probe_races_the_fast_clients_and_merges_the_straggler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The intake budget is "as fast as the menu can appear", so the probe asks
-    the two metadata-fast clients (``mweb``, ``tv``) *at the same time* and
-    serves the menu from whichever answers first — the wait is the minimum of
-    the two, not the sum yt-dlp spends walking a client list one player response
-    at a time. The loser is asked anyway (its answer is simply not waited for),
-    one single-client request per racer: no request names a client twice."""
+    the two metadata-fast clients (``mweb``, ``tv``) *at the same time*: the
+    first answer names the media, and the slower leg gets a short bounded grace
+    to widen the format view before the menu is drawn — the wait is never the
+    sum yt-dlp spends walking a client list one player response at a time, and
+    one single-client request runs per racer: no request names a client twice."""
+    from dataclasses import replace
+
+    from services.extractor import VideoOption
+
     extractor = _extractor(youtube_clients=("mweb", "tv", "web"))
     seen: list[tuple[str, ...]] = []
-    mweb, tv = _answer("mweb"), _answer("tv")
+    mweb = replace(
+        _answer("mweb"), video_options=(VideoOption(1080, 8, True, 1920),)
+    )
+    tv = replace(
+        _answer("tv"), video_options=(VideoOption(360, 1, True, 640),)
+    )
 
     def fake_sync(url: str, *, youtube_clients: tuple[str, ...] | None = None) -> MediaInfo:
         seen.append(tuple(youtube_clients or ()))
@@ -668,10 +677,10 @@ def test_the_metadata_probe_races_the_fast_clients_and_takes_the_first_answer(
 
     info = asyncio.run(extractor.extract("https://youtu.be/x"))
 
-    deadline = time.monotonic() + 2  # the loser thread finishes after the winner returns
-    while len(seen) < 2 and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert info is tv, "the first answer wins — the other racer is not waited for"
+    assert info.title == "tv", "the first answer still names the media"
+    assert {option.height for option in info.video_options} == {360, 1080}, (
+        "the straggler's rungs widen the menu instead of being dropped"
+    )
     assert set(seen) == {("mweb",), ("tv",)}, "one single-client request per racer"
 
 

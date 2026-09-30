@@ -1431,6 +1431,34 @@ def _to_search_hits(info: dict[str, Any] | None) -> list[SearchHit]:
     return hits
 
 
+#: How long the metadata probe waits for a slower racer after the first answer
+#: before drawing the menu: the first leg names the media, but a straggler's
+#: formats still widen what the menu may offer. Bounded and small — the outer
+#: extraction timeout remains the hard ceiling, and a leg that already failed
+#: costs nothing.
+_PROBE_MERGE_GRACE_S = 5.0
+
+
+def merge_format_infos(primary: MediaInfo, secondary: MediaInfo) -> MediaInfo:
+    """One menu view from two clients' answers: the union of what each saw.
+
+    A raced probe's first answer names the media (title, platform, sizes);
+    the slower leg only ever *adds* downloadable resolutions it alone could
+    see. Rungs merge by height — a rung both legs saw is drawn once, from the
+    primary's entry — so the menu stays the link's own ladder, best first,
+    however many clients it took to see it whole.
+    """
+    seen: set[int] = set()
+    options: list[VideoOption] = []
+    for option in (*primary.video_options, *secondary.video_options):
+        if option.height in seen:
+            continue
+        seen.add(option.height)
+        options.append(option)
+    options.sort(key=lambda option: option.height, reverse=True)
+    return replace(primary, video_options=tuple(options))
+
+
 def _to_media_info(source_url: str, info: dict[str, Any]) -> MediaInfo:
     filesize = info.get("filesize") or info.get("filesize_approx") or 0
     if not filesize:
@@ -2432,8 +2460,18 @@ class ExtractorService:
         }
         pending = set(tasks.values())
         first_error: Exception | None = None
+        winner: MediaInfo | None = None
+        won = ""
         while pending:
-            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            # The first answer names the media; a slower leg gets a short
+            # grace to widen the format view before the menu is drawn from
+            # the winner alone. A leg that already failed costs no wait.
+            timeout = _PROBE_MERGE_GRACE_S if winner is not None else None
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED, timeout=timeout
+            )
+            if not done:
+                break
             for task in done:
                 try:
                     result = task.result()
@@ -2441,16 +2479,27 @@ class ExtractorService:
                     if first_error is None:
                         first_error = exc
                     continue
-                for other in pending:
-                    other.cancel()
-                won = next(client for client, racer in tasks.items() if racer is task)
-                logger.info(
-                    "metadata probe answered by %s in %.2fs (raced %s)",
-                    won,
-                    time.monotonic() - started,
-                    ", ".join(client for client in raced if client != won),
-                )
-                return result
+                if winner is None:
+                    winner = result
+                    won = next(client for client, racer in tasks.items() if racer is task)
+                    logger.info(
+                        "metadata probe answered by %s in %.2fs (raced %s)",
+                        won,
+                        time.monotonic() - started,
+                        ", ".join(client for client in raced if client != won),
+                    )
+                else:
+                    straggler = next(
+                        client for client, racer in tasks.items() if racer is task
+                    )
+                    logger.info(
+                        "metadata probe straggler %s widened the menu view", straggler
+                    )
+                    winner = merge_format_infos(winner, result)
+        for other in pending:
+            other.cancel()
+        if winner is not None:
+            return winner
         # Both legs failed — the plain probe is the fallback of last resort: the
         # configured list whole, retries and all, its error untouched.
         logger.info("the raced probe (%s) both failed — falling back to the full list", ", ".join(raced))
@@ -2672,6 +2721,7 @@ class ExtractorService:
         media_format: MediaFormat,
         quality: object = "",
         progress_hook: ProgressHook | None = None,
+        postprocessor_hook: ProgressHook | None = None,
     ) -> DownloadResult:
         """Download media to a per-job directory and return the produced file.
 
@@ -2698,7 +2748,9 @@ class ExtractorService:
 
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(self._download_sync, url, media_format, tier, hook),
+                asyncio.to_thread(
+                    self._download_sync, url, media_format, tier, hook, postprocessor_hook
+                ),
                 timeout=self.download_timeout_s,
             )
         except asyncio.TimeoutError:
@@ -2714,10 +2766,13 @@ class ExtractorService:
         media_format: MediaFormat,
         quality: str,
         progress_hook: ProgressHook | None,
+        postprocessor_hook: ProgressHook | None = None,
     ) -> DownloadResult:
         return self._with_retries(
             "downloading",
-            lambda: self._download_attempt(url, media_format, quality, progress_hook),
+            lambda: self._download_attempt(
+                url, media_format, quality, progress_hook, postprocessor_hook
+            ),
         )
 
     def _download_attempt(
@@ -2726,6 +2781,7 @@ class ExtractorService:
         media_format: MediaFormat,
         quality: str,
         progress_hook: ProgressHook | None,
+        postprocessor_hook: ProgressHook | None = None,
     ) -> DownloadResult:
         # Each job gets its own directory so concurrent workers never collide.
         target_dir = self.download_dir / f"job-{uuid.uuid4().hex[:10]}"
@@ -2750,6 +2806,10 @@ class ExtractorService:
             opts["postprocessors"] = [postprocessor]
         if progress_hook:
             opts["progress_hooks"] = [progress_hook]
+        if postprocessor_hook:
+            # Conversion/muxing is reported apart from the network transfer so
+            # the status line can say "processing" instead of a frozen percent.
+            opts["postprocessor_hooks"] = [postprocessor_hook]
 
         try:
             with self._ydl(opts) as ydl:

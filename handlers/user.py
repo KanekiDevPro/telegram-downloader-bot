@@ -1537,8 +1537,7 @@ async def _intake_flow(
     # of one button.
     if content.routing_for(url).solo is None:
         rows = await _cached_rows(pool, url)
-        if rows:
-            await _ask_from_cache(message, state, url, lang, rows, edit=False)
+        if rows and await _ask_from_cache(message, state, url, lang, rows, edit=False):
             return
     # Share/short links and media *viewer* wrappers name their content somewhere
     # else: resolve them once, here — routing, the engines and the direct-download
@@ -1645,8 +1644,7 @@ async def _ask_about_link(
         # every tap replays at once (the tap's own cache check) — so the extractor
         # never runs and the question is drawn from the rows instead.
         rows = await _cached_rows(pool, url)
-        if rows:
-            await _ask_from_cache(message, state, url, lang, rows, edit=edit)
+        if rows and await _ask_from_cache(message, state, url, lang, rows, edit=edit):
             return
     info: MediaInfo | None = None
     duration = 0.0
@@ -1963,7 +1961,7 @@ async def _ask_from_cache(
     rows: Sequence[Any],
     *,
     edit: bool,
-) -> None:
+) -> bool:
     """The question built from what the link already produced — no probe, no wait.
 
     When a stored row carries the full option ladder (see ``_ladder_question``),
@@ -1976,11 +1974,27 @@ async def _ask_from_cache(
     they do not is simply not there. The FSM carries the offered vocabulary a tap
     is judged by, so this menu speaks exactly the language ``on_format_chosen``
     validates — and a crafted tap on a button that was never drawn buys nothing.
+
+    Returns whether a question was drawn: ``False`` (rows that cannot become
+    this link's menu, e.g. only video rows under a Spotify URL) sends the
+    caller back to the probe instead of leaving the user with no answer.
     """
+    # A Spotify question is audio-only by construction: video rows (or a video
+    # ladder) stored under the track's URL — e.g. the mapped stand-in's rungs
+    # from before audio rows stopped carrying ladders — must never become its
+    # menu. Filtered here so already-stored rows heal without a data wipe.
+    if spotify.is_spotify_url(url):
+        rows = [
+            row
+            for row in rows
+            if cache_service.parse_request(str(row["quality"] or ""))[0] == "audio"
+        ]
+        if not rows:
+            return False
     title = str(rows[0]["title"] or "").strip()
     if title == url.strip():
         title = ""
-    rungs = _cached_ladder(rows)
+    rungs = () if spotify.is_spotify_url(url) else _cached_ladder(rows)
     text = _question_text(url, lang, title=title)
     if rungs:
         # The link's whole ladder is stored next to its files, so the instant
@@ -2017,6 +2031,7 @@ async def _ask_from_cache(
         )
     else:
         await message.answer(text, reply_markup=keyboard, link_preview_options=_NO_PREVIEW)
+    return True
 
 
 def _question_body(url: str, lang: str, *, prompt: str | None = None) -> str:

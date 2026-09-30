@@ -622,7 +622,11 @@ async def process_download_task(
     try:
         async with ActionPulse(bot, task.chat_id):
             result = await extractor.download(
-                target_url, task.media_format, task.quality, progress_hook=progress.hook
+                target_url,
+                task.media_format,
+                task.quality,
+                progress_hook=progress.hook,
+                postprocessor_hook=progress.post_hook,
             )
     except ExtractionError as exc:
         if not fallback.should_use_fallback(exc, cobalt):
@@ -661,6 +665,18 @@ async def process_download_task(
         # A *mapped* link just went through YouTube anonymously (search and all), so
         # "YouTube refuses anonymous requests here" is no longer true.
         preflight.clear_anonymous_refusal()
+
+
+def _upload_ladder(task: DownloadTask, info: Any) -> tuple[Any, ...]:
+    """The ladder stored next to a delivered file — video ladders stay video.
+
+    An audio job's menu is tier-based (Original / MP3 320), never a rung list:
+    storing the mapped stand-in's video ladder under an audio URL is how a
+    later Spotify question redrew YouTube rungs. Audio rows store no ladder.
+    """
+    if task.media_format == "audio":
+        return ()
+    return tuple(getattr(info, "video_options", None) or ())
 
 
 def _audio_cache_qualifier(quality: object, audio_mode: str = "") -> str:
@@ -907,7 +923,7 @@ async def _finish_upload(
                         or result.info.height,
                         source_kbps=result.info.audio_kbps,
                     ),
-                    ladder=result.info.video_options,
+                    ladder=_upload_ladder(task, result.info),
                 )
             except Exception:
                 # Caching is best-effort: the bytes are already in the chat,
@@ -1600,6 +1616,70 @@ def _log_task_failure(task: "asyncio.Task[Any]") -> None:
         logger.warning("background edit failed: %s", exc, exc_info=exc)
 
 
+#: The bar's width in the live progress state — blocks only, no emoji drift.
+_PROGRESS_BAR_WIDTH = 18
+
+
+def _progress_bar(percent: float, width: int = _PROGRESS_BAR_WIDTH) -> str:
+    filled = max(0, min(width, int(percent / 100 * width)))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _format_mmss(seconds: object) -> str:
+    """Seconds → ``MM:SS``; unknown or absurd stays an honest dash."""
+    try:
+        total = int(float(seconds))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "--:--"
+    if total < 0 or total > 99 * 3600:
+        return "--:--"
+    minutes, secs = divmod(total, 60)
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _render_download_progress(data: dict[str, Any], elapsed_s: float, lang: str) -> str:
+    """The live download state from yt-dlp's own hook payload — pure rendering.
+
+    Bytes, speed and ETA are the hook's numbers (never bitrate arithmetic);
+    elapsed is measured by the caller. Unknown totals carry no percent and no
+    bar — nothing is drawn that nobody reported. Garbage in yields the compact
+    legacy line, never an exception: rendering must not fail a download.
+    """
+    try:
+        total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
+        done = data.get("downloaded_bytes") or 0
+        done_n = max(0, int(done))
+        elapsed = _format_mmss(max(0.0, float(elapsed_s)))
+        speed = data.get("speed")
+        speed_s = format_size(int(speed)) if isinstance(speed, (int, float)) and speed > 0 else "—"
+        if total and int(total) > 0:
+            total_n = int(total)
+            pct = min(100.0, done_n / total_n * 100)
+            return t(
+                "media.progress_detail",
+                lang,
+                bar=_progress_bar(pct),
+                percent=pct,
+                done=format_size(done_n),
+                total=format_size(total_n),
+                speed=speed_s,
+                eta=_format_mmss(data.get("eta")),
+                elapsed=elapsed,
+            )
+        return t(
+            "media.progress_unknown",
+            lang,
+            done=format_size(done_n),
+            speed=speed_s,
+            elapsed=elapsed,
+        )
+    except Exception:  # noqa: BLE001 — fall back to the compact line
+        try:
+            return t("media.progress", lang, percent=0)
+        except Exception:  # noqa: BLE001 — rendering never raises, period
+            return "⏳"
+
+
 class _ProgressEditor:
     """Throttled, thread-safe progress updates for yt-dlp hooks.
 
@@ -1618,12 +1698,24 @@ class _ProgressEditor:
         self._card = card
         self._loop = asyncio.get_running_loop()
         self._last_edit = 0.0
+        #: When this download started (monotonic): the elapsed time is measured
+        #: here, never taken from a hook payload that may not carry one.
+        self._started = time.monotonic()
+        #: The finished/processing states are shown at most once each — they
+        #: bypass the throttle below, and this set is what keeps them to one.
+        self._shown_once: set[str] = set()
         #: The edits in the air: the loop keeps only a weak grip on tasks, so
         #: this set is the one that stops them being collected mid-flight.
         self._pending: set[asyncio.Task[None]] = set()
 
     def hook(self, data: dict[str, Any]) -> None:
-        if data.get("status") != "downloading":
+        status = data.get("status")
+        if status == "finished":
+            # The bytes are here; ffmpeg (or the upload) owns the file now.
+            # Shown once and unthrottled — it is the last word on downloading.
+            self._show_once("processing", t("media.processing", self._lang))
+            return
+        if status != "downloading":
             return
         total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
         done = data.get("downloaded_bytes") or 0
@@ -1632,9 +1724,35 @@ class _ProgressEditor:
         if pct < 100 and now - self._last_edit < PROGRESS_EDIT_INTERVAL_S:
             return  # throttle Telegram API calls
         self._last_edit = now
-        # One compact state under the card — "⏳ 42%", never a sentence. The card
-        # itself never moves while the state does.
-        text = _on_card(self._card, t("media.progress", self._lang, percent=pct))
+        # The live state under the card — yt-dlp's own numbers, never a
+        # sentence. The card itself never moves while the state does.
+        text = _on_card(
+            self._card,
+            _render_download_progress(data, now - self._started, self._lang),
+        )
+        self._schedule_threadsafe(text)
+
+    def post_hook(self, data: dict[str, Any]) -> None:
+        """yt-dlp postprocessor events (ffmpeg converting, muxing, …).
+
+        A conversion is not a download: the line says so, once per converter.
+        Like :meth:`hook` it must never raise into yt-dlp's thread.
+        """
+        try:
+            name = str(data.get("postprocessor") or "")
+        except Exception:  # noqa: BLE001 — a progress line never fails a file
+            return
+        if data.get("status") not in ("started", "running") or not name:
+            return
+        self._show_once(f"post:{name}", t("media.processing", self._lang))
+
+    def _show_once(self, key: str, state: str) -> None:
+        if key in self._shown_once:
+            return
+        self._shown_once.add(key)
+        self._schedule_threadsafe(_on_card(self._card, state))
+
+    def _schedule_threadsafe(self, text: str) -> None:
         try:
             self._loop.call_soon_threadsafe(self._schedule, text)
         except RuntimeError:

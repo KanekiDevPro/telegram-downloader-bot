@@ -534,6 +534,21 @@ MESSAGES: Final[Catalog] = {
     # removed with it: never a sentence, never a second message.
     "media.wait": {"en": "⏳", "fa": "⏳"},
     "media.progress": {"en": "⏳ {percent:.0f}%", "fa": "⏳ {percent:.0f}%"},
+    # The download's live state: yt-dlp's own numbers (bytes, speed, ETA) plus
+    # the elapsed time measured here — never bitrate arithmetic, never a guess.
+    # The unknown-total twin carries no percent and no bar on purpose: a number
+    # nobody reported must not be drawn.
+    "media.progress_detail": {
+        "en": "⏳ {bar} {percent:.0f}%\n{done} / {total}\nSpeed: {speed}/s\nETA: {eta} · Elapsed: {elapsed}",
+        "fa": "⏳ {bar} {percent:.0f}٪\n{done} / {total}\nسرعت: {speed}/s\nمانده: {eta} · گذشته: {elapsed}",
+    },
+    "media.progress_unknown": {
+        "en": "⏳ {done}\nSpeed: {speed}/s · Elapsed: {elapsed}",
+        "fa": "⏳ {done}\nسرعت: {speed}/s · گذشته: {elapsed}",
+    },
+    # yt-dlp finished the network transfer; ffmpeg (or the upload) owns the
+    # file now — a different state from downloading, said as one.
+    "media.processing": {"en": "🔄 Processing…", "fa": "🔄 در حال پردازش…"},
     "media.retry": {"en": "🔄 Try again", "fa": "🔄 دوباره تلاش کن"},
     # On a quality row whose size the source never reported — the resolution is
     # real and stays, and the size says plainly that nobody knows it.

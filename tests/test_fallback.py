@@ -187,6 +187,7 @@ class FakeExtractor:
         media_format: str,
         quality: str = "",
         progress_hook: Any = None,
+        postprocessor_hook: Any = None,
     ) -> DownloadResult:
         self.downloads += 1
         self.downloaded.append(url)
