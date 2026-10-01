@@ -29,6 +29,7 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from services.doctor import Check
@@ -50,6 +51,10 @@ STARTUP_GRACE_S = 5.0
 #: (or dying), so taking over is safe and silent. Above it the holder is alive
 #: enough to deserve the warning instead.
 STALE_TTL_S = 30.0
+#: How long the lease refresh must fail continuously before the outage is
+#: paged (see ``refresh_once``): a restart or a blip stays silent, a dead
+#: Redis does not. Ticks arrive every REFRESH_S, so three bad ticks page.
+REDIS_DOWN_ALERT_AFTER_S = 60.0
 
 
 class InstanceGuard:
@@ -64,6 +69,10 @@ class InstanceGuard:
         #: ``unknown`` (the guard itself failed — never blocks anything).
         self.state = "disabled" if redis is None else "unknown"
         self.peer_id = ""
+        #: When the current refresh-failure streak started (monotonic), or
+        #: ``None`` while the last refresh answered. Instance state, never
+        #: module state: a restart begins unaccused, as it should.
+        self._redis_down_since: float | None = None
 
     @staticmethod
     def _lease_value(instance_id: str, started_at: float) -> str:
@@ -200,15 +209,41 @@ class InstanceGuard:
             self._enter("unknown")
         return self
 
-    async def refresh_once(self) -> None:
+    def _note_redis_failure(self, now: float) -> bool:
+        """Record a failed refresh; True while the failure is sustained.
+
+        Level-triggered, not edge: True on every tick once the streak has
+        lasted ``REDIS_DOWN_ALERT_AFTER_S``. The shared bot_state throttle
+        (not this streak) is what makes sustained paging a single notice —
+        so a page lost to a Postgres outage is retried on the next tick
+        instead of being swallowed with the edge.
+        """
+        if self._redis_down_since is None:
+            self._redis_down_since = now
+        return now - self._redis_down_since >= REDIS_DOWN_ALERT_AFTER_S
+
+    async def refresh_once(
+        self,
+        *,
+        on_redis_down: Callable[[], Awaitable[None]] | None = None,
+        now: float | None = None,
+    ) -> None:
         """One periodic re-evaluation: renew our lease, or re-judge a peer's.
 
         This is what clears a transient duplicate: a crashed peer's lease goes
         stale within one TTL, and the next tick takes it over silently instead
         of warning forever. Never raises.
+
+        When the refresh keeps failing, ``on_redis_down`` is awaited once the
+        outage is sustained (see ``REDIS_DOWN_ALERT_AFTER_S``) — the one admin
+        page for a mid-run Redis death. Memory mode (no Redis) never pages:
+        there is no lease to refresh and nothing to detect. ``now`` is the
+        monotonic clock, injectable for tests.
         """
+        moment = time.monotonic() if now is None else now
         if self._redis is None:
             self._enter("disabled")
+            self._redis_down_since = None
             return
         try:
             if self.state == "single":
@@ -219,8 +254,20 @@ class InstanceGuard:
         except Exception:
             logger.debug("instance-lease refresh failed", exc_info=True)
             self._enter("unknown")
+            if self._note_redis_failure(moment) and on_redis_down is not None:
+                try:
+                    await on_redis_down()
+                except Exception:
+                    logger.debug("redis-outage notice failed — retrying next tick", exc_info=True)
+            return
+        self._redis_down_since = None
 
-    async def run(self, stop_event: asyncio.Event) -> None:
+    async def run(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        on_redis_down: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         """The refresh loop, owned like the worker tasks; exits on stop."""
         while not stop_event.is_set():
             try:
@@ -228,7 +275,7 @@ class InstanceGuard:
                 return
             except asyncio.TimeoutError:
                 pass
-            await self.refresh_once()
+            await self.refresh_once(on_redis_down=on_redis_down)
 
     async def stop(self) -> None:
         """Release our own lease on graceful shutdown; never raises, never blocks."""

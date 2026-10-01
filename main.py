@@ -198,6 +198,23 @@ _STORAGE_DEGRADED_NOTICE = (
 )
 
 
+#: Throttle for the mid-run outage page below: one notice per window, shared
+#: through ``bot_state`` like the boot notice above.
+_REDIS_OUTAGE_STATE_KEY = "redis_outage_notice"
+_REDIS_OUTAGE_COOLDOWN_S = 6 * 3600.0
+
+#: What the admins hear, once per window, when Redis dies mid-run (see
+#: services.instance_guard: the lease refresh fails continuously). Same rules
+#: as the boot notice — Redis is named, never printed; intake and job state
+#: are impaired, ordinary users hear nothing.
+_REDIS_OUTAGE_NOTICE = (
+"⚠️ <b>Redis در دسترس نیست</b>\n"
+"بیش از یک دقیقه است صف دانلود و وضعیت گفتگوها پاسخ نمی‌دهند — "
+"لینک‌های جدید در صف می‌مانند و وضعیت کاربران خوانده نمی‌شود.\n"
+"قدم بعدی: Redis را برگردانید، بعد <code>/doctor</code>."
+)
+
+
 async def maybe_notify_storage_degraded(
     bot: Bot,
     pool: Any,
@@ -241,6 +258,54 @@ async def maybe_notify_storage_degraded(
         return True
     except Exception:
         logger.debug("storage-degraded notice failed — continuing", exc_info=True)
+        return False
+
+
+async def maybe_notify_redis_outage(
+    bot: Bot,
+    pool: Any,
+    admin_ids: Iterable[int],
+    *,
+    degraded: bool,
+    now: datetime | None = None,
+) -> bool:
+    """Page the admins about Redis dying mid-run — at most once per window.
+
+    Same throttle as the boot notice above: the shared ``bot_state`` row
+    (survives restarts, seen by every detector) — repeated sustained
+    ticks inside the window stay silent, and a recovery sends nothing at
+    all. A reachable Redis is a pure no-op (no sends, no state touched).
+    Only ``admin_ids`` are ever addressed. Never raises; True when sent.
+    A dead Postgres absorbs the page (logged, retried next tick) instead
+    of breaking the guard loop.
+    """
+    if not degraded:
+        return False
+    try:
+        moment = now or datetime.now(timezone.utc)
+        last = await get_state(pool, _REDIS_OUTAGE_STATE_KEY)
+        if last is not None:
+            try:
+                if (moment - datetime.fromisoformat(last)).total_seconds() < (
+                    _REDIS_OUTAGE_COOLDOWN_S
+                ):
+                    return False
+            except ValueError:
+                logger.warning(
+                    "bot_state[%s]=%r is not a timestamp — treating it as due",
+                    _REDIS_OUTAGE_STATE_KEY,
+                    last,
+                )
+        await notify_admins(bot, admin_ids, _REDIS_OUTAGE_NOTICE)
+        try:
+            await set_state(pool, _REDIS_OUTAGE_STATE_KEY, moment.isoformat())
+        except Exception:
+            logger.exception(
+                "could not record when %s was sent", _REDIS_OUTAGE_STATE_KEY
+            )
+        return True
+    except Exception:
+        logger.debug("redis-outage notice failed — continuing", exc_info=True)
         return False
 
 
@@ -634,7 +699,16 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
     )
     # The tripwire's refresh loop, owned exactly like the worker tasks above:
     # cancelled at shutdown, after which only the lease release below matters.
-    workers.append(asyncio.create_task(guard.run(stop_event), name="instance-guard"))
+    # The guard already touches Redis every refresh: a sustained failure
+    # pages the admins once per window (shared bot_state throttle), so a
+    # mid-run Redis death is said out loud instead of only backing off.
+    async def _page_redis_outage() -> None:
+        await maybe_notify_redis_outage(bot, pool, settings.admin_ids, degraded=True)
+    workers.append(
+        asyncio.create_task(
+            guard.run(stop_event, on_redis_down=_page_redis_outage), name="instance-guard"
+        )
+    )
 
     # The fallback engine reads its own cookie file, in its own shape — generated
     # here from the jar the bot already has, so one export signs both engines in.
