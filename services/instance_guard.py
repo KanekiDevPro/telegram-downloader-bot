@@ -32,6 +32,8 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import redis.exceptions as _redis_errors
+
 from services.doctor import Check
 
 logger = logging.getLogger(__name__)
@@ -40,7 +42,10 @@ logger = logging.getLogger(__name__)
 #: only reads it. Never names a user, a chat or a link — id plus epoch.
 LEASE_KEY = "bot:instance_lease"
 #: How long a lease outlives a holder that stopped refreshing (a crash, a kill).
-LEASE_TTL_S = 60.0
+#: An ``int`` on purpose: it is passed as the ``EX`` argument of ``SET``, and
+#: redis-py raises ``DataError`` on anything but ``int``/``timedelta`` (a float
+#: here once meant no lease was ever written while every test stayed green).
+LEASE_TTL_S = 60
 #: How often the holder refreshes while alive.
 REFRESH_S = 20.0
 #: How long a fresh start waits before judging a foreign lease it found: a
@@ -55,6 +60,29 @@ STALE_TTL_S = 30.0
 #: paged (see ``refresh_once``): a restart or a blip stays silent, a dead
 #: Redis does not. Ticks arrive every REFRESH_S, so three bad ticks page.
 REDIS_DOWN_ALERT_AFTER_S = 60.0
+
+
+def _is_unreachable(exc: BaseException) -> bool:
+    """Whether ``exc`` means Redis itself is unreachable (as opposed to a bug).
+
+    Only these feed the outage streak: anything else (a bad argument, a parse
+    failure, a programming error) degrades the guard without ever paging about
+    a Redis outage that does not exist.
+    """
+    return isinstance(
+        exc,
+        (
+            _redis_errors.ConnectionError,
+            _redis_errors.TimeoutError,
+            TimeoutError,
+            OSError,
+        ),
+    )
+
+
+def _short(message: object, limit: int = 120) -> str:
+    """One log-safe line: truncated, no newlines."""
+    return " ".join(str(message).split())[:limit]
 
 
 class InstanceGuard:
@@ -73,6 +101,10 @@ class InstanceGuard:
         #: ``None`` while the last refresh answered. Instance state, never
         #: module state: a restart begins unaccused, as it should.
         self._redis_down_since: float | None = None
+        #: Whether the current degraded spell was already announced: the ONE
+        #: warning per spell lives here (instance state, never module state).
+        #: Cleared on recovery, so the next spell warns again.
+        self._degraded_announced = False
 
     @staticmethod
     def _lease_value(instance_id: str, started_at: float) -> str:
@@ -131,8 +163,31 @@ class InstanceGuard:
         await self._client().set(LEASE_KEY, self._own_value(), ex=LEASE_TTL_S)
         return True
 
-    def _enter(self, state: str, peer_id: str = "") -> None:
-        """Move state, logging only the transitions an operator must see."""
+    def _enter(self, state: str, peer_id: str = "", *, error: BaseException | None = None) -> None:
+        """Move state, logging only the transitions an operator must see.
+
+        The first failure-driven entry into ``unknown``/``disabled`` logs ONE
+        warning (exception class + short message — never a URL or credential:
+        Redis errors name at most host:port); the rest of the spell stays
+        silent. Recovery to ``single`` logs one info line and re-arms the
+        warning for the next spell. Deliberate states (a healthy claim, a
+        live peer, memory mode with no error) keep their existing lines.
+        """
+        if state in ("unknown", "disabled") and error is not None:
+            if not self._degraded_announced:
+                logger.warning(
+                    "instance-lease %s (%s: %s)",
+                    state,
+                    type(error).__name__,
+                    _short(error),
+                )
+                self._degraded_announced = True
+        elif state == "single" and self._degraded_announced:
+            logger.info(
+                "instance-lease ok: this process holds the lease (%s)",
+                self.instance_id,
+            )
+            self._degraded_announced = False
         if self.state != "duplicate" and state == "duplicate":
             logger.warning(
                 "another live bot instance shares this Redis (peer %s) — "
@@ -176,9 +231,9 @@ class InstanceGuard:
         """The claim above lost its race: record whoever won, without writing."""
         try:
             current = await self._read()
-        except Exception:
+        except Exception as exc:
             logger.debug("instance-lease re-read failed", exc_info=True)
-            self._enter("unknown")
+            self._enter("unknown", error=exc)
             return
         if current is None or current[0] == self.instance_id:
             self._enter("single")
@@ -204,9 +259,9 @@ class InstanceGuard:
             if grace_s > 0:
                 await asyncio.sleep(grace_s)
             await self._observe()
-        except Exception:
+        except Exception as exc:
             logger.debug("instance-lease check failed — continuing unguarded", exc_info=True)
-            self._enter("unknown")
+            self._enter("unknown", error=exc)
         return self
 
     def _note_redis_failure(self, now: float) -> bool:
@@ -216,7 +271,9 @@ class InstanceGuard:
         lasted ``REDIS_DOWN_ALERT_AFTER_S``. The shared bot_state throttle
         (not this streak) is what makes sustained paging a single notice —
         so a page lost to a Postgres outage is retried on the next tick
-        instead of being swallowed with the edge.
+        instead of being swallowed with the edge. Only reachability failures
+        may start this streak (see ``refresh_once``): a programming error
+        must never page about a Redis outage.
         """
         if self._redis_down_since is None:
             self._redis_down_since = now
@@ -251,10 +308,14 @@ class InstanceGuard:
                     await self._observe()
             else:
                 await self._observe()
-        except Exception:
+        except Exception as exc:
             logger.debug("instance-lease refresh failed", exc_info=True)
-            self._enter("unknown")
-            if self._note_redis_failure(moment) and on_redis_down is not None:
+            self._enter("unknown", error=exc)
+            if (
+                _is_unreachable(exc)
+                and self._note_redis_failure(moment)
+                and on_redis_down is not None
+            ):
                 try:
                     await on_redis_down()
                 except Exception:

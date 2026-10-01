@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import redis.exceptions as redis_errors
+
 import main as entrypoint
 from services import instance_guard as guard_module
 from services.instance_guard import InstanceGuard
@@ -23,24 +25,29 @@ T0 = 1_000_000.0
 
 
 class _FakeRedis:
-    """Up until told otherwise; every op raises once down."""
+    """Up until told otherwise; every op raises once down.
+
+    The failure is a real ``redis`` reachability error — what redis-py raises
+    when the server is unreachable — because only unreachable counts toward
+    the outage streak (a programming error must never page about Redis).
+    """
 
     def __init__(self) -> None:
         self.down = False
 
     async def get(self, key: str) -> str | None:
         if self.down:
-            raise RuntimeError("redis is down")
+            raise redis_errors.ConnectionError("redis is down")
         return None
 
     async def set(self, key: str, value: str, **kwargs: Any) -> bool:
         if self.down:
-            raise RuntimeError("redis is down")
+            raise redis_errors.ConnectionError("redis is down")
         return True
 
     async def ttl(self, key: str) -> int:
         if self.down:
-            raise RuntimeError("redis is down")
+            raise redis_errors.ConnectionError("redis is down")
         return 60
 
 
