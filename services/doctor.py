@@ -662,7 +662,13 @@ async def _probe_fallback(
             reason=f"{type(exc).__name__}: {exc}{_host_side_hint(url)}",
         )
 
-    logger.debug("fallback probe resolved %s in %.1fs", media.url[:60], time.monotonic() - started)
+    try:
+        from services.telemetry import log_url as _log_url
+
+        _resolved = _log_url(media.url)
+    except Exception:
+        _resolved = "?"
+    logger.debug("fallback probe resolved %s in %.1fs", _resolved, time.monotonic() - started)
     return FallbackHealth(
         "ready", url, cobalt.dialect, seconds=time.monotonic() - started
     )

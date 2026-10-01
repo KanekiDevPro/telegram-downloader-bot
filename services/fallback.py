@@ -28,6 +28,7 @@ import asyncpg
 
 from core import database
 from core.utils import MediaFormat
+from services import telemetry as telemetry_module
 from services.cobalt import CobaltService
 from services.extractor import (
     BLOCK_EXTRACTION_CODES,
@@ -198,7 +199,7 @@ async def fetch(
         "fallback produced %s%s for %s (%s bytes)",
         file_path.name,
         f" + {len(extra)} more" if extra else "",
-        url,
+        telemetry_module.log_url(url),
         sum(path.stat().st_size for path in paths),
     )
     return DownloadResult(

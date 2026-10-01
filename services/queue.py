@@ -258,7 +258,13 @@ class RedisTaskQueue(TaskQueue):
             await self.redis.lrem(self._processing_name, 0, raw)
             await self.redis.delete(self._claim_name(task))
         except Exception:
-            logger.debug("could not release the claim for %s", task.url, exc_info=True)
+            try:
+                from services.telemetry import log_url as _log_url
+
+                _safe = _log_url(task.url)
+            except Exception:
+                _safe = "?"
+            logger.debug("could not release the claim for %s", _safe, exc_info=True)
 
     async def dequeue(self) -> Optional[DownloadTask]:
         item = await self.redis.brpop(self.name, timeout=BLOCK_TIMEOUT_S)

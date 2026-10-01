@@ -251,7 +251,9 @@ async def record_block(
             cause=cause,
         )
     except Exception:
-        logger.exception("could not record the %s failure for %s", error.code, task.url)
+        logger.exception(
+            "could not record the %s failure for %s", error.code, log_url(task.url)
+        )
 
 
 async def build_digest(
@@ -713,6 +715,23 @@ def url_digest(url: object) -> str:
     if not isinstance(url, str) or not url:
         return ""
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+
+def log_url(url: object) -> str:
+    """The log-safe form of a link: ``host#digest`` — never query/fragment/userinfo.
+
+    Host keeps the line readable (which site), digest joins it with the metrics
+    line without ever carrying a token, signature or credential. Non-strings
+    and empties read as ``"?"``. Pure, never raises.
+    """
+    try:
+        if not isinstance(url, str) or not url:
+            return "?"
+        host = url_host(url) or "?"
+        digest = url_digest(url)
+        return f"{host}#{digest}" if digest else host
+    except Exception:
+        return "?"
 
 
 #: How the bytes reached Telegram — the only four answers the metrics use.

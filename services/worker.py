@@ -199,7 +199,11 @@ async def run_worker(
         try:
             await _process_with_retry(task, bot, pool, queue, extractor, stop_event, cobalt)
         except Exception:
-            logger.exception("worker %s: unexpected failure while processing %s", index, task.url)
+            logger.exception(
+                "worker %s: unexpected failure while processing %s",
+                index,
+                telemetry.log_url(task.url),
+            )
             # The job is dead in the water and will never settle itself — free
             # its claim now, or the request stays locked until the TTL.
             await _settle(queue, task)
@@ -227,13 +231,19 @@ async def _settle(queue: TaskQueue, task: DownloadTask) -> None:
     try:
         await queue.release(task)
     except Exception:
-        logger.exception("could not settle the job claim for %s", task.url)
+        logger.exception(
+            "could not settle the job claim for %s", telemetry.log_url(task.url)
+        )
     # The mode unlocks when its jobs are gone: every settled outcome counts
     # down, no requeue path does (a requeued job is still one job in flight).
     try:
         download_mode.job_settled_for_url(task.telegram_id, task.url)
     except Exception:
-        logger.debug("could not settle the mode count for %s", task.url, exc_info=True)
+        logger.debug(
+            "could not settle the mode count for %s",
+            telemetry.log_url(task.url),
+            exc_info=True,
+        )
 
 
 async def _requeue_for_shutdown(
@@ -247,9 +257,11 @@ async def _requeue_for_shutdown(
     await _refund_quota(pool, task)
     try:
         await queue.requeue(task)
-        logger.info("requeued interrupted task %s", task.url)
+        logger.info("requeued interrupted task %s", telemetry.log_url(task.url))
     except Exception:
-        logger.exception("could not requeue interrupted task %s", task.url)
+        logger.exception(
+            "could not requeue interrupted task %s", telemetry.log_url(task.url)
+        )
 
 
 async def _refund_quota(pool: asyncpg.Pool, task: DownloadTask) -> None:
@@ -266,7 +278,9 @@ async def _refund_quota(pool: asyncpg.Pool, task: DownloadTask) -> None:
     try:
         await database.refund_download_claim(pool, task.telegram_id)
     except Exception:
-        logger.exception("could not refund the quota claim of %s", task.url)
+        logger.exception(
+            "could not refund the quota claim of %s", telemetry.log_url(task.url)
+        )
 
 
 async def _process_with_retry(
@@ -317,7 +331,13 @@ async def _process_with_retry(
             await _refund_quota(pool, task)
             last_error = error_message(exc.code, task.lang, fallback=exc.message)
             last_failure = exc
-            logger.warning("attempt %s/%s failed for %s (%s)", attempt, MAX_ATTEMPTS, task.url, exc.code)
+            logger.warning(
+                "attempt %s/%s failed for %s (%s)",
+                attempt,
+                MAX_ATTEMPTS,
+                telemetry.log_url(task.url),
+                exc.code,
+            )
             if exc.code in _PERMANENT_ERROR_CODES or fallback.fallback_was_attempted(exc):
                 # The second reason: both engines have already had this link. One
                 # more round of "blocked, then blocked elsewhere" costs the user
@@ -329,7 +349,12 @@ async def _process_with_retry(
             await _refund_quota(pool, task)
             last_error = t("work.internal_error", task.lang, detail=str(exc))
             last_failure = None
-            logger.exception("attempt %s/%s crashed for %s", attempt, MAX_ATTEMPTS, task.url)
+            logger.exception(
+                "attempt %s/%s crashed for %s",
+                attempt,
+                MAX_ATTEMPTS,
+                telemetry.log_url(task.url),
+            )
         if await _sleep_until(stop_event, min(2**attempt, 8)):
             await _requeue_for_shutdown(queue, task, pool)
             return
@@ -451,7 +476,7 @@ async def _notify_login_block(
         logger.info(
             "login-looking block for %s — admins were told about this within the last "
             "%.0fs, so the user's message stands alone.",
-            task.url,
+            telemetry.log_url(task.url),
             LOGIN_BLOCK_ALERT_INTERVAL_S,
         )
         return
@@ -483,9 +508,14 @@ async def _notify_login_block(
             logger.exception("could not tell admin %s about the login-looking block", admin_id)
     if notified == 0:
         logger.warning(
-            "login-shaped block on %s and no admin could be told — check ADMIN_IDS.", task.url
+            "login-shaped block on %s and no admin could be told — check ADMIN_IDS.",
+            telemetry.log_url(task.url)
         )
-    logger.info("login-shaped block on %s: told %s admin(s)", task.url, notified)
+    logger.info(
+        "login-shaped block on %s: told %s admin(s)",
+        telemetry.log_url(task.url),
+        notified,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -722,12 +752,12 @@ async def process_download_task(
     )
     # The job's bill of time — the evidence any "make it faster" claim owes.
     logger.info(
-        "stages probe=%.1fs download=%.1fs upload=%.1fs total=%.1fs | %.60s",
+        "stages probe=%.1fs download=%.1fs upload=%.1fs total=%.1fs | %s",
         probe_s,
         download_s,
         upload_s,
         time.monotonic() - started,
-        task.url,
+        telemetry.log_url(task.url),
     )
     _emit_metrics(True, upload_path=direct_path)
     if target_url != task.url:
@@ -1007,7 +1037,11 @@ async def _finish_upload(
                 # Caching is best-effort: the bytes are already in the chat,
                 # and a cache blip must never fail a delivered job — a retry
                 # would send the very same file into the chat again.
-                logger.warning("could not cache the delivered file for %.80s", task.url, exc_info=True)
+                logger.warning(
+                    "could not cache the delivered file for %s",
+                    telemetry.log_url(task.url),
+                    exc_info=True,
+                )
         await _note_group_download(pool, task, ok=True)
         # The scaffolding goes the moment the file lands: the status message (the
         # tapped menu, then the ⏳ card) would only sit next to the delivered
@@ -1043,7 +1077,9 @@ async def _note_group_download(
     except Exception:
         # Bookkeeping, never a second failure to the first: this runs after
         # a delivery, where a raise would re-run a job the user already has.
-        logger.exception("could not record the group download for %.80s", task.url)
+        logger.exception(
+            "could not record the group download for %s", telemetry.log_url(task.url)
+        )
 
 
 async def _note_fallback_skip(
@@ -1108,7 +1144,7 @@ async def _deliver_via_fallback(
     source_url = target_url or task.url
     logger.warning(
         "yt-dlp could not serve %s (%s) — engaging the Cobalt fallback",
-        source_url,
+        telemetry.log_url(source_url),
         error.code,
     )
     if cobalt is None or not cobalt.enabled:  # guarded by should_use_fallback
@@ -1132,7 +1168,9 @@ async def _deliver_via_fallback(
             )
     except CobaltError as exc:
         logger.warning(
-            "Cobalt fallback failed for %s too — %s", source_url, fallback.describe(exc)
+            "Cobalt fallback failed for %s too — %s",
+            telemetry.log_url(source_url),
+            fallback.describe(exc),
         )
         await fallback.remember_use(
             pool, fallback.USE_FAILED, fallback.describe(exc)

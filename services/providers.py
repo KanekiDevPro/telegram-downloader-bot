@@ -16,6 +16,7 @@ from dataclasses import replace
 from typing import Optional, Protocol, Sequence
 
 from services import spotify
+from services import telemetry as telemetry_module
 from services.audio_models import AudioCandidate, TrackIdentity
 from services.extractor import ExtractionError, ExtractorService, MediaInfo, SearchHit
 from services.quality import QualityEngine
@@ -379,7 +380,7 @@ async def spotify_audio_target(
             "no YouTube match close enough for %r: selected is %ss off (%s)",
             track.credit,
             abs(selected.duration_s - identity.duration_s),
-            selected.provider_track_id,
+            telemetry_module.log_url(selected.provider_track_id),
         )
         raise ExtractionError(
             "SPOTIFY_NO_MATCH",
@@ -392,7 +393,12 @@ async def spotify_audio_target(
             "نسخهٔ یوتیوب این آهنگ پیدا نشد. (خودِ اسپاتیفای هم به خاطر DRM قابل دانلود نیست.)",
         )
     resolved_url = await provider.resolve(selected)
-    logger.info("rewrote spotify link %s (%s) to %s", track.track_id, track.credit, resolved_url)
+    logger.info(
+        "rewrote spotify link %s (%s) to %s",
+        track.track_id,
+        track.credit,
+        telemetry_module.log_url(resolved_url),
+    )
     return spotify.SpotifyTarget(
         url=resolved_url,
         track=track,

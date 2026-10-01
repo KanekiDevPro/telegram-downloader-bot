@@ -54,6 +54,7 @@ import aiohttp
 
 from core.utils import sanitize_filename
 from services import host_guard as host_guard_module
+from services import telemetry as telemetry_module
 from services.extractor import ExtractionError, ExtractorService, SearchHit, url_host
 
 logger = logging.getLogger(__name__)
@@ -619,7 +620,7 @@ def best_hit(track: SpotifyTrack, hits: list[SearchHit]) -> Optional[SearchHit]:
             "no YouTube match close enough for %r: nearest is %ss off (%s)",
             track.credit,
             drift,
-            hit.url,
+            telemetry_module.log_url(hit.url),
         )
         return None
     logger.info(
@@ -644,5 +645,10 @@ async def youtube_target(url: str, extractor: ExtractorService, *, limit: int = 
             "SPOTIFY_NO_MATCH",
             "نسخهٔ یوتیوب این آهنگ پیدا نشد. (خودِ اسپاتیفای هم به خاطر DRM قابل دانلود نیست.)",
         )
-    logger.info("rewrote spotify link %s (%s) to %s", track.track_id, track.credit, hit.url)
+    logger.info(
+        "rewrote spotify link %s (%s) to %s",
+        track.track_id,
+        track.credit,
+        telemetry_module.log_url(hit.url),
+    )
     return SpotifyTarget(url=hit.url, track=track, hit=hit)
