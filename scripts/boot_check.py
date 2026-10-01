@@ -378,6 +378,7 @@ async def main() -> int:
         # healthy end state.
         expected_workers = settings.worker_count + 1  # + always-on maintenance
         expected_workers += 1  # + the extractor catalogue warm-up
+        expected_workers += 1  # + the single-instance lease refresh
         watcher = app["cookie_watch"]
         watching = watcher.enabled and bool(settings.admin_ids)
         if watching:

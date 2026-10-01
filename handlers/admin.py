@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
@@ -212,11 +213,15 @@ async def run_doctor_into(
     cobalt: CobaltService | None = None,
     pool: asyncpg.Pool | None = None,
     edit: Message | None = None,
+    instance_guard: Any = None,
 ) -> DoctorReport | None:
     """Run the doctor, render it, and report where it went; ``None`` on failure.
 
     ``cobalt``/``pool`` are forwarded so the report describes the *running* fallback
     engine (and remembers its verdict) instead of a fresh opinion about the config.
+    ``instance_guard`` (injected from the dispatcher's data like the extractor)
+    appends this process's single-instance row — after the verdict is built, so
+    the tripwire can never flip a YouTube diagnosis.
     """
     settings = get_settings()
     try:
@@ -225,6 +230,17 @@ async def run_doctor_into(
         logger.exception("youtube doctor failed")
         await _say(edit, bot, chat_id, "❌ بررسی شکست خورد؛ لاگ سرور را ببینید.")
         return None
+    if instance_guard is not None:
+        # The tripwire's row, appended — never allowed to break the report:
+        # a guard that cannot even describe itself is a warn-worthy unknown,
+        # not a second failure on top of the doctor's own.
+        try:
+            check = instance_guard.as_check()
+        except Exception:
+            logger.debug("instance guard could not render its check", exc_info=True)
+            check = None
+        if check is not None:
+            report = replace(report, checks=(*report.checks, check))
     try:
         await deliver_report(bot, chat_id, report_parts(report), edit=edit)
     except Exception:
@@ -255,6 +271,7 @@ async def cmd_doctor(
     cobalt: CobaltService | None = None,
     pool: asyncpg.Pool | None = None,
     lang: str = DEFAULT_LANG,
+    instance_guard: Any = None,
 ) -> None:
     settings = get_settings()
     user = message.from_user
@@ -265,7 +282,13 @@ async def cmd_doctor(
 
     status = await message.answer("🔎 در حال بررسی مسیر دانلود یوتیوب…")
     report = await run_doctor_into(
-        bot, message.chat.id, extractor, cobalt=cobalt, pool=pool, edit=status
+        bot,
+        message.chat.id,
+        extractor,
+        cobalt=cobalt,
+        pool=pool,
+        edit=status,
+        instance_guard=instance_guard,
     )
     if report is not None:
         logger.info(
@@ -488,6 +511,7 @@ async def on_alert_check(
     cobalt: CobaltService | None = None,
     pool: asyncpg.Pool | None = None,
     lang: str = DEFAULT_LANG,
+    instance_guard: Any = None,
 ) -> None:
     """The cookie-jar alert's "بررسی همین حالا" button."""
     settings = get_settings()
@@ -511,7 +535,13 @@ async def on_alert_check(
         logger.debug("could not show the doctor placeholder", exc_info=True)
 
     report = await run_doctor_into(
-        bot, message.chat.id, extractor, cobalt=cobalt, pool=pool, edit=message
+        bot,
+        message.chat.id,
+        extractor,
+        cobalt=cobalt,
+        pool=pool,
+        edit=message,
+        instance_guard=instance_guard,
     )
     if report is not None:
         logger.info(

@@ -33,7 +33,7 @@ from handlers import ROUTERS
 from handlers.admin import publish_commands
 from handlers.user import drain_pending_deletes
 from middlewares.user_middleware import UserMiddleware
-from services import cobalt_cookies, delivery, proxy_health
+from services import cobalt_cookies, delivery, instance_guard, proxy_health
 from services.cobalt import CobaltService
 from services.cookie_watch import CookieJarWatcher, run_cookie_watch
 from services.doctor import http_reachable
@@ -413,6 +413,13 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         proxy=settings.cobalt_proxy or None,
     )
     dp["cobalt"] = cobalt
+    # Topology tripwire (P0-3): session modes, the double-tap guard and the
+    # claim shelf are per-process — a second live instance on this Redis
+    # silently forks all of them. Best-effort lease, warn-only, and never a
+    # reason a boot fails (see services/instance_guard); memory mode is
+    # single-process by definition, so the guard stays disabled there.
+    guard = await instance_guard.start_guard(redis_client)
+    dp["instance_guard"] = guard
     if cobalt.enabled:
         logger.info(
             "fallback extractor: %s (used only when yt-dlp is blocked%s)",
@@ -554,6 +561,9 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
             name="maintenance",
         )
     )
+    # The tripwire's refresh loop, owned exactly like the worker tasks above:
+    # cancelled at shutdown, after which only the lease release below matters.
+    workers.append(asyncio.create_task(guard.run(stop_event), name="instance-guard"))
 
     # The fallback engine reads its own cookie file, in its own shape — generated
     # here from the jar the bot already has, so one export signs both engines in.
@@ -647,6 +657,7 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         "cobalt_cookies": cobalt_cookie_state,
         "redis": redis_client,
         "cobalt": cobalt,
+        "instance_guard": guard,
         # Shutdown's "no login child may outlive the bot" guard reads this key —
         # without it the guard is dead code and an in-flight /oauth device flow
         # leaves its yt-dlp child running after every shutdown.
@@ -680,6 +691,13 @@ async def shutdown(app: dict[str, Any]) -> None:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+    # The lease must die with a graceful shutdown: a restart would otherwise
+    # meet its own dead lease and warn until the TTL runs down. Released before
+    # the Redis client below is closed, while the lease is still reachable.
+    guard = app.get("instance_guard")
+    if guard is not None:
+        with suppress(Exception):
+            await guard.stop()
     with suppress(Exception):
         await app["pool"].close()
     redis = app.get("redis")

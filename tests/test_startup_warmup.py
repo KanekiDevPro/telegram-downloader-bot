@@ -76,4 +76,7 @@ async def test_boot_warms_the_catalogue_in_the_background(
     finally:
         gate.set()
         if app is not None:
+            # Stop-driven background loops (the instance-guard refresh) only
+            # exit on shutdown: mirror it so the gather below can finish.
+            app["stop_event"].set()
             await asyncio.gather(*app["workers"], return_exceptions=True)
