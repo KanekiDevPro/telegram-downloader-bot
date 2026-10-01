@@ -133,9 +133,10 @@ def test_video_links_are_offered_quality_tiers() -> None:
 def test_music_links_are_offered_audio_formats() -> None:
     routing = content.routing_for("https://soundcloud.com/a/b")
 
-    # Every tier the pipeline can genuinely build — canonical spellings first
-    # (mp3 = the balanced 192k re-encode, m4a = the untouched stream), because
-    # queues and cache rows already own those names.
+    # The validation vocabulary still names every tier — canonical spellings
+    # first (mp3 = the balanced 192k re-encode, m4a = the untouched stream),
+    # because queues and cache rows already own those names, and stale taps
+    # must keep validating so they reach the refusal instead of a crash.
     assert [choice.quality for choice in routing.choices] == [
         "mp3.best",
         "mp3.high",
@@ -154,7 +155,10 @@ def test_music_links_are_offered_audio_formats() -> None:
     ]
     assert all(choice.media_format == "audio" for choice in routing.choices)
     assert routing.header_key == "intake.choose_audio"
-    assert routing.audio_formats == ("mp3", "m4a", "flac", "opus", "wav"), "the format grid is step one"
+    assert routing.audio_formats == ("mp3", "m4a", "opus"), (
+        "the format grid is step one — lossless rows are hidden until a "
+        "provider can honestly fill them (content.lossless_offered)"
+    )
     assert routing.media_choice is None
 
 
@@ -171,9 +175,12 @@ def test_an_ambiguous_post_is_offered_media_and_audio() -> None:
 
     assert routing.media_choice is not None
     assert routing.media_choice.label_key == "fmt.media"
-    assert routing.audio_formats == ("mp3", "m4a", "flac", "opus", "wav")
+    assert routing.audio_formats == ("mp3", "m4a", "opus"), (
+        "lossless rows hidden from the grid (content.lossless_offered)"
+    )
     # What may be asked for — the tiers themselves, in menu order (levels render
     # their real bitrates at drawing time, so the label keys carry no meaning).
+    # flac/wav stay in this validation vocabulary so stale taps keep validating.
     assert [choice.quality for choice in routing.choices] == [
         "best",
         "mp3.best",

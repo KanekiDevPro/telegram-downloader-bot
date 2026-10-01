@@ -834,7 +834,10 @@ def test_a_music_link_is_offered_audio_formats_and_no_video_tier() -> None:
     ``m4a`` = untouched stream) — a rename here would orphan every cached file."""
     routing = content_module.routing_for("https://soundcloud.com/a/b")
 
-    assert routing.audio_formats == ("mp3", "m4a", "flac", "opus", "wav")
+    # The grid hides lossless rows until a provider can honestly fill them
+    # (content.lossless_offered); the choices below stay whole so stale taps
+    # keep validating into the refusal.
+    assert routing.audio_formats == ("mp3", "m4a", "opus")
     assert [choice.quality for choice in routing.choices] == [
         "mp3.best",
         "mp3.high",
@@ -871,7 +874,7 @@ def test_an_ambiguous_post_is_offered_media_and_audio() -> None:
 
     assert routing.media_choice is not None
     assert routing.media_choice.label_key == "fmt.media"
-    assert routing.audio_formats == ("mp3", "m4a", "flac", "opus", "wav")
+    assert routing.audio_formats == ("mp3", "m4a", "opus"), "lossless rows hidden from the grid"
     assert len(routing.choices) == 15, "the post's own media plus every audio tier"
 
 
@@ -2025,8 +2028,9 @@ def test_the_home_screen_is_navigation_only() -> None:
 
 def test_the_audio_menu_is_two_taps_deep_and_wav_skips_the_second() -> None:
     """Format first (a .mp3 and a .opus are different promises), then the quality
-    presets. WAV is PCM and FLAC is lossless — their whole menu is the format
-    button itself."""
+    presets. WAV is PCM and FLAC is lossless — and with no verified-lossless
+    source their rows are hidden from the grid entirely (content.lossless_offered),
+    so a tap can never start from them."""
     for codec, expected in (("mp3", 4), ("m4a", 4), ("opus", 4), ("flac", 0), ("wav", 0)):
         assert len(content_module.audio_level_choices(codec)) == expected, codec
 
@@ -2034,8 +2038,8 @@ def test_the_audio_menu_is_two_taps_deep_and_wav_skips_the_second() -> None:
     assert question["🎧 MP3"] == "audf:mp3"
     assert question["🎧 M4A"] == "audf:m4a"
     assert question["🎧 OPUS"] == "audf:opus"
-    assert question["🎧 FLAC"] == "fmt:audio:flac"
-    assert question["🎧 WAV"] == "fmt:audio:wav"
+    assert "🎧 FLAC" not in question, "no verified-lossless source, no FLAC row"
+    assert "🎧 WAV" not in question, "no verified-lossless source, no WAV row"
 
     levels = dict(_buttons(user_module._level_keyboard("mp3", EN)))
     assert levels == {

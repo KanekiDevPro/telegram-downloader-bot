@@ -174,8 +174,9 @@ class Routing:
     kind: ContentKind
     platform: Platform
     header_key: str
-    #: Every request that may legitimately finish this link's flow — the menu's
-    #: vocabulary, and what ``find_choice`` accepts.
+    #: Every request that may legitimately finish this link's flow — what
+    #: ``find_choice`` accepts. The drawn menu may show fewer rows (lossless
+    #: formats stay valid here for old menus while hidden from new ones).
     choices: tuple[Choice, ...]
     #: The "send this post's own media" button, for links that *are* posts.
     media_choice: Choice | None = None
@@ -249,11 +250,41 @@ def audio_level_choices(codec: str) -> tuple[Choice, ...]:
     )
 
 
+#: Formats whose menu rows promise lossless sound. No registered provider can
+#: honestly produce provider-verified lossless today (every production
+#: candidate carries ``provider_verified_lossless=False`` — see
+#: services/audio_models.py and services/providers.py), so these rows would
+#: always end in LOSSLESS_UNAVAILABLE. They stay in the validation vocabulary
+#: below (old menus still carry their callbacks) but out of every menu until
+#: :func:`lossless_offered` says otherwise.
+_LOSSLESS_FORMATS: frozenset[str] = frozenset({"flac", "wav"})
+
+
+def lossless_offered() -> bool:
+    """Whether menus may offer lossless (FLAC/WAV) rows. Always ``False``.
+
+    Turn this on only when a registered provider can honestly produce
+    ``provider_verified_lossless`` (``services/audio_models.py``,
+    ``services/providers.py``) — i.e. some production candidate arrives with
+    ``provider_verified_lossless=True`` and the quality gate
+    (``services/quality.py``) can plan true lossless from it. Until then the
+    rows are dead-end taps and the menus hide them; the validation vocabulary
+    keeps recognizing them so old menus reach the refusal instead of a crash.
+    Monkeypatchable in tests to prove the switch restores the rows.
+    """
+    return False
+
+
 def _audio_choices() -> tuple[Choice, ...]:
     """Every audio request accepted for a link, format by format, best first.
 
     A format with no presets (wav, flac — raw and lossless output) *is* its own
     request: its button submits directly and it appears here by its own name.
+
+    This is the *validation* vocabulary (what ``find_choice`` accepts),
+    deliberately wider than what the menus draw: lossless rows stay here even
+    while :func:`lossless_offered` hides them, so a stale tap still validates
+    and reaches the refusal instead of dying as an unknown callback.
     """
     per_format = (
         choice for fmt in AUDIO_FORMATS for choice in audio_level_choices(fmt)
@@ -635,8 +666,17 @@ def routing_for(url: str) -> Routing:
     platform = platform_for(url)
     if platform == "spotify" and kind in _AUDIO_MENU_KINDS:
         audio_formats: tuple[str, ...] = SPOTIFY_AUDIO_FORMATS
+    elif kind in _AUDIO_MENU_KINDS:
+        # Menus only: lossless rows are hidden until a provider can honestly
+        # fill them (see lossless_offered). The validation vocabulary above
+        # is untouched — this changes what is drawn, never what taps mean.
+        audio_formats = (
+            AUDIO_FORMATS
+            if lossless_offered()
+            else tuple(fmt for fmt in AUDIO_FORMATS if fmt not in _LOSSLESS_FORMATS)
+        )
     else:
-        audio_formats = AUDIO_FORMATS if kind in _AUDIO_MENU_KINDS else ()
+        audio_formats = ()
     return Routing(
         kind=kind,
         platform=platform,

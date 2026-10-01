@@ -77,12 +77,13 @@ def test_the_spotify_question_has_no_video_or_dummy_rows() -> None:
 
 
 def test_an_ordinary_audio_link_keeps_its_full_grid() -> None:
+    # "Full" now means every honestly fillable format: lossless rows are
+    # hidden until a provider can honestly produce them
+    # (content.lossless_offered) — the grid below is the whole menu.
     assert content.routing_for(SOUNDCLOUD_URL).audio_formats == (
         "mp3",
         "m4a",
-        "flac",
         "opus",
-        "wav",
     )
 
 

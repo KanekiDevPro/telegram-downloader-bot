@@ -41,6 +41,7 @@ from core import database, ui
 from core.config import get_settings
 from core.i18n import (
     DEFAULT_LANG,
+    error_message,
     lang_button,
     language_options,
     normalize_lang,
@@ -55,6 +56,7 @@ from core.utils import (
     escape_html,
     extract_url,
     format_size,
+    normalize_quality,
     today_local,
     validate_url,
 )
@@ -2533,6 +2535,15 @@ async def on_format_chosen(
         await cb.answer(t("intake.link_expired", lang), show_alert=True)
         await _clear_format_state(state)
         return
+    media_format, quality = _parse_format(cb.data)
+    if _stale_lossless_tap(url, media_format, quality, data):
+        # A FLAC/WAV tap from a menu drawn before the rows were hidden (or a
+        # crafted one): the existing refusal answers it — the same sentence
+        # the worker refusal would have shown — but nothing is queued, no
+        # quota moves, and the live menu under it stays usable. Deliberately
+        # before the mode check below: this tap never says "stale".
+        await cb.answer(error_message("LOSSLESS_UNAVAILABLE", lang), show_alert=True)
+        return
     mode = await _maybe_auto_unlock(state, user["telegram_id"])
     if not download_mode.is_compatible(mode, str(url)):
         # A stale callback from an earlier mode (the user switched sections
@@ -2541,7 +2552,6 @@ async def on_format_chosen(
         await cb.answer(t("intake.stale", lang), show_alert=True)
         await _clear_format_state(state)
         return
-    media_format, quality = _parse_format(cb.data)
     if not _tap_was_offered(url, media_format, quality, data):
         # A tap that was never offered (an older menu, a forwarded message, a
         # crafted callback): nothing is queued, and the tap is answered honestly.
@@ -2593,18 +2603,17 @@ def _size_hint(
     return None
 
 
-def _tap_was_offered(
+def _tap_offered_live(
     url: str, media_format: str, quality: str, data: dict[str, Any]
-) -> bool:
-    """Whether this tap was a button on the screen that is up.
+) -> bool | None:
+    """What the live vocabularies say about this tap — ``None`` when none of
+    them covers it.
 
-    Two probed vocabularies and one static — one rule. The router's static menu
-    answers through ``find_choice`` (deliberately strict — see its own note). The
-    *probed* rows — video resolutions and audio formats alike — are vocabularies
-    no table knows, so what the question showed travels in the FSM instead: the
-    offered list decides, and a crafted height is still just data
-    (``is_video_height`` agrees). When a menu predates the offered lists, the
-    static rule is all there is.
+    The *probed* rows — video resolutions and audio formats alike — are
+    vocabularies no table knows, so what the question showed travels in the FSM
+    instead: the offered list decides, and a crafted height is still just data
+    (``is_video_height`` agrees). ``None`` means no live vocabulary applies
+    (a menu that predates the offered lists), and the static rule decides.
     """
     if not media_format or not quality:
         return False
@@ -2632,7 +2641,45 @@ def _tap_was_offered(
         # (``audio_offered`` is ``None`` there), so the row is valid exactly
         # when the discovered ladder it was drawn with is still in state.
         return True
+    return None
+
+
+def _tap_was_offered(
+    url: str, media_format: str, quality: str, data: dict[str, Any]
+) -> bool:
+    """Whether this tap was a button on the screen that is up.
+
+    Two probed vocabularies and one static — one rule. The live vocabularies
+    above decide whenever they cover the tap; the router's static menu answers
+    through ``find_choice`` (deliberately strict — see its own note) only when
+    no live vocabulary does — i.e. a menu that predates the offered lists.
+    """
+    live = _tap_offered_live(url, media_format, quality, data)
+    if live is not None:
+        return live
     return content.find_choice(url, media_format, quality) is not None
+
+
+def _stale_lossless_tap(
+    url: str, media_format: str, quality: str, data: dict[str, Any]
+) -> bool:
+    """Whether this FLAC/WAV tap comes from a menu nobody can still see.
+
+    While :func:`content.lossless_offered` is false no live menu offers the
+    rows, so every such tap is stale or crafted — including taps that a
+    pre-deploy FSM still lists as offered. Once lossless rows exist, only taps
+    outside every live vocabulary are stale (the static ``find_choice``
+    fallback still recognizes the rows, but recognition is not an offer).
+    Stale taps are refused before the submit path: the existing refusal
+    answers them, and nothing is queued and no quota moves.
+    """
+    if media_format != "audio":
+        return False
+    if normalize_quality(quality, "audio") not in ("flac", "wav"):
+        return False
+    if not content.lossless_offered():
+        return True
+    return _tap_offered_live(url, media_format, quality, data) is not True
 
 
 @router.callback_query(F.data.startswith(RETRY_PREFIX))

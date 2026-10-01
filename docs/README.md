@@ -39,6 +39,20 @@ Redesigning the coordination layer on top of Redis (shared mode counters and
 claim authority) is the real fix and is deliberately out of scope for the
 tripwire: do not scale past one instance until that lands.
 
+## Lossless menu rows (services/content.py)
+
+Generic audio menus hide the FLAC/WAV rows: no registered provider can
+honestly produce provider-verified lossless today (every production
+candidate carries `provider_verified_lossless=False`), so those taps would
+always end in `err.LOSSLESS_UNAVAILABLE`. One predicate decides —
+`content.lossless_offered()`, false today — and it may only turn true when a
+registered provider honestly produces `provider_verified_lossless`
+(`services/audio_models.py`, `services/providers.py`) so the quality gate
+(`services/quality.py`) can plan true lossless from it. Hiding is menus-only:
+the validation vocabulary still recognizes the rows, and a tap from an old
+menu is answered with the existing refusal before anything is queued (no
+download, no quota movement).
+
 ## Host guard (services/host_guard.py)
 
 User links reach server-side fetches, so every fetch of a stranger's URL goes
