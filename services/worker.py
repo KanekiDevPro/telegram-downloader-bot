@@ -528,7 +528,9 @@ async def process_download_task(
     timings.enqueued_by = getattr(task, "enqueued_by", "") or ""
     platform_name = content.platform_for(task.url)
 
-    def _emit_metrics(ok: bool, error_code: str = "") -> None:
+    def _emit_metrics(
+        ok: bool, error_code: str = "", *, upload_path: str = "none", fallback_outcome: str = "not_needed"
+    ) -> None:
         timings.completed_at = telemetry.now_monotonic()
         telemetry.emit_download_metrics(
             telemetry.download_metrics_record(
@@ -537,6 +539,8 @@ async def process_download_task(
                 timings=timings,
                 ok=ok,
                 error_code=error_code,
+                upload_path=upload_path,
+                fallback_outcome=fallback_outcome,
             )
         )
 
@@ -568,7 +572,7 @@ async def process_download_task(
             # A replay is a delivery too: the file landed, so the status message
             # goes with it (the same rule as the fresh upload below).
             timings.upload_finished_at = telemetry.now_monotonic()
-            _emit_metrics(True)
+            _emit_metrics(True, upload_path="cached")
             await _retire_status(status, card=card)
             return
         await cache_service.forget(
@@ -625,7 +629,7 @@ async def process_download_task(
             if fleet is not None:
                 raise fleet from exc
             raise
-        await _deliver_via_fallback(
+        fallback_path = await _deliver_via_fallback(
             task,
             bot,
             pool,
@@ -638,7 +642,7 @@ async def process_download_task(
             track=track,
         )
         timings.probe_finished_at = telemetry.now_monotonic()
-        _emit_metrics(True)
+        _emit_metrics(True, upload_path=fallback_path, fallback_outcome="used")
         return
     timings.probe_finished_at = telemetry.now_monotonic()
     probe_s = time.monotonic() - probe_started
@@ -686,7 +690,7 @@ async def process_download_task(
             if fleet is not None:
                 raise fleet from exc
             raise
-        await _deliver_via_fallback(
+        fallback_path = await _deliver_via_fallback(
             task,
             bot,
             pool,
@@ -699,7 +703,7 @@ async def process_download_task(
             target_url=target_url,
             track=track,
         )
-        _emit_metrics(True)
+        _emit_metrics(True, upload_path=fallback_path, fallback_outcome="used")
         return
 
     timings.download_finished_at = telemetry.now_monotonic()
@@ -712,6 +716,7 @@ async def process_download_task(
     except OSError:
         timings.download_bytes = None
     download_s = time.monotonic() - download_started
+    direct_path = _upload_path_for(result.file_path)
     upload_s = await _finish_upload(
         task, bot, pool, status, result, card=card, track=track, timings=timings
     )
@@ -724,7 +729,7 @@ async def process_download_task(
         time.monotonic() - started,
         task.url,
     )
-    _emit_metrics(True)
+    _emit_metrics(True, upload_path=direct_path)
     if target_url != task.url:
         # A *mapped* link just went through YouTube anonymously (search and all), so
         # "YouTube refuses anonymous requests here" is no longer true.
@@ -1069,8 +1074,11 @@ async def _deliver_via_fallback(
     quota_claimed: bool = False,
     target_url: Optional[str] = None,
     track: spotify.SpotifyTrack | None = None,
-) -> None:
+) -> str:
     """Try the fallback engine on a blocked link, and finish the job if it works.
+
+    Returns the metrics upload-path word for the delivery (``uri``/``stream``).
+    Early exits that deliver nothing return ``"none"``.
 
     ``target_url`` is the link the work actually happens on: a rewritten Spotify
     link (see ``services.spotify``) is a YouTube video by the time we get here, and
@@ -1106,7 +1114,7 @@ async def _deliver_via_fallback(
     if cobalt is None or not cobalt.enabled:  # guarded by should_use_fallback
         raise error
     if not quota_claimed and not await _claim_quota(pool, task, status, card=card):
-        return
+        return "none"
 
     await _edit(status, _on_card(card, t("work.fallback", task.lang or DEFAULT_LANG)))
     settings = get_settings()
@@ -1146,7 +1154,9 @@ async def _deliver_via_fallback(
     # the user's either way, and this row is what keeps the degradation visible.
     await telemetry.record_block(pool, task, error, extractor.cookie_file)
     await fallback.remember_use(pool, fallback.USE_USED)
+    upload_path = _upload_path_for(result.file_path)
     await _finish_upload(task, bot, pool, status, result, card=card, track=track)
+    return upload_path
 
 
 class _SentNoFileId(RuntimeError):
@@ -1300,6 +1310,44 @@ def _media_ref(path: Path) -> str | FSInputFile:
         return _input_file(path)
     _daemon_readable(path)
     return uri
+
+
+def _upload_path_for(path: Path) -> str:
+    """The metrics word for how ``path`` travels — ``uri`` or ``stream``.
+
+    The same gate :func:`_media_ref` uses, without its side effects (no chmod,
+    no ``FSInputFile``): a file the local server can read off the shared
+    volume is ``uri``, everything else streams. Never raises — a metrics
+    helper must not fail a delivery — and never echoes the path.
+    """
+    try:
+        return "uri" if local_file_uri(path, get_settings()) is not None else "stream"
+    except Exception:
+        return "stream"
+
+
+def _fallback_skip_outcome(error: ExtractionError, cobalt: CobaltService | None) -> str:
+    """The metrics word for a refused fallback — ``not_needed`` or ``skipped:<fixed>``.
+
+    Mirrors :func:`services.fallback.skip_reason` without its human sentences:
+    a failure the fallback would never take is ``not_needed`` (quiet is honest
+    there), otherwise a fixed token — never Persian, never a dynamic quarantine
+    reason, never a URL. None-safe, never raises.
+    """
+    try:
+        if error.code not in fallback.FALLBACK_ERROR_CODES:
+            return telemetry.FALLBACK_NOT_NEEDED
+        if cobalt is None:
+            return "skipped:no_client"
+        if not bool(getattr(cobalt, "enabled", False)):
+            return "skipped:disabled"
+        if not bool(getattr(cobalt, "available", True)):
+            return "skipped:quarantined"
+        if getattr(cobalt, "quarantine_reason", ""):
+            return "skipped:quarantined"
+        return "skipped:unknown"
+    except Exception:
+        return telemetry.FALLBACK_NOT_NEEDED
 
 
 async def _deliver_ref(send: Callable[[str | FSInputFile], Awaitable[Any]], path: Path) -> Any:

@@ -715,6 +715,59 @@ def url_digest(url: object) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
 
 
+#: How the bytes reached Telegram — the only four answers the metrics use.
+#: ``uri`` is the zero-copy file-URI path, ``stream`` the byte upload,
+#: ``cached`` a cache replay (no fetch), ``none`` no delivery at all.
+UPLOAD_PATHS: frozenset[str] = frozenset({"uri", "stream", "cached", "none"})
+
+#: Fallback outcomes — the only three shapes. ``skipped`` always carries a
+#: fixed token (never free text, never a Persian sentence, never a dynamic
+#: quarantine reason), so the metrics stay joinable and URL/secret-free.
+FALLBACK_NOT_NEEDED = "not_needed"
+FALLBACK_USED = "used"
+FALLBACK_SKIPPED_PREFIX = "skipped:"
+FALLBACK_SKIP_TOKENS: frozenset[str] = frozenset(
+    {"no_client", "disabled", "quarantined", "unsupported", "unknown"}
+)
+
+
+def normalize_upload_path(value: object) -> str:
+    """One of ``uri``/``stream``/``cached``/``none`` — ``none`` for anything else.
+
+    None-safe and hostile-safe: a path traversal, a file URI or a signed
+    query degrades to ``none``, never echoes into the record.
+    """
+    if isinstance(value, str) and value in UPLOAD_PATHS:
+        return value
+    return "none"
+
+
+def normalize_fallback_outcome(value: object) -> str:
+    """One of ``not_needed``/``used``/``skipped:<fixed>`` — safe default otherwise.
+
+    ``skipped`` without a known token becomes ``skipped:unknown``; dynamic
+    text (Persian sentences, quarantine reasons, URLs) never passes through.
+    None-safe: ``None`` reads as ``not_needed``.
+    """
+    if not isinstance(value, str) or not value:
+        return FALLBACK_NOT_NEEDED
+    if value in (FALLBACK_NOT_NEEDED, FALLBACK_USED):
+        return value
+    if value.startswith(FALLBACK_SKIPPED_PREFIX):
+        token = value.split(":", 1)[1].strip().lower()
+        if token in FALLBACK_SKIP_TOKENS:
+            return f"{FALLBACK_SKIPPED_PREFIX}{token}"
+        # Map known Persian/dynamic skip notes to the fixed token — never echo.
+        if "quarantine" in token or "قرنطینه" in value:
+            return f"{FALLBACK_SKIPPED_PREFIX}quarantined"
+        if "disabled" in token or "خاموش" in value or "cobalt_api_url" in token:
+            return f"{FALLBACK_SKIPPED_PREFIX}disabled"
+        if "no_client" in token or "no client" in token or "fallback" in token:
+            return f"{FALLBACK_SKIPPED_PREFIX}no_client"
+        return f"{FALLBACK_SKIPPED_PREFIX}unknown"
+    return FALLBACK_NOT_NEEDED
+
+
 def download_metrics_record(
     *,
     platform: str,
@@ -722,6 +775,8 @@ def download_metrics_record(
     timings: JobTimings | None,
     ok: bool,
     error_code: str = "",
+    upload_path: object = "none",
+    fallback_outcome: object = "not_needed",
 ) -> dict[str, object]:
     """One structured diagnostic record for a completed job — safe keys only.
 
@@ -737,6 +792,8 @@ def download_metrics_record(
             "url_hash": str(url_hash or ""),
             "ok": bool(ok),
             "error_code": str(error_code or ""),
+            "upload_path": normalize_upload_path(upload_path),
+            "fallback_outcome": normalize_fallback_outcome(fallback_outcome),
             "cache_hit": bool(t.cache_hit),
             "queue_wait_ms": queue_wait_ms(
                 t.enqueued_mono, t.enqueued_by, t.started_at, BOOT_ID
@@ -762,6 +819,8 @@ def download_metrics_record(
             "url_hash": "",
             "ok": bool(ok),
             "error_code": "",
+            "upload_path": "none",
+            "fallback_outcome": FALLBACK_NOT_NEEDED,
             "cache_hit": False,
             "queue_wait_ms": None,
             "probe_ms": None,

@@ -324,16 +324,57 @@ async def spotify_audio_target(
     registry = build_default_registry(extractor, limit=limit)
     candidates = await registry.candidates(identity)
     if not candidates:
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("spotify selection candidates=0 selected=False reason=no_candidates")
         raise ExtractionError(
             "SPOTIFY_NO_MATCH",
             "نسخهٔ یوتیوب این آهنگ پیدا نشد. (خودِ اسپاتیفای هم به خاطر DRM قابل دانلود نیست.)",
         )
     selected = QualityEngine.select(candidates)
+    if logger.isEnabledFor(logging.DEBUG):
+        try:
+            _delta = (
+                abs(selected.duration_s - identity.duration_s)
+                if selected.duration_s is not None and identity.duration_s is not None
+                else None
+            )
+            _conf = float(selected.match_confidence or 0.0)
+        except (TypeError, ValueError):
+            _delta = None
+            _conf = 0.0
+        logger.debug(
+            "spotify selection provider=%s method=%s confidence=%.3f "
+            "duration_delta=%s codec=%s bitrate_bps=%s candidates=%d selected=True",
+            selected.provider_name,
+            selected.match_method,
+            _conf,
+            _delta,
+            selected.codec,
+            selected.bitrate_bps,
+            len(candidates),
+        )
     if (
         identity.duration_s is not None
         and selected.duration_s is not None
         and abs(selected.duration_s - identity.duration_s) > spotify.MAX_DURATION_DRIFT_S
     ):
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                _rej_conf = float(selected.match_confidence or 0.0)
+            except (TypeError, ValueError):
+                _rej_conf = 0.0
+            logger.debug(
+                "spotify selection provider=%s method=%s confidence=%.3f "
+                "duration_delta=%s codec=%s bitrate_bps=%s candidates=%d "
+                "selected=False reason=duration_drift",
+                selected.provider_name,
+                selected.match_method,
+                _rej_conf,
+                abs(selected.duration_s - identity.duration_s),
+                selected.codec,
+                selected.bitrate_bps,
+                len(candidates),
+            )
         logger.warning(
             "no YouTube match close enough for %r: selected is %ss off (%s)",
             track.credit,

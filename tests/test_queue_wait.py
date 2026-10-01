@@ -138,6 +138,8 @@ def test_existing_stage_keys_are_unchanged_and_queue_wait_is_added() -> None:
         "url_hash",
         "ok",
         "error_code",
+        "upload_path",
+        "fallback_outcome",
         "cache_hit",
         "probe_ms",
         "download_ms",
