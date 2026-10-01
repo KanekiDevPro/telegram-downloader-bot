@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Final, Optional
 
 
 class Provenance(str, Enum):
@@ -39,6 +39,24 @@ class AudioMode(str, Enum):
     MP3_320 = "mp3_320"
     #: Lossless output — only from a verified lossless source, never converted up.
     TRUE_LOSSLESS = "true_lossless"
+
+
+#: Identity-signal strength by match method, strongest first: the platform's
+#: own id outranks an exact recording-id match, which outranks any metadata
+#: evidence. Methods absent here (every metadata score) rank 0, where
+#: confidence still orders strong above weak. The ranking reads this tier
+#: BEFORE confidence so the hierarchy never depends on float gaps.
+MATCH_METHOD_RANK: Final[dict[str, int]] = {"spotify-id": 2, "isrc": 1}
+
+
+def match_method_rank(method: str) -> int:
+    """The categorical identity tier of a match method.
+
+    ``0`` for any metadata evidence (or an empty/unknown method): those keep
+    their confidence ordering against each other, always below an exact
+    recording-id match, which is always below the platform's own id.
+    """
+    return MATCH_METHOD_RANK.get(method or "", 0)
 
 
 @dataclass(frozen=True)

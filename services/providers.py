@@ -95,10 +95,14 @@ class ProviderRegistry:
         return found
 
 
-#: The identity confidence an exact ISRC match carries: above any metadata
-#: score (0.99 is the fetched-evidence ceiling in ``score_hit``), below the
-#: platform's own id (1.0). The number says *which recording*, never how good
-#: its bytes are — the engine still ranks audio facts underneath it.
+#: The identity-confidence floor an exact ISRC match carries: below the
+#: platform's own id (1.0), and deliberately NOT above every metadata score
+#: (0.99 is the fetched-evidence ceiling in ``score_hit``) — the ordering no
+#: longer depends on this number beating any float. The categorical tier in
+#: ``services.audio_models.match_method_rank`` puts an exact recording-id
+#: match above any metadata evidence before confidence is even compared. The
+#: number says *which recording*, never how good its bytes are — the engine
+#: still ranks audio facts underneath it.
 ISRC_MATCH_CONFIDENCE = 0.98
 
 

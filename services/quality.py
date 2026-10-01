@@ -26,6 +26,7 @@ from services.audio_models import (
     OutputAudio,
     Provenance,
     SourceAudio,
+    match_method_rank,
 )
 from services.extractor import audio_bitrate
 from services.verify import MediaFacts
@@ -104,15 +105,22 @@ def _lossless_shape(source: SourceAudio, container: Optional[str]) -> Provenance
     return Provenance.LOSSLESS_NATIVE
 
 
-def _rank_key(candidate: AudioCandidate) -> tuple[float, int, int, int, int, int, int]:
-    """Best first: confidence, then verified lossless, then audio facts.
+def _rank_key(
+    candidate: AudioCandidate,
+) -> tuple[int, float, int, int, int, int, int, int, str, str]:
+    """Best first: identity signal, then confidence, then audio facts.
 
-    Confidence dominates everything (identity before quality); verified
-    lossless dominates unverified claims; only then do codec, depth, rate and
-    bitrate break ties. ``None`` facts sort lowest — unknown is never promoted.
+    The categorical match tier dominates everything (the platform's own id,
+    then an exact recording-id match, then any metadata evidence); confidence
+    orders only within a tier, so the hierarchy never depends on float gaps.
+    Verified lossless dominates unverified claims next; only then do codec,
+    depth, rate and bitrate break ties. ``None`` facts sort lowest — unknown
+    is never promoted. The provider identity closes the key so exact ties
+    resolve the same way whatever order the candidates arrived in.
     """
     verified = 1 if (candidate.provider_verified_lossless and candidate.is_lossless) else 0
     return (
+        match_method_rank(candidate.match_method),
         float(candidate.match_confidence or 0.0),
         verified,
         1 if candidate.is_lossless else 0,
@@ -120,6 +128,8 @@ def _rank_key(candidate: AudioCandidate) -> tuple[float, int, int, int, int, int
         int(candidate.bit_depth or 0),
         int(candidate.sample_rate or 0),
         int(candidate.bitrate_bps or 0),
+        candidate.provider_name,
+        candidate.provider_track_id,
     )
 
 

@@ -10,6 +10,7 @@ is exercised end to end with deterministic fakes.
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import replace
 from typing import Any
 
@@ -128,6 +129,111 @@ async def test_isrc_exact_match_outranks_doubtful_flac() -> None:
     assert found[0].match_method == "isrc"
     assert selected.provider_track_id == isrc_match.provider_track_id
     assert selected.codec == "opus"
+
+
+async def test_exact_isrc_beats_a_stronger_confidence_metadata_hit() -> None:
+    isrc_match = _candidate(
+        provider="isrc-store",
+        track_id="https://isrc-store.example/t/1",
+        confidence=0.5,
+    )
+    strong_meta = _candidate(
+        provider="meta-store",
+        track_id="https://meta-store.example/t/9",
+        confidence=0.99,
+    )
+    registry = providers_module.ProviderRegistry()
+    registry.register(_FakeProvider("isrc-store", isrc_hit=isrc_match))
+    registry.register(_FakeProvider("meta-store", meta_hits=[strong_meta]))
+
+    found = await registry.candidates(_identity())
+    selected = QualityEngine.select(found)
+
+    stamped = [c for c in found if c.match_method == "isrc"]
+    assert len(stamped) == 1
+    assert stamped[0].match_confidence == 0.98
+    assert strong_meta.match_confidence == 0.99
+    assert selected.provider_track_id == isrc_match.provider_track_id
+
+
+def test_platform_identity_outranks_exact_isrc_at_any_confidence() -> None:
+    platform = _candidate(
+        provider="platform",
+        track_id="https://platform.example/t/0",
+        method="spotify-id",
+        confidence=0.5,
+    )
+    isrc_match = _candidate(
+        provider="isrc-store",
+        track_id="https://isrc-store.example/t/1",
+        method="isrc",
+        confidence=0.98,
+    )
+
+    assert QualityEngine.select([isrc_match, platform]).provider_track_id == platform.provider_track_id
+
+
+def test_metadata_only_ranking_still_follows_confidence() -> None:
+    strong = _candidate(
+        provider="meta-a",
+        track_id="https://meta-a.example/t/1",
+        method="duration+title",
+        confidence=0.99,
+    )
+    weak = _candidate(
+        provider="meta-b",
+        track_id="https://meta-b.example/t/2",
+        method="ranking",
+        confidence=0.5,
+    )
+
+    assert QualityEngine.select([weak, strong]).provider_track_id == strong.provider_track_id
+
+
+def test_ranking_ignores_candidate_input_order() -> None:
+    winner = _candidate(
+        provider="isrc-store",
+        track_id="https://isrc-store.example/t/1",
+        method="isrc",
+        confidence=0.98,
+    )
+    runner_up = _candidate(
+        provider="meta-a",
+        track_id="https://meta-a.example/t/2",
+        method="duration+title",
+        confidence=0.99,
+    )
+    also_ran = _candidate(
+        provider="meta-b",
+        track_id="https://meta-b.example/t/3",
+        method="ranking",
+        confidence=0.5,
+    )
+    expected = [winner.provider_track_id, runner_up.provider_track_id, also_ran.provider_track_id]
+
+    for ordering in itertools.permutations([winner, runner_up, also_ran]):
+        assert [c.provider_track_id for c in QualityEngine.rank(list(ordering))] == expected
+
+
+def test_exact_ties_break_on_provider_identity_deterministically() -> None:
+    first = _candidate(
+        provider="b-store",
+        track_id="https://stores.example/b",
+        method="isrc",
+        confidence=0.98,
+    )
+    second = _candidate(
+        provider="a-store",
+        track_id="https://stores.example/a",
+        method="isrc",
+        confidence=0.98,
+    )
+
+    # The tiebreak direction is arbitrary (the ranking sorts best-first, so
+    # the larger name leads) — the pinned property is that both input orders
+    # resolve identically.
+    assert [c.provider_name for c in QualityEngine.rank([first, second])] == ["b-store", "a-store"]
+    assert [c.provider_name for c in QualityEngine.rank([second, first])] == ["b-store", "a-store"]
 
 
 async def test_isrc_index_is_not_queried_without_an_isrc() -> None:

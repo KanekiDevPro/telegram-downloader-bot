@@ -84,6 +84,38 @@ def test_old_payload_without_the_new_fields_still_deserializes() -> None:
     assert _record(timings)["queue_wait_ms"] is None
 
 
+def test_new_payload_still_parses_with_the_pre_p0_parser() -> None:
+    # Step 0a rollback check: the pre-P0-1 parser (a9c9e95) builds the task
+    # from known fields only — ``{key: data[key] for key in fields if key in
+    # data}`` — so unknown keys are dropped, never rejected. A payload written
+    # by the new code (carrying enqueued_mono/enqueued_by) must still parse
+    # under that old logic during a rollback. The comprehension below is a
+    # verbatim copy of the old body; only the field set is the old one.
+    task = DownloadTask(
+        url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        telegram_id=1,
+        chat_id=1,
+        enqueued_mono=1234.5,
+        enqueued_by=BOOT_ID,
+    )
+    raw = task.to_payload()
+    assert json.loads(raw)["enqueued_mono"] == 1234.5
+
+    data: dict[str, Any] = json.loads(raw)
+    old_fields = {
+        key: field
+        for key, field in DownloadTask.__dataclass_fields__.items()
+        if key not in {"enqueued_mono", "enqueued_by"}
+    }
+    revived = DownloadTask(**{key: data[key] for key in old_fields if key in data})
+
+    assert revived.url == task.url
+    assert revived.telegram_id == 1
+    assert revived.chat_id == 1
+    assert revived.enqueued_mono == 0.0
+    assert revived.enqueued_by == ""
+
+
 def test_new_fields_survive_a_payload_round_trip() -> None:
     task = DownloadTask(
         url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
