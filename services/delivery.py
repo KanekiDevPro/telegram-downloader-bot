@@ -18,13 +18,14 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import Sequence
-from typing import Any
+import random
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Any, Literal, TypeVar, overload
 
 import asyncpg
 from aiogram import Bot
 from aiogram.enums import ChatAction
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import (
     InputMediaAudio,
     InputMediaDocument,
@@ -74,7 +75,124 @@ def group_add_link() -> str:
     return f"https://t.me/{_BOT_USERNAME}?startgroup=true" if _BOT_USERNAME else ""
 
 
-#: Which ephemeral chat action says «working on it» per delivered kind. The Bot
+#: Delivery retries after a flood refusal, on top of the first attempt.
+FLOOD_MAX_RETRIES = 2
+#: One wait is never longer than this, however long the server asks.
+FLOOD_PER_WAIT_MAX_S = 30.0
+#: ...nor does one call wait longer than this in total.
+FLOOD_TOTAL_MAX_S = 60.0
+#: Bounded jitter on top of the server's delay (thundering herds share clocks).
+FLOOD_JITTER_MAX_S = 1.0
+#: Card/status edits retry a flood only below this wait — anything longer is a
+#: skipped edit, never a stalled job.
+FLOOD_EDIT_WAIT_MAX_S = 5.0
+
+_T = TypeVar("_T")
+
+
+@overload
+async def flood_aware_call(
+    send: Callable[[], Awaitable[_T]],
+    *,
+    kind: Literal["deliver"],
+    stop_event: asyncio.Event | None = None,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+    jitter: Callable[[], float] | None = None,
+    on_flood: Callable[[float], None] | None = None,
+) -> _T: ...
+
+
+@overload
+async def flood_aware_call(
+    send: Callable[[], Awaitable[_T]],
+    *,
+    kind: Literal["edit", "cosmetic"],
+    stop_event: asyncio.Event | None = None,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+    jitter: Callable[[], float] | None = None,
+    on_flood: Callable[[float], None] | None = None,
+) -> _T | None: ...
+
+
+async def flood_aware_call(
+    send: Callable[[], Awaitable[_T]],
+    *,
+    kind: str = "deliver",
+    stop_event: asyncio.Event | None = None,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+    jitter: Callable[[], float] | None = None,
+    on_flood: Callable[[float], None] | None = None,
+) -> _T | None:
+    """Run one Telegram call, honouring flood control exactly as far as told.
+
+    ``send`` is a zero-arg factory — invoked afresh per attempt, so every
+    retry builds its own input objects (a partially consumed upload is never
+    re-sent). Only :class:`TelegramRetryAfter` is ever handled: a flood
+    refusal means the server took nothing, so retrying cannot duplicate a
+    delivery — while permanent errors (and network ambiguity) propagate
+    untouched, as does ``CancelledError``.
+
+    ``kind`` sets the patience: ``"deliver"`` sleeps the server's delay plus
+    bounded jitter and retries (at most :data:`FLOOD_MAX_RETRIES`, inside the
+    per-wait and per-call caps — over-cap raises the flood error into the
+    existing attempt/retry layer instead of sleeping); ``"edit"`` retries
+    once below :data:`FLOOD_EDIT_WAIT_MAX_S` and otherwise gives up with
+    ``None``; ``"cosmetic"`` never sleeps (``on_flood`` hears the delay so a
+    throttled caller can push its next tick back). A set ``stop_event`` skips
+    every wait (raising for ``"deliver"``, ``None`` otherwise), and an
+    in-flight wait ends with it instead of blocking shutdown.
+    """
+    if kind not in ("deliver", "edit", "cosmetic"):
+        raise ValueError(f"unknown flood kind: {kind!r}")
+    ask_jitter = jitter if jitter is not None else lambda: random.uniform(0.0, FLOOD_JITTER_MAX_S)
+    spent = 0.0
+    attempt = 0
+    while True:
+        try:
+            return await send()
+        except TelegramRetryAfter as exc:
+            wait = max(0.0, float(exc.retry_after or 0))
+            logger.warning(
+                "telegram flood control: refusing to hurry (%ss asked, %s call, attempt %s)",
+                exc.retry_after,
+                kind,
+                attempt,
+            )
+            if kind == "cosmetic":
+                if on_flood is not None:
+                    on_flood(wait)
+                return None
+            if stop_event is not None and stop_event.is_set():
+                if kind == "deliver":
+                    raise
+                return None
+            if kind == "edit":
+                if attempt >= 1 or wait > FLOOD_EDIT_WAIT_MAX_S:
+                    return None
+                delay = wait + ask_jitter()
+            else:
+                if (
+                    attempt >= FLOOD_MAX_RETRIES
+                    or wait > FLOOD_PER_WAIT_MAX_S
+                    or spent + wait > FLOOD_TOTAL_MAX_S
+                ):
+                    raise
+                delay = wait + ask_jitter()
+                spent += delay
+            attempt += 1
+            if sleep is not None:
+                await sleep(delay)
+            elif stop_event is None:
+                await asyncio.sleep(delay)
+            else:
+                try:
+                    stopped: bool = await asyncio.wait_for(stop_event.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    stopped = False
+                if stopped and kind == "deliver":
+                    raise exc
+                if stopped:
+                    return None
 #: API has no "uploading audio" slot — the voice action is its audio upload — so
 #: a song pulses that one, and everything else pulses its own shape.
 _UPLOAD_ACTIONS: dict[str, ChatAction] = {
@@ -472,7 +590,11 @@ async def send_album(
         if index == 0 and caption:
             # aiogram's input-media models are frozen, so the caption is a *copy*.
             batch[0] = batch[0].model_copy(update={"caption": caption})
-        sent += await bot.send_media_group(chat_id, media=batch)
+        # One batch is one flood unit: Telegram rejects the whole call, so the
+        # whole call is what retries — never a subset of a batch.
+        sent += await flood_aware_call(
+            lambda: bot.send_media_group(chat_id, media=batch), kind="deliver"
+        )
     return sent
 
 
@@ -498,17 +620,32 @@ async def send_cached_file(
         logger.info("cache row %s holds no usable file_id — dropping entry", _field(cached, "url_hash"))
         return False
     kind = _kind_of(cached)
+    # Floods are honoured inside the send: a replay never downgrades, drops or
+    # forgets its row over rate limiting (only TelegramBadRequest below does).
     try:
         if kind == "photo_group":
-            await send_album(bot, chat_id, [InputMediaPhoto(media=file_id) for file_id in ids], caption)
+            await flood_aware_call(
+                lambda: send_album(
+                    bot, chat_id, [InputMediaPhoto(media=file_id) for file_id in ids], caption
+                ),
+                kind="deliver",
+            )
         elif kind == "photo":
-            await bot.send_photo(chat_id, ids[0], caption=caption)
+            await flood_aware_call(
+                lambda: bot.send_photo(chat_id, ids[0], caption=caption), kind="deliver"
+            )
         elif kind == "audio":
-            await bot.send_audio(chat_id, ids[0], caption=caption)
+            await flood_aware_call(
+                lambda: bot.send_audio(chat_id, ids[0], caption=caption), kind="deliver"
+            )
         elif kind == "video":
-            await bot.send_video(chat_id, ids[0], caption=caption)
+            await flood_aware_call(
+                lambda: bot.send_video(chat_id, ids[0], caption=caption), kind="deliver"
+            )
         else:
-            await bot.send_document(chat_id, ids[0], caption=caption)
+            await flood_aware_call(
+                lambda: bot.send_document(chat_id, ids[0], caption=caption), kind="deliver"
+            )
         return True
     except TelegramBadRequest as exc:
         # A cached file Telegram will not take *as its kind* still replays —

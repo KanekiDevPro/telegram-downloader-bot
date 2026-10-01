@@ -58,6 +58,7 @@ from services.audio_models import AudioMode, OutputAudio, SourceAudio
 from services.cobalt import CobaltError, CobaltService, audio_format_param
 from services.delivery import (
     ActionPulse,
+    flood_aware_call,
     format_duration,
     join_file_ids,
     media_card,
@@ -1308,12 +1309,16 @@ async def _deliver_ref(send: Callable[[str | FSInputFile], Awaitable[Any]], path
     build without local mode) must never fail a link: the same send is retried
     with the file streamed, which is exactly what happened before this fast
     path existed. Anything the *streamed* attempt raises keeps its old meaning.
+
+    Flood control is honoured per attempt: the factory is invoked afresh on
+    every retry, so a retried upload always builds a new input object (a URI
+    string, or a new ``FSInputFile`` — never a consumed stream).
     """
     await _recover_local_api_if_healthy()
     ref = _media_ref(path)
     if isinstance(ref, str):
         try:
-            return await send(ref)
+            return await flood_aware_call(lambda: send(ref), kind="deliver")
         except TelegramBadRequest as exc:
             # The daemon's own message is the diagnosis: "wrong file identifier"
             # means it never ran in local mode, "can't open" means the mount or
@@ -1323,7 +1328,7 @@ async def _deliver_ref(send: Callable[[str | FSInputFile], Awaitable[Any]], path
                 path.name,
                 exc.message,
             )
-    return await send(_input_file(path))
+    return await flood_aware_call(lambda: send(_input_file(path)), kind="deliver")
 
 
 @dataclass(frozen=True)
@@ -1409,22 +1414,36 @@ async def _send_album_group(bot: Bot, chat_id: int, images: list[Path], caption:
     photo; only a second refusal falls through to the per-picture route.
     """
     await _recover_local_api_if_healthy()
-    refs: list[str | FSInputFile] = [_media_ref(path) for path in images]
+    # Whether any leg can be a URI (decides the streamed fallback below) is a
+    # property of the paths, read once — the per-attempt media objects are
+    # built fresh inside the factories so a retried batch never re-sends one.
+    probing = [_media_ref(path) for path in images]
     try:
-        return await send_album(bot, chat_id, [InputMediaPhoto(media=ref) for ref in refs], caption)
+        return await flood_aware_call(
+            lambda: send_album(
+                bot,
+                chat_id,
+                [InputMediaPhoto(media=_media_ref(path)) for path in images],
+                caption,
+            ),
+            kind="deliver",
+        )
     except TelegramBadRequest as exc:
-        if not any(isinstance(ref, str) for ref in refs):
+        if not any(isinstance(ref, str) for ref in probing):
             return None
         reason = exc.message
     logger.info(
         "local Bot API refused the file URIs (%s) — streaming the album instead", reason
     )
     try:
-        return await send_album(
-            bot,
-            chat_id,
-            [InputMediaPhoto(media=_input_file(path)) for path in images],
-            caption,
+        return await flood_aware_call(
+            lambda: send_album(
+                bot,
+                chat_id,
+                [InputMediaPhoto(media=_input_file(path)) for path in images],
+                caption,
+            ),
+            kind="deliver",
         )
     except TelegramBadRequest:
         return None
@@ -1639,7 +1658,12 @@ async def _open_status(task: DownloadTask, bot: Bot, card: str) -> Any:
             date=datetime.now(timezone.utc),
             chat=Chat(id=task.chat_id, type="private"),
         ).as_(bot)
-    return await bot.send_message(task.chat_id, card, disable_web_page_preview=True)
+    # The job narrates everything in this message: worth delivery patience
+    # (a flood here must not orphan a job before its first attempt).
+    return await flood_aware_call(
+        lambda: bot.send_message(task.chat_id, card, disable_web_page_preview=True),
+        kind="deliver",
+    )
 
 
 async def _edit(status: Any, text: str, *, reply_markup: Any = None) -> None:
@@ -1649,10 +1673,13 @@ async def _edit(status: Any, text: str, *, reply_markup: Any = None) -> None:
     attached, so no state line can ever wear another screen's buttons.
     """
     try:
-        await status.edit_text(
-            text, disable_web_page_preview=True, reply_markup=reply_markup
+        await flood_aware_call(
+            lambda: status.edit_text(
+                text, disable_web_page_preview=True, reply_markup=reply_markup
+            ),
+            kind="edit",
         )
-    except (TelegramBadRequest, TelegramRetryAfter):
+    except TelegramBadRequest:
         pass
 
 
@@ -1839,7 +1866,22 @@ class _ProgressEditor:
         task.add_done_callback(_log_task_failure)
 
     async def _edit(self, text: str) -> None:
-        await _edit(self._status, text)
+        # Cosmetic by policy: never sleep, and a flood pushes the throttle
+        # forward so the next tick waits out the server's delay instead.
+        try:
+            await flood_aware_call(
+                lambda: self._status.edit_text(
+                    text, disable_web_page_preview=True, reply_markup=None
+                ),
+                kind="cosmetic",
+                on_flood=self._push_throttle,
+            )
+        except TelegramBadRequest:
+            pass
+
+    def _push_throttle(self, wait_s: float) -> None:
+        """Move the next allowed progress tick past the server's delay."""
+        self._last_edit = max(self._last_edit, time.monotonic() + max(0.0, wait_s))
 
 
 # ---------------------------------------------------------------------------
