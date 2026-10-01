@@ -267,6 +267,26 @@ async def test_spotify_mode_rejects_youtube_url(monkeypatch: pytest.MonkeyPatch)
     assert await _mode_of(state) == download_mode.SPOTIFY
 
 
+async def test_intake_refuses_a_private_host_url_in_both_languages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A literal-private link is refused at intake: no queue, no probe, no leak."""
+    from core.i18n import t
+
+    for lang, needle in ((EN, "private or internal"), (FA, "خصوصی یا داخلی")):
+        seen = _stub_intake_tail(monkeypatch)
+        bot, state, queue = RecordingBot(), _fresh_state(), FakeQueue()
+
+        await _send_url(bot, state, queue, "http://127.0.0.1/video.mp4", lang=lang)
+
+        assert seen["accepted"] == []
+        assert seen["probed"] == []
+        assert queue.tasks == []
+        assert t("intake.private_host", lang) in bot.texts
+        assert needle in bot.texts[0]
+        assert "127.0.0.1" not in " ".join(bot.texts)
+
+
 async def test_spotify_mode_accepts_multiple_spotify_urls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

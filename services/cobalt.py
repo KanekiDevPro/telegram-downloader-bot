@@ -37,6 +37,7 @@ from urllib.parse import unquote, urlparse
 import aiohttp
 
 from core.utils import MediaFormat, normalize_quality, sanitize_filename
+from services.host_guard import HostGuardError, HostResolver, guarded_get
 
 logger = logging.getLogger(__name__)
 
@@ -437,6 +438,7 @@ class CobaltService:
         download_timeout_s: float = 1800.0,
         proxy: str | None = None,
         session: aiohttp.ClientSession | None = None,
+        host_resolver: HostResolver | None = None,
     ) -> None:
         urls = _node_urls(base_url)
         self.base_urls: tuple[str, ...] = urls
@@ -456,6 +458,10 @@ class CobaltService:
         self.download_timeout_s = download_timeout_s
         self.proxy = proxy or None
         self._session = session
+        #: DNS for the file-download policy (tests inject a fake; production
+        #: resolves for real). The resolve-API calls above are untouched: the
+        #: instance answers those server-side, which no pre-check can cover.
+        self._host_resolver = host_resolver
         self._owns_session = session is None
 
     # ``_endpoint_index`` / ``_quarantine_until`` / ``_quarantine_reason`` name the
@@ -609,6 +615,25 @@ class CobaltService:
         if self.api_key:
             headers["Authorization"] = f"Api-Key {self.api_key}"
         return headers
+
+    @property
+    def _instance_hosts(self) -> frozenset[str]:
+        """The configured instances' own hosts (tunnel URLs are built on them).
+
+        The only names the download policy allows besides public ones: they
+        come from operator configuration, never from user input, and tunnel
+        downloads legitimately point back at them (``API_URL`` builds those
+        URLs — see the compose file). Exact match, read fresh per download.
+        """
+        hosts: set[str] = set()
+        for raw in self.base_urls:
+            try:
+                name = (urlparse(raw).hostname or "").rstrip(".").lower()
+            except ValueError:
+                continue
+            if name:
+                hosts.add(name)
+        return frozenset(hosts)
 
     def _http(self) -> aiohttp.ClientSession:
         if self._session is None:
@@ -866,13 +891,16 @@ class CobaltService:
     ) -> Path:
         timeout = aiohttp.ClientTimeout(total=self.download_timeout_s)
         try:
-            request = self._http().get(
+            async with guarded_get(
+                self._http(),
                 part.url,
                 headers={"User-Agent": self._headers()["User-Agent"]},
                 proxy=self.proxy or None,
                 timeout=timeout,
-            )
-            async with request as response:
+                allow_hosts=self._instance_hosts,
+                resolve=self._host_resolver,
+            ) as hop:
+                response = hop[0]
                 if response.status >= 400:
                     raise CobaltError(
                         "UNREACHABLE",
@@ -896,6 +924,16 @@ class CobaltService:
                             _report(progress_hook, written, total or None)
                 if written == 0:
                     raise CobaltError("NO_MEDIA", "لینک کوبالت فایل خالی برگرداند.")
+        except HostGuardError as exc:
+            logger.warning(
+                "cobalt download refused (host=%s reason=%s)",
+                exc.verdict.host_digest,
+                exc.verdict.reason,
+            )
+            raise CobaltError(
+                "PRIVATE_HOST",
+                "لینک دانلود به نشانی داخلی اشاره می‌کند؛ دانلود انجام نشد.",
+            ) from exc
         except asyncio.TimeoutError:
             raise CobaltError(
                 "TIMEOUT", f"دانلود از کوبالت در {self.download_timeout_s:.0f} ثانیه تمام نشد."

@@ -60,7 +60,7 @@ from core.utils import (
 )
 from handlers.payment import plans_keyboard, wallet_amount_keyboard
 from services import cache as cache_service
-from services import content, download_mode, preflight, spotify
+from services import content, download_mode, host_guard, preflight, spotify
 from services.delivery import (
     ActionPulse,
     format_duration,
@@ -1592,6 +1592,18 @@ async def _intake_flow(
     if not validate_url(url):
         await message.answer(t("intake.invalid_link", lang), link_preview_options=_NO_PREVIEW)
         return
+    guard = await host_guard.check_url(url, fail_open_on_dns_failure=True)
+    if not guard.ok:
+        # Triage, not enforcement: literals and internal names die here with a
+        # clear message (no DNS was needed to prove them); a hostname whose DNS
+        # merely failed is deferred to the fetch sites, which fail closed.
+        logger.warning(
+            "intake refusing a non-public host (host=%s reason=%s)",
+            guard.host_digest,
+            guard.reason,
+        )
+        await message.answer(t("intake.private_host", lang), link_preview_options=_NO_PREVIEW)
+        return
     mode = await _maybe_auto_unlock(state, user["telegram_id"])
     if not download_mode.is_compatible(mode, url):
         # Wrong source for the active mode: answered fast, before the cache,
@@ -2296,10 +2308,10 @@ async def _canonical_url(url: str) -> str:
     try:
         timeout = aiohttp.ClientTimeout(total=_CANONICAL_RESOLVE_S)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
-                url, allow_redirects=True, headers={"User-Agent": _PROBE_USER_AGENT}
-            ) as response:
-                resolved = str(response.url)
+            async with host_guard.guarded_get(
+                session, url, headers={"User-Agent": _PROBE_USER_AGENT}
+            ) as hop:
+                resolved = hop[1]
     except Exception:
         logger.info("share link %.80s did not resolve — keeping it as-is", url)
         return url

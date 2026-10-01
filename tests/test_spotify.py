@@ -137,10 +137,10 @@ async def test_a_missing_album_costs_a_line_of_caption_not_the_download(
 ) -> None:
     """The album lives on a second page; when that page is gone the track is still
     complete enough to download and tag."""
-    async def canonical(session: object, url: str, timeout: float) -> str:
+    async def canonical(session: object, url: str, timeout: float, **kwargs: object) -> str:
         return TRACK_URL
 
-    async def get(session: object, url: str, timeout: float) -> str:
+    async def get(session: object, url: str, timeout: float, **kwargs: object) -> str:
         if "/track/" in url and "/embed/" not in url:
             raise ExtractionError("SPOTIFY_LOOKUP_FAILED", "unavailable")
         return _embed_html()
@@ -157,10 +157,10 @@ async def test_a_missing_album_costs_a_line_of_caption_not_the_download(
 async def test_a_track_is_read_with_its_album_when_the_page_has_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def canonical(session: object, url: str, timeout: float) -> str:
+    async def canonical(session: object, url: str, timeout: float, **kwargs: object) -> str:
         return TRACK_URL
 
-    async def get(session: object, url: str, timeout: float) -> str:
+    async def get(session: object, url: str, timeout: float, **kwargs: object) -> str:
         return SEARCH_PAGE_HTML if "/embed/" not in url else _embed_html()
 
     monkeypatch.setattr(spotify, "_canonical", canonical)
@@ -274,11 +274,11 @@ async def test_lookup_follows_a_share_link_to_the_embed_page(monkeypatch: pytest
     """``spotify.link`` is the app's share domain; the track id is only behind it."""
     seen: list[str] = []
 
-    async def canonical(session: object, url: str, timeout: float) -> str:
+    async def canonical(session: object, url: str, timeout: float, **kwargs: object) -> str:
         assert url == "https://spotify.link/abcDEF123"
         return TRACK_URL
 
-    async def get(session: object, url: str, timeout: float) -> str:
+    async def get(session: object, url: str, timeout: float, **kwargs: object) -> str:
         seen.append(url)
         return _embed_html()
 
@@ -297,10 +297,10 @@ async def test_lookup_follows_a_share_link_to_the_embed_page(monkeypatch: pytest
 
 
 async def test_lookup_refuses_a_link_that_is_not_a_track(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def canonical(session: object, url: str, timeout: float) -> str:
+    async def canonical(session: object, url: str, timeout: float, **kwargs: object) -> str:
         return "https://open.spotify.com/album/1DFixLWuPkv3KT3TnV35m3"
 
-    async def get(session: object, url: str, timeout: float) -> str:
+    async def get(session: object, url: str, timeout: float, **kwargs: object) -> str:
         raise AssertionError("an album should never reach the embed fetch")
 
     monkeypatch.setattr(spotify, "_canonical", canonical)
@@ -473,7 +473,9 @@ def origin(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 
 
 async def test_a_track_is_read_over_real_http(origin: str) -> None:
-    track = await spotify.lookup(TRACK_URL)
+    # The fixture points Spotify's hosts at a local origin: explicitly allowed
+    # here (production callers pass nothing, so loopback stays refused).
+    track = await spotify.lookup(TRACK_URL, allow_hosts=("127.0.0.1",))
 
     assert track.credit == "Rick Astley — Never Gonna Give You Up"
     assert track.duration_s == 213
@@ -484,9 +486,9 @@ async def test_the_cover_reaches_the_disk_over_real_http(
     origin: str, tmp_path: Path
 ) -> None:
     """The artwork is fetched, size-checked and written next to the job's files."""
-    track = await spotify.lookup(TRACK_URL)
+    track = await spotify.lookup(TRACK_URL, allow_hosts=("127.0.0.1",))
 
-    path = await spotify.download_cover(track, tmp_path)
+    path = await spotify.download_cover(track, tmp_path, allow_hosts=("127.0.0.1",))
 
     assert path is not None and path.is_file()
     assert path.read_bytes().startswith(b"\xff\xd8\xff")
@@ -499,9 +501,9 @@ async def test_a_cover_telegram_would_refuse_is_not_written(
     """Telegram's 200 kB thumbnail ceiling is checked *before* the upload, so an
     oversized image costs the artwork rather than the whole file."""
     monkeypatch.setattr(spotify, "MAX_COVER_BYTES", 10)
-    track = await spotify.lookup(TRACK_URL)
+    track = await spotify.lookup(TRACK_URL, allow_hosts=("127.0.0.1",))
 
-    assert await spotify.download_cover(track, tmp_path) is None
+    assert await spotify.download_cover(track, tmp_path, allow_hosts=("127.0.0.1",)) is None
     assert not (tmp_path / spotify.COVER_FILE_NAME).exists()
 
 
@@ -513,14 +515,37 @@ async def test_a_track_without_artwork_is_not_a_request(tmp_path: Path) -> None:
 
 async def test_a_share_link_is_followed_over_real_http(origin: str) -> None:
     """``spotify.link`` answers with a redirect, and the track id is behind it."""
-    track = await spotify.lookup(f"{origin}/share/abcDEF123")
+    track = await spotify.lookup(f"{origin}/share/abcDEF123", allow_hosts=("127.0.0.1",))
 
     assert track.track_id == TRACK_ID
 
 
+async def test_a_share_link_to_a_private_host_is_refused() -> None:
+    """No DNS, no request: a literal-private share link dies in the guard."""
+    with pytest.raises(ExtractionError) as caught:
+        await spotify.lookup("http://127.0.0.1:9000/share/abcDEF123")
+
+    assert caught.value.code == "PRIVATE_HOST"
+    assert "127.0.0.1" not in caught.value.message
+
+
+async def test_a_cover_on_a_private_host_is_skipped_quietly(tmp_path: Path) -> None:
+    """Untrusted page metadata may name any host: refusal costs artwork only."""
+    from dataclasses import replace
+
+    bare = spotify.SpotifyTrack(TRACK_ID, "Song", ("Artist",), 120)
+    hostile = replace(bare, covers=((300, "http://169.254.169.254/i"),))
+
+    assert await spotify.download_cover(hostile, tmp_path) is None
+    assert not (tmp_path / spotify.COVER_FILE_NAME).exists()
+
+
 async def test_a_status_that_is_not_200_is_reported_plainly(origin: str) -> None:
     with pytest.raises(ExtractionError) as caught:
-        await spotify.lookup("https://open.spotify.com/track/0000000000000000000000")
+        await spotify.lookup(
+            "https://open.spotify.com/track/0000000000000000000000",
+            allow_hosts=("127.0.0.1",),
+        )
 
     assert caught.value.code == "SPOTIFY_LOOKUP_FAILED"
     assert "404" in caught.value.message

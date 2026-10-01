@@ -43,6 +43,7 @@ import logging
 import re
 import shutil
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from html import unescape as _unescape
 from pathlib import Path
@@ -52,6 +53,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 from core.utils import sanitize_filename
+from services import host_guard as host_guard_module
 from services.extractor import ExtractionError, ExtractorService, SearchHit, url_host
 
 logger = logging.getLogger(__name__)
@@ -305,39 +307,92 @@ def _read_track(html: str, track_id_: str) -> SpotifyTrack:
     )
 
 
-async def _get(session: aiohttp.ClientSession, url: str, timeout: float) -> str:
-    """Fetch a page as text — with Spotify's own timeout, and its own errors."""
+async def _get(
+    session: aiohttp.ClientSession,
+    url: str,
+    timeout: float,
+    *,
+    allow_hosts: Iterable[str] = (),
+) -> str:
+    """Fetch a page as text — with Spotify's own timeout, and its own errors.
+
+    The URL is template-built from a strict track id, but the host and every
+    redirect hop still go through the host guard (a share-link page may bounce
+    anywhere before the id is known).
+    """
     try:
-        async with session.get(
+        async with host_guard_module.guarded_get(
+            session,
             url,
             timeout=aiohttp.ClientTimeout(total=timeout),
-            allow_redirects=True,
-        ) as response:
+            allow_hosts=allow_hosts,
+        ) as hop:
+            response = hop[0]
             if response.status != 200:
                 raise _lookup_failed(
                     f"اسپاتیفای پاسخ {response.status} داد؛ کمی بعد دوباره بفرست."
                 )
             return await response.text()
+    except host_guard_module.HostGuardError as exc:
+        logger.warning(
+            "spotify page refused (host=%s reason=%s)",
+            exc.verdict.host_digest,
+            exc.verdict.reason,
+        )
+        raise ExtractionError(
+            "PRIVATE_HOST",
+            "این لینک به نشانی خصوصی/داخلی اشاره می‌کند؛ یک لینک عمومی بفرست.",
+        ) from exc
     except TimeoutError:  # asyncio's, which aiohttp's own timeouts inherit from
         raise _lookup_failed("خواندن اطلاعات اسپاتیفای طول کشید؛ دوباره بفرست.") from None
     except aiohttp.ClientError as exc:
         raise _lookup_failed(f"ارتباط با اسپاتیفای برقرار نشد ({exc.__class__.__name__}).") from exc
 
 
-async def _canonical(session: aiohttp.ClientSession, url: str, timeout: float) -> str:
-    """The share link's real destination (``spotify.link`` → ``open.spotify.com``)."""
+async def _canonical(
+    session: aiohttp.ClientSession,
+    url: str,
+    timeout: float,
+    *,
+    allow_hosts: Iterable[str] = (),
+) -> str:
+    """The share link's real destination (``spotify.link`` → ``open.spotify.com``).
+
+    The link is the user's, so its host and every redirect hop are checked by
+    the host guard; a refusal raises ``PRIVATE_HOST`` (catalogue-translated),
+    never the generic lookup failure.
+    """
     if track_id(url):
         return url
     try:
-        async with session.get(
-            url, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True
-        ) as response:
-            return str(response.url)
+        async with host_guard_module.guarded_get(
+            session,
+            url,
+            timeout=aiohttp.ClientTimeout(total=timeout),
+            allow_hosts=allow_hosts,
+        ) as hop:
+            return hop[1]
+    except host_guard_module.HostGuardError as exc:
+        logger.warning(
+            "spotify share link refused (host=%s reason=%s)",
+            exc.verdict.host_digest,
+            exc.verdict.reason,
+        )
+        raise ExtractionError(
+            "PRIVATE_HOST",
+            "این لینک به نشانی خصوصی/داخلی اشاره می‌کند؛ یک لینک عمومی بفرست.",
+        ) from exc
     except aiohttp.ClientError as exc:
         raise _lookup_failed(f"بازکردن لینک کوتاه اسپاتیفای ممکن نشد ({exc.__class__.__name__}).") from exc
 
 
-async def _album_name(session: aiohttp.ClientSession, found: str, timeout: float) -> str:
+async def _album_name(
+    session: aiohttp.ClientSession,
+    found: str,
+    timeout: float,
+    *,
+    allow_hosts: Iterable[str] = (),
+) -> str:
     """The album, read from the track page — and never a reason to fail a link.
 
     Two round trips instead of one, for one line of metadata: if this request
@@ -346,14 +401,19 @@ async def _album_name(session: aiohttp.ClientSession, found: str, timeout: float
     failure is logged and swallowed.
     """
     try:
-        html = await _get(session, page_url(found), timeout)
+        html = await _get(session, page_url(found), timeout, allow_hosts=allow_hosts)
     except ExtractionError as exc:
         logger.info("album not readable for %s (%s) — continuing without it", found, exc.code)
         return ""
     return album_from_page(html)
 
 
-async def lookup(url: str, *, timeout: float = LOOKUP_TIMEOUT_S) -> SpotifyTrack:
+async def lookup(
+    url: str,
+    *,
+    timeout: float = LOOKUP_TIMEOUT_S,
+    allow_hosts: Iterable[str] = (),
+) -> SpotifyTrack:
     """Read a track's public metadata. No login, no key, no cookies.
 
     A session per lookup on purpose: this runs once per Spotify link (the result is
@@ -361,21 +421,27 @@ async def lookup(url: str, *, timeout: float = LOOKUP_TIMEOUT_S) -> SpotifyTrack
     manage for a request that happens rarely.
     """
     async with aiohttp.ClientSession() as session:
-        real = await _canonical(session, url, timeout)
+        real = await _canonical(session, url, timeout, allow_hosts=allow_hosts)
         found = track_id(real)
         if found is None:
             raise ExtractionError(
                 "SPOTIFY_NOT_A_TRACK",
                 "از اسپاتیفای فقط لینک یک آهنگ (Track) پشتیبانی می‌شود؛ آلبوم و پلی‌لیست نه.",
             )
-        html = await _get(session, _EMBED_URL.format(track_id=found), timeout)
+        html = await _get(
+            session, _EMBED_URL.format(track_id=found), timeout, allow_hosts=allow_hosts
+        )
         track = _read_track(html, found)
-        album = await _album_name(session, found, timeout)
+        album = await _album_name(session, found, timeout, allow_hosts=allow_hosts)
     return replace(track, album=album) if album else track
 
 
 async def download_cover(
-    track: SpotifyTrack, directory: Path, *, timeout: float = LOOKUP_TIMEOUT_S
+    track: SpotifyTrack,
+    directory: Path,
+    *,
+    timeout: float = LOOKUP_TIMEOUT_S,
+    allow_hosts: Iterable[str] = (),
 ) -> Optional[Path]:
     """Fetch the track's artwork into ``directory`` for use as an audio thumbnail.
 
@@ -388,13 +454,24 @@ async def download_cover(
         return None
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=timeout), allow_redirects=True
-            ) as response:
+            async with host_guard_module.guarded_get(
+                session,
+                url,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                allow_hosts=allow_hosts,
+            ) as hop:
+                response = hop[0]
                 if response.status != 200:
                     logger.info("cover art for %s answered %s", track.track_id, response.status)
                     return None
                 data = await response.read()
+    except host_guard_module.HostGuardError as exc:
+        logger.warning(
+            "cover art refused (host=%s reason=%s)",
+            exc.verdict.host_digest,
+            exc.verdict.reason,
+        )
+        return None
     except (TimeoutError, aiohttp.ClientError) as exc:
         logger.info("could not fetch the cover art for %s (%r)", track.track_id, exc)
         return None

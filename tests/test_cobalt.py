@@ -109,7 +109,13 @@ class FakeSession:
         self.closed = True
 
 
+async def _public_dns(host: str) -> list[str]:
+    """The suite never dials: every name resolves to a public address."""
+    return ["93.184.216.34"]
+
+
 def _service(session: FakeSession, **kwargs: Any) -> CobaltService:
+    kwargs.setdefault("host_resolver", _public_dns)
     return CobaltService(URL, session=session, **kwargs)  # type: ignore[arg-type]
 
 
@@ -841,6 +847,60 @@ async def test_a_gallery_that_fails_halfway_leaves_no_files_behind(tmp_path: Pat
 
     assert caught.value.code == "UNREACHABLE"
     assert not tmp_path.exists(), "the job directory goes with the half gallery"
+
+
+async def test_a_tunnel_download_needs_no_dns_for_the_instance_host(
+    tmp_path: Path,
+) -> None:
+    """Tunnel bytes live on the configured instance: allowed without resolving."""
+    session = _download_session([b"x"])
+
+    async def no_dns(host: str) -> list[str]:
+        raise AssertionError(f"DNS must not be consulted for {host!r}")
+
+    service = CobaltService(URL, session=session, host_resolver=no_dns)  # type: ignore[arg-type]
+    path = await service.download(
+        CobaltMedia(url=f"{URL}/tunnel?id=abc"), tmp_path, max_bytes=10
+    )
+
+    assert path.read_bytes() == b"x"
+
+
+async def test_a_download_from_a_private_host_is_refused(tmp_path: Path) -> None:
+    session = _download_session([b"x"])
+    service = _service(session)
+
+    with pytest.raises(CobaltError) as caught:
+        await service.download(
+            CobaltMedia(url="http://169.254.169.254/latest/meta-data/"),
+            tmp_path,
+            max_bytes=10,
+        )
+
+    assert caught.value.code == "PRIVATE_HOST"
+    assert caught.value.instance is False, "about the link: no pool rotation"
+    assert session.gets == [], "refused before any request went out"
+
+
+async def test_a_redirect_to_a_private_host_aborts_the_download(
+    tmp_path: Path,
+) -> None:
+    session = FakeSession(
+        get_responses=[
+            FakeResponse(
+                status=302, headers={"Location": "http://127.0.0.1:9000/tunnel?id=x"}
+            ),
+        ]
+    )
+    service = _service(session)
+
+    with pytest.raises(CobaltError) as caught:
+        await service.download(
+            CobaltMedia(url="https://cdn.example/v.mp4"), tmp_path, max_bytes=1000
+        )
+
+    assert caught.value.code == "PRIVATE_HOST"
+    assert [request["url"] for request in session.gets] == ["https://cdn.example/v.mp4"]
 
 
 async def test_a_single_download_still_answers_with_one_path(tmp_path: Path) -> None:

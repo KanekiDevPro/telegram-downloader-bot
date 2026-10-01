@@ -378,6 +378,10 @@ MESSAGES: Final[Catalog] = {
         "en": "❌ That link is not valid — it has to start with http:// or https://.",
         "fa": "❌ لینک نامعتبر است. لینک باید با http:// یا https:// شروع شود.",
     },
+    "intake.private_host": {
+        "en": "❌ That link points to a private or internal address — send a public link instead.",
+        "fa": "❌ این لینک به یک نشانی خصوصی یا داخلی اشاره می‌کند — یک لینک عمومی بفرست.",
+    },
     "intake.unsupported": {
         "en": "❌ The extraction engine does not support this link.",
         "fa": "❌ این لینک توسط موتور استخراج پشتیبانی نمی‌شود.",
@@ -770,6 +774,16 @@ MESSAGES: Final[Catalog] = {
     "err.SPOTIFY_LOOKUP_FAILED": {
         "en": "I could not read this song's details from Spotify. Send it again in a moment.",
         "fa": "اطلاعات این آهنگ از اسپاتیفای خوانده نشد؛ کمی بعد دوباره بفرست.",
+    },
+    "err.PRIVATE_HOST": {
+        "en": (
+            "This link points to a private or internal address, which the bot "
+            "must not fetch. Send a public link instead."
+        ),
+        "fa": (
+            "این لینک به یک نشانی خصوصی یا داخلی اشاره می‌کند و ربات نباید آن را "
+            "بخواند؛ یک لینک عمومی بفرست."
+        ),
     },
     "err.SPOTIFY_NO_MATCH": {
         "en": "The YouTube version of this song was not found. (Spotify's own files are "

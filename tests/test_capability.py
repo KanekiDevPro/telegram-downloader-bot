@@ -293,8 +293,10 @@ def test_the_unwrap_peels_a_viewer_wrapper_to_the_file_inside() -> None:
 
 
 class _FakeResponse:
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, *, status: int = 200, location: str = "") -> None:
         self.url = url
+        self.status = status
+        self.headers = {"Location": location} if location else {}
 
     async def __aenter__(self) -> _FakeResponse:
         return self
@@ -316,8 +318,15 @@ class _FakeSession:
         return None
 
     def get(self, url: str, **kwargs: object) -> _FakeResponse:
+        if "media?url=" in url:
+            return _FakeResponse(url)
         return _FakeResponse(
-            "https://www.reddit.com/media?url=https%3A%2F%2Fi.redd.it%2Fk1xcuq8osaqh1.jpeg"
+            url,
+            status=302,
+            location=(
+                "https://www.reddit.com/media?url="
+                "https%3A%2F%2Fi.redd.it%2Fk1xcuq8osaqh1.jpeg"
+            ),
         )
 
 

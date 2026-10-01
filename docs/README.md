@@ -38,3 +38,28 @@ is left to see — that is the safe case, not a gap).
 Redesigning the coordination layer on top of Redis (shared mode counters and
 claim authority) is the real fix and is deliberately out of scope for the
 tripwire: do not scale past one instance until that lands.
+
+## Host guard (services/host_guard.py)
+
+User links reach server-side fetches, so every fetch of a stranger's URL goes
+through one policy: `http(s)` only, no credentials in the URL, literal IPs
+(incl. decimal/hex/octal/short IPv4, IPv4-mapped IPv6, zone ids) must be
+global, local/internal/compose-service names are refused, known platform hosts
+(exact or dot-suffix, never substring) skip DNS, and anything else must
+resolve — with a timeout — to only global addresses. Refusals carry a host
+digest in logs and a catalogue sentence (`err.PRIVATE_HOST`,
+`intake.private_host`) for users; never a URL or an address.
+
+Covered (bot-controlled HTTP, every redirect hop re-validated): intake triage,
+share-link canonical resolve, Spotify share/page/cover fetch, Cobalt file
+download (tunnel URLs to the configured instance hosts are allowlisted as
+operator configuration). DNS failure fails closed at the fetch sites; intake
+triage instead defers to them, and platform hosts never depend on DNS.
+
+NOT covered (residual, by construction): yt-dlp and the Cobalt API resolve
+DNS and follow redirects internally — a pre-check cannot stop their
+redirect-to-internal or DNS rebinding, and this guard does not claim to. The
+thumbnail URL handed to Telegram's `send_photo` is fetched by Telegram, not
+this host. Recommendation only (no compose/firewall change made here): run
+the engines behind egress network controls that cannot reach instance
+metadata or the internal network, independent of any URL check.
