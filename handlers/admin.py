@@ -52,7 +52,13 @@ from services import broadcast, content, cookie_refresh, login_wizard, panel
 from services.cobalt import CobaltService
 from services.cookie_refresh import RefreshOutcome, render_outcome
 from services.cookie_watch import DOCTOR_CALLBACK, REFRESH_CALLBACK
-from services.doctor import DEFAULT_PROBE_URL, DoctorReport, fallback_health, run_youtube_doctor
+from services.doctor import (
+    DEFAULT_PROBE_URL,
+    DoctorReport,
+    fallback_health,
+    run_youtube_doctor,
+    storage_check,
+)
 from services.extractor import ExtractorService
 from services.oauth import (
     DEVICE_URL,
@@ -214,6 +220,7 @@ async def run_doctor_into(
     pool: asyncpg.Pool | None = None,
     edit: Message | None = None,
     instance_guard: Any = None,
+    storage_degraded: bool = False,
 ) -> DoctorReport | None:
     """Run the doctor, render it, and report where it went; ``None`` on failure.
 
@@ -221,7 +228,8 @@ async def run_doctor_into(
     engine (and remembers its verdict) instead of a fresh opinion about the config.
     ``instance_guard`` (injected from the dispatcher's data like the extractor)
     appends this process's single-instance row — after the verdict is built, so
-    the tripwire can never flip a YouTube diagnosis.
+    the tripwire can never flip a YouTube diagnosis. ``storage_degraded``
+    (same injection) appends the memory-fallback row under the same rule.
     """
     settings = get_settings()
     try:
@@ -241,6 +249,12 @@ async def run_doctor_into(
             check = None
         if check is not None:
             report = replace(report, checks=(*report.checks, check))
+    if storage_degraded:
+        # This boot fell back to memory queue + FSM: queued jobs and dialog
+        # state die with the process. A warn row, after the verdict — the same
+        # never-flip rule as the tripwire above. Healthy boots keep their
+        # report byte-identical (no row), so this branch is the only new output.
+        report = replace(report, checks=(*report.checks, storage_check(True)))
     try:
         await deliver_report(bot, chat_id, report_parts(report), edit=edit)
     except Exception:
@@ -272,6 +286,7 @@ async def cmd_doctor(
     pool: asyncpg.Pool | None = None,
     lang: str = DEFAULT_LANG,
     instance_guard: Any = None,
+    storage_degraded: bool = False,
 ) -> None:
     settings = get_settings()
     user = message.from_user
@@ -289,6 +304,7 @@ async def cmd_doctor(
         pool=pool,
         edit=status,
         instance_guard=instance_guard,
+        storage_degraded=storage_degraded,
     )
     if report is not None:
         logger.info(
@@ -512,6 +528,7 @@ async def on_alert_check(
     pool: asyncpg.Pool | None = None,
     lang: str = DEFAULT_LANG,
     instance_guard: Any = None,
+    storage_degraded: bool = False,
 ) -> None:
     """The cookie-jar alert's "بررسی همین حالا" button."""
     settings = get_settings()
@@ -542,6 +559,7 @@ async def on_alert_check(
         pool=pool,
         edit=message,
         instance_guard=instance_guard,
+        storage_degraded=storage_degraded,
     )
     if report is not None:
         logger.info(

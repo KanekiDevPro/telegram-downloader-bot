@@ -240,6 +240,34 @@ class DoctorReport:
         return "\n".join(lines)
 
 
+#: The queue/FSM storage row: Redis named it, memory is the fallback.
+STORAGE_CHECK_NAME = "صف و حافظه"
+
+
+def storage_check(degraded: bool) -> Check:
+    """The storage row for /doctor — warn-only, like the instance tripwire.
+
+    ``degraded`` means this boot wanted Redis and fell back to memory (see
+    ``build_app``): queued jobs and dialog state die with the process, so the
+    row says exactly that. Appended after the verdict is built, never allowed
+    to flip the YouTube diagnosis it rides on.
+    """
+    if degraded:
+        return Check(
+            STORAGE_CHECK_NAME,
+            "warn",
+            "Redis در دسترس نبود؛ صف و وضعیت در حافظه است — "
+            "با ری‌استارت، کارهای در صف از بین می‌روند",
+            section=True,
+        )
+    return Check(
+        STORAGE_CHECK_NAME,
+        "ok",
+        "Redis وصل است؛ صف و وضعیت ماندگارند",
+        section=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # The fallback engine (Cobalt): a section of its own
 # ---------------------------------------------------------------------------

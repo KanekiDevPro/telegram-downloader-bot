@@ -11,6 +11,7 @@ import logging
 import signal
 from collections.abc import Iterable
 from contextlib import suppress
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -25,7 +26,7 @@ from aiogram.types import ErrorEvent, User
 
 from core import texts as text_store
 from core.config import CLOUD_API_UPLOAD_LIMIT_MB, Settings, get_settings, probe_url
-from core.database import create_pool, init_db, text_overrides
+from core.database import create_pool, get_state, init_db, set_state, text_overrides
 from core.i18n import DEFAULT_LANG, t
 from core.logging import setup_logging
 from core.telegram_api import build_session, session_target
@@ -178,6 +179,69 @@ async def resolve_tunnel(settings: Settings) -> TunnelHealth:
         attempts=settings.tunnel_probe_attempts,
         delay_s=settings.tunnel_probe_delay_s,
     )
+
+
+#: ``bot_state`` key for the degraded-storage admin notice, and its quiet
+#: window: a crash loop must not page on every restart, and a recovery sends
+#: nothing (the stamp is kept, so flapping stays quiet too).
+_STORAGE_DEGRADED_STATE_KEY = "storage_degraded_notice"
+_STORAGE_DEGRADED_COOLDOWN_S = 6 * 3600.0
+
+#: What the admins hear, once per window, when the boot fell back to memory.
+#: No addresses or credentials — the Redis URL can carry a password, so it is
+#: named, never printed.
+_STORAGE_DEGRADED_NOTICE = (
+    "⚠️ <b>ربات بدون Redis بالا آمد</b>\n"
+    "صف دانلود و وضعیت گفتگوها در حافظه است (fail-open) — "
+    "با ری‌استارت، کارهای در صف از بین می‌روند.\n"
+    "قدم بعدی: Redis را برگردانید و ربات را ری‌استارت کنید، بعد <code>/doctor</code>."
+)
+
+
+async def maybe_notify_storage_degraded(
+    bot: Bot,
+    pool: Any,
+    admin_ids: Iterable[int],
+    *,
+    degraded: bool,
+    now: datetime | None = None,
+) -> bool:
+    """Page the admins about the memory fallback — at most once per window.
+
+    The throttle lives in the shared ``bot_state`` row (survives restarts and
+    is seen by every process), never in process memory: repeated degraded
+    boots inside the window stay silent, and a recovery sends nothing at all.
+    A healthy boot is a pure no-op (no sends, no state touched). Only
+    ``admin_ids`` are ever addressed. Never raises; True when sent.
+    """
+    if not degraded:
+        return False
+    try:
+        moment = now or datetime.now(timezone.utc)
+        last = await get_state(pool, _STORAGE_DEGRADED_STATE_KEY)
+        if last is not None:
+            try:
+                if (moment - datetime.fromisoformat(last)).total_seconds() < (
+                    _STORAGE_DEGRADED_COOLDOWN_S
+                ):
+                    return False
+            except ValueError:
+                logger.warning(
+                    "bot_state[%s]=%r is not a timestamp — treating it as due",
+                    _STORAGE_DEGRADED_STATE_KEY,
+                    last,
+                )
+        await notify_admins(bot, admin_ids, _STORAGE_DEGRADED_NOTICE)
+        try:
+            await set_state(pool, _STORAGE_DEGRADED_STATE_KEY, moment.isoformat())
+        except Exception:
+            logger.exception(
+                "could not record when %s was sent", _STORAGE_DEGRADED_STATE_KEY
+            )
+        return True
+    except Exception:
+        logger.debug("storage-degraded notice failed — continuing", exc_info=True)
+        return False
 
 
 async def notify_admins(bot: Bot, admin_ids: Iterable[int], text: str) -> None:
@@ -344,6 +408,10 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
 
     dp["pool"] = pool
     dp["queue"] = create_queue(settings, redis_client)
+    # P1-3: wanted Redis but could not reach it — memory queue + FSM, so
+    # queued jobs and dialog state die with the process. The flag rides into
+    # /doctor (a warn row); the notice below pages the admins once per window.
+    dp["storage_degraded"] = settings.queue_backend == "redis" and redis_client is None
     dp["payment_service"] = build_payment_service(pool)
 
     # ``ROUTERS`` is dispatch order, most specific first (handlers.ROUTERS): an
@@ -420,6 +488,9 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
     # single-process by definition, so the guard stays disabled there.
     guard = await instance_guard.start_guard(redis_client)
     dp["instance_guard"] = guard
+    await maybe_notify_storage_degraded(
+        bot, pool, settings.admin_ids, degraded=dp["storage_degraded"]
+    )
     if cobalt.enabled:
         logger.info(
             "fallback extractor: %s (used only when yt-dlp is blocked%s)",
