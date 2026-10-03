@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 import time
 from collections.abc import Awaitable, Callable, Iterable
@@ -1988,7 +1989,7 @@ async def run_maintenance(
             expired = await database.expire_premiums(pool)
             if expired:
                 logger.info("expired %s premium account(s)", expired)
-            _cleanup_stale_jobs()
+            await asyncio.to_thread(_cleanup_stale_jobs)
             await database.prune_block_events(pool, telemetry.KEEP_DAYS)
             await database.prune_helper_events(pool, telemetry.KEEP_DAYS)
             if bot is not None:
@@ -2010,12 +2011,193 @@ async def run_maintenance(
     logger.info("maintenance stopped")
 
 
-def _cleanup_stale_jobs() -> None:
-    settings = get_settings()
-    cutoff = time.time() - 86400  # keep dirs younger than 1 day
-    for directory in settings.download_dir.glob("job-*"):
+#: A job directory is exactly what the extractor and the fallback create:
+#: ``job-`` plus the first 10 hex digits of a uuid4 (see
+#: ``ExtractorService._download_attempt`` and ``services/fallback.py``).
+#: Anything else directly under DOWNLOAD_DIR is never ours to delete.
+_JOB_DIR_RE = re.compile(r"job-[0-9a-f]{10}")
+
+#: Where the extractor keeps its writable jar copy (see
+#: ``ExtractorService._cookie_copy_targets``). The ``cookies.txt`` snapshot is
+#: the live login and is never swept; only a crashed run's private copies —
+#: ``.run-<pid>-<hex>.txt`` and half-written ``.cookies-<pid>-<hex>.tmp`` —
+#: may be left behind, and only those names are swept.
+_COOKIES_DIRNAME = ".cookies"
+_COOKIE_ORPHAN_RES = (
+    re.compile(r"\.run-[0-9]+-[0-9a-f]{32}\.txt"),
+    re.compile(r"\.cookies-[0-9]+-[0-9a-f]{32}\.tmp"),
+)
+
+#: Uploads take longer than the download itself on a thin link, so the floor
+#: is the download ceiling plus headroom — a job that is still (slowly)
+#: legitimate must never look stale.
+_JOB_CLEANUP_UPLOAD_HEADROOM_S = 600
+
+
+def _job_cleanup_floor_s(settings: Any) -> int:
+    """The longest a legitimate job may live: the single-flight claim ceiling
+    or the download timeout plus upload headroom, whichever is larger."""
+    return max(settings.job_lock_ttl_s, settings.download_timeout_s + _JOB_CLEANUP_UPLOAD_HEADROOM_S)
+
+
+def _job_cleanup_max_age_s(settings: Any) -> int:
+    """The configured sweep age, clamped up to the job-lifetime floor.
+
+    A short constant here would delete a live job's directory mid-flight, so
+    anything below the floor is refused — with one warning per sweep, not per
+    entry, and no new module state (the caller logs at most once per run).
+    """
+    floor = _job_cleanup_floor_s(settings)
+    configured = settings.job_cleanup_max_age_s
+    if configured < floor:
+        logger.warning(
+            "JOB_CLEANUP_MAX_AGE_S=%s is below the longest legitimate job lifetime (%ss); using %ss",
+            configured,
+            floor,
+            floor,
+        )
+        return floor
+    return configured
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """Whether ``path`` resolves to somewhere inside ``root`` (symlinks followed)."""
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
+
+
+def _scan_entry(path: Path) -> tuple[float, int] | None:
+    """Newest mtime and total bytes under ``path`` — or None when unreadable.
+
+    Symlinks are never followed. Anything unreadable fails closed: the caller
+    keeps the entry and counts one error, because what cannot be aged cannot
+    be judged stale.
+    """
+    try:
+        own = path.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    newest = own.st_mtime
+    if path.is_symlink() or not path.is_dir():
+        return (newest, own.st_size)
+    total = 0
+    try:
+        children = list(path.iterdir())
+    except OSError:
+        return None
+    for child in children:
         try:
-            if directory.stat().st_mtime < cutoff:
-                shutil.rmtree(directory, ignore_errors=True)
+            if child.is_symlink():
+                continue
+            if child.is_dir():
+                scanned = _scan_entry(child)
+                if scanned is None:
+                    return None
+                child_newest, child_bytes = scanned
+            else:
+                st = child.stat(follow_symlinks=False)
+                child_newest, child_bytes = st.st_mtime, st.st_size
         except OSError:
-            pass
+            return None
+        newest = max(newest, child_newest)
+        total += child_bytes
+    return (newest, total)
+
+
+def _sweep_download_dir(root: Path, max_age_s: float, now: float) -> tuple[int, int, int]:
+    """Remove stale job dirs and orphaned run-cookie copies under ``root``.
+
+    Pure sync work — the maintenance loop runs it via ``asyncio.to_thread``.
+    Returns ``(removed, errors, freed_bytes)``; per-entry failures are absorbed
+    and counted, never raised. Only exact ``job-<hex>`` directories and the
+    cookie-orphan names inside ``.cookies`` are ever candidates; symlinks are
+    neither followed nor removed, and anything resolving outside ``root`` is
+    refused. Loose files, the jar snapshot, the yt-dlp cache and the shared
+    Bot API directory are never touched (the last two live elsewhere).
+    """
+    removed = 0
+    errors = 0
+    freed = 0
+    try:
+        resolved = root.resolve()
+        entries = list(resolved.iterdir())
+    except OSError:
+        return (0, 1, 0)
+    cutoff = now - max_age_s
+    candidates: list[Path] = []
+    for entry in entries:
+        try:
+            if entry.is_symlink():
+                continue
+            if not entry.is_dir():
+                continue  # loose files directly under the root are never ours
+            if entry.name == _COOKIES_DIRNAME:
+                try:
+                    orphans = list(entry.iterdir())
+                except OSError:
+                    errors += 1
+                    continue
+                for orphan in orphans:
+                    if orphan.is_symlink() or not orphan.is_file():
+                        continue
+                    if any(rx.fullmatch(orphan.name) for rx in _COOKIE_ORPHAN_RES):
+                        candidates.append(orphan)
+            elif _JOB_DIR_RE.fullmatch(entry.name):
+                candidates.append(entry)
+        except OSError:
+            errors += 1
+    for candidate in candidates:
+        if not _is_within(candidate, resolved):
+            errors += 1
+            continue
+        scanned = _scan_entry(candidate)
+        if scanned is None:
+            errors += 1
+            continue
+        newest, size = scanned
+        if newest >= cutoff:
+            continue
+        try:
+            if candidate.is_dir() and not candidate.is_symlink():
+                shutil.rmtree(candidate)
+            else:
+                candidate.unlink()
+        except OSError:
+            errors += 1
+            continue
+        removed += 1
+        freed += size
+    return (removed, errors, freed)
+
+
+def _cleanup_stale_jobs() -> None:
+    """Hourly disk sweep: remove job leftovers no live job can still need.
+
+    Stateless-safe by construction: the age floor sits above the longest
+    legitimate job lifetime (clamped, never a short constant), age is the
+    newest mtime anywhere inside the entry (a live ``.part`` keeps its
+    directory young), and only exact ``job-<id>`` names plus identified
+    cookie-copy orphans are ever candidates. Sync — ``run_maintenance`` runs
+    it off the event loop. One INFO line when something was removed, one
+    warning when entries resisted; silence otherwise.
+    """
+    settings = get_settings()
+    removed, errors, freed = _sweep_download_dir(
+        settings.download_dir, _job_cleanup_max_age_s(settings), time.time()
+    )
+    if errors:
+        logger.warning(
+            "disk sweep left %d unreadable entr%s in %s",
+            errors,
+            "y" if errors == 1 else "ies",
+            settings.download_dir,
+        )
+    if removed:
+        logger.info(
+            "disk sweep removed %d stale entr%s, freeing %s",
+            removed,
+            "y" if removed == 1 else "ies",
+            format_size(freed),
+        )

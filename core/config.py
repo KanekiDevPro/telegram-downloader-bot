@@ -406,6 +406,13 @@ class Settings(BaseSettings):
     max_file_size_mb: int = Field(default=2000, alias="MAX_FILE_SIZE_MB")
     extractor_timeout_s: int = Field(default=90, alias="EXTRACTOR_TIMEOUT_S")
     download_timeout_s: int = Field(default=1800, alias="DOWNLOAD_TIMEOUT_S")
+    #: How long a finished job's directory may linger before the hourly
+    #: maintenance sweep removes it (seconds). The floor is the longest a
+    #: legitimate job may live — ``max(job_lock_ttl_s, DOWNLOAD_TIMEOUT_S+600)``
+    #: — and anything lower is clamped up to it (see services/worker): a live
+    #: ``.part`` download keeps its directory young through its newest mtime,
+    #: but only a floor above every real job keeps the sweep stateless-safe.
+    job_cleanup_max_age_s: int = Field(default=7200, alias="JOB_CLEANUP_MAX_AGE_S")
     #: Extra attempts after a *retryable* extraction failure (YouTube's stale
     #: session) plus its exponential backoff. 0 disables retrying.
     extractor_retry_attempts: int = Field(default=2, ge=0, le=5, alias="EXTRACTOR_RETRY_ATTEMPTS")
