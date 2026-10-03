@@ -372,6 +372,50 @@ MESSAGES: Final[Catalog] = {
     },
 
     # ---------------------------------------------------------------------
+    # Force-join: the membership gate before downloading
+    # ---------------------------------------------------------------------
+    "force_join.required": {
+        "en": (
+            "<b>🔐 Members-only downloads</b>\n"
+            "\n"
+            "Please join our channels first, then tap ✅ Verify below:\n"
+            "\n"
+            "{channels}\n"
+            "\n"
+            "After that, send your link again."
+        ),
+        "fa": (
+            "<b>🔐 دانلود فقط برای اعضا</b>\n"
+            "\n"
+            "لطفاً اول در کانال‌های ما عضو شوید، بعد ✅ بررسی زیر را بزنید:\n"
+            "\n"
+            "{channels}\n"
+            "\n"
+            "بعد از آن، لینک را دوباره بفرستید."
+        ),
+    },
+    "force_join.verify_button": {
+        "en": "✅ Verify membership",
+        "fa": "✅ بررسی عضویت",
+    },
+    "force_join.verified": {
+        "en": (
+            "✅ <b>Verified — welcome!</b>\n"
+            "\n"
+            "Send your link again and I'll download it."
+        ),
+        "fa": (
+            "✅ <b>تأیید شد — خوش آمدید!</b>\n"
+            "\n"
+            "لینک را دوباره بفرستید تا دانلود کنم."
+        ),
+    },
+    "force_join.still_missing": {
+        "en": "⏳ Not a member yet — join the channels above, then verify again.",
+        "fa": "⏳ هنوز عضو نشده‌اید — اول در کانال‌های بالا عضو شوید، بعد دوباره بررسی کنید.",
+    },
+
+    # ---------------------------------------------------------------------
     # Link intake: the wait, the questions, the answers
     # ---------------------------------------------------------------------
     "intake.invalid_link": {

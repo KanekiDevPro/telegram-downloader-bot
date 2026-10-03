@@ -606,6 +606,16 @@ class Settings(BaseSettings):
     default_daily_limit: int = Field(default=10, alias="DEFAULT_DAILY_LIMIT")
     premium_daily_limit: int = Field(default=60, alias="PREMIUM_DAILY_LIMIT")
 
+    # --- Force-join ---------------------------------------------------------
+    #: Channels/groups a regular user must have joined before downloading
+    #: (comma-separated; empty = disabled). Each entry is either a public
+    #: ``@ChannelUsername`` or ``-100123…|<invite link>|<Title>`` for a private
+    #: channel/group. Parsed once at startup (see services/subscription).
+    force_join_targets: str = Field(default="", alias="FORCE_JOIN_TARGETS")
+    #: How long a passed membership check is remembered (seconds, int). Only
+    #: positive results are cached — a user who just joined passes immediately.
+    force_join_cache_ttl_s: int = Field(default=300, alias="FORCE_JOIN_CACHE_TTL_S")
+
     # --- Manual payment -----------------------------------------------------
     manual_card_number: str = Field(default="", alias="MANUAL_CARD_NUMBER")
     manual_card_holder: str = Field(default="", alias="MANUAL_CARD_HOLDER")

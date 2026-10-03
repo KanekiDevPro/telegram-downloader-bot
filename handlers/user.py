@@ -65,6 +65,7 @@ from services import cache as cache_service
 from services import content, download_mode, host_guard, preflight, spotify
 from services.delivery import (
     ActionPulse,
+    flood_aware_call,
     format_duration,
     group_add_link,
     label_for_request,
@@ -85,10 +86,22 @@ from services.extractor import (
     audio_size_estimate,
 )
 from services.queue import BOOT_ID, DownloadTask, TaskQueue
-from services.subscription import effective_daily_limit, is_admin, is_premium_active
+from services.subscription import (
+    ForceJoinService,
+    ForceJoinTarget,
+    effective_daily_limit,
+    is_admin,
+    is_premium_active,
+)
 
 logger = logging.getLogger(__name__)
 router = Router(name="user")
+#: The verify button's own router: included by the entrypoint only when
+#: force-join is enabled, so a disabled deployment registers nothing at all.
+force_join_router = Router(name="force_join")
+
+#: The verify tap carries no payload — the check is always fresh.
+FORCE_JOIN_VERIFY_CALLBACK = "force_join:verify"
 
 #: The callback prefix for a final choice: ``fmt:<media_format>:<quality>``.
 FMT_PREFIX = "fmt:"
@@ -964,6 +977,7 @@ async def on_menu_platform(
     state: FSMContext,
     pool: asyncpg.Pool | None = None,
     lang: str = DEFAULT_LANG,
+    force_join: ForceJoinService | None = None,
 ) -> None:
     """One platform section: the shapes it takes, and the way back to the picker.
 
@@ -987,6 +1001,22 @@ async def on_menu_platform(
     if name not in {section for section, _shapes in _platform_sections()}:
         await cb.answer(t("intake.stale", lang), show_alert=True)
         return
+    if force_join is not None and force_join.enabled and message.chat.type == "private":
+        # Entering a download section starts the download flow the same way a
+        # link does, so the gate stands here too. No record (pool-less tests,
+        # unknown sender) fails open; premium/admin bypass lives in the service.
+        platform_user_id = cb.from_user.id if cb.from_user is not None else 0
+        record = (
+            await database.get_user(pool, platform_user_id)
+            if pool is not None and platform_user_id
+            else None
+        )
+        if record is not None:
+            platform_missing = await force_join.missing(record, platform_user_id)
+            if platform_missing:
+                await cb.answer()
+                await _send_force_join(message, platform_missing, lang)
+                return
     user_id = cb.from_user.id if cb.from_user is not None else 0
     current = await _maybe_auto_unlock(state, user_id)
     requested = download_mode.mode_for_platform(name)
@@ -1013,6 +1043,59 @@ async def on_menu_platform(
             lang, platform=name, disabled=disabled, looks=await _button_looks(pool)
         ),
     )
+
+
+@force_join_router.callback_query(F.data == FORCE_JOIN_VERIFY_CALLBACK)
+async def on_force_join_verify(
+    cb: CallbackQuery,
+    user: asyncpg.Record,
+    lang: str = DEFAULT_LANG,
+    force_join: ForceJoinService | None = None,
+) -> None:
+    """Re-check membership ignoring the cache, then confirm or re-show.
+
+    Lives on its own router so a disabled deployment never registers it. A
+    pass tells the user to send the link again — no pending-URL state is kept.
+    The handler itself is never gated: locking the verify button would lock
+    the way out.
+    """
+    message = callback_message(cb)
+    if message is None:
+        await cb.answer(t("intake.stale", lang), show_alert=True)
+        return
+    if force_join is None or not force_join.enabled:
+        await cb.answer(t("intake.stale", lang), show_alert=True)
+        return
+    try:
+        user_id = int(user["telegram_id"])
+    except (KeyError, TypeError, ValueError):
+        await cb.answer(t("intake.stale", lang), show_alert=True)
+        return
+    missing = await force_join.recheck(user_id)
+    if not missing:
+        edited = await flood_aware_call(
+            lambda: message.edit_text(
+                t("force_join.verified", lang), link_preview_options=_NO_PREVIEW
+            ),
+            kind="edit",
+        )
+        if edited is None:
+            # The flood gave up the edit — the popup still carries the verdict.
+            await cb.answer(t("force_join.verified", lang), show_alert=True)
+        else:
+            await cb.answer()
+        return
+    # The old wall stays valid when the flood gives up this edit, so a
+    # skipped edit needs no resend — the popup below still informs.
+    await flood_aware_call(
+        lambda: message.edit_text(
+            _force_join_text(missing, lang),
+            reply_markup=_force_join_keyboard(missing, lang),
+            link_preview_options=_NO_PREVIEW,
+        ),
+        kind="edit",
+    )
+    await cb.answer(t("force_join.still_missing", lang), show_alert=True)
 
 
 @router.callback_query(F.data == "menu:profile")
@@ -1395,6 +1478,7 @@ async def on_text_with_url(
     queue: TaskQueue,
     bot: Bot,
     lang: str = DEFAULT_LANG,
+    force_join: ForceJoinService | None = None,
 ) -> None:
     if message.chat.type != "private" and not extract_url(message.text or ""):
         # A group is link-driven: no link in the message, no message from the bot
@@ -1406,7 +1490,10 @@ async def on_text_with_url(
         # through the same intake path (so a photo post still downloads itself).
         url = extract_url(message.text or "")
         if url and validate_url(url):
-            await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
+            await _queue_url_flow(
+                message, state, user, url, lang, bot=bot, pool=pool, queue=queue,
+                force_join=force_join,
+            )
         else:
             await message.answer(
                 t("intake.invalid_link", lang), link_preview_options=_NO_PREVIEW
@@ -1434,7 +1521,10 @@ async def on_text_with_url(
     if not url:
         await message.answer(t("intake.no_link_found", lang), link_preview_options=_NO_PREVIEW)
         return
-    await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
+    await _queue_url_flow(
+        message, state, user, url, lang, bot=bot, pool=pool, queue=queue,
+        force_join=force_join,
+    )
 
 
 @router.message(Command("download"))
@@ -1447,6 +1537,7 @@ async def cmd_download(
     queue: TaskQueue,
     bot: Bot,
     lang: str = DEFAULT_LANG,
+    force_join: ForceJoinService | None = None,
 ) -> None:
     url = extract_url(command.args or "")
     if not url and message.reply_to_message:
@@ -1456,7 +1547,10 @@ async def cmd_download(
     if not url:
         await message.answer(t("intake.download_usage", lang), link_preview_options=_NO_PREVIEW)
         return
-    await _queue_url_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
+    await _queue_url_flow(
+        message, state, user, url, lang, bot=bot, pool=pool, queue=queue,
+        force_join=force_join,
+    )
 
 
 #: The delete tasks in the air. A fire-and-forget task nothing references can be
@@ -1542,6 +1636,71 @@ async def drain_pending_deletes(timeout: float = 5.0) -> int:
     return sum(1 for task in done if not task.cancelled() and task.exception() is None)
 
 
+def _force_join_keyboard(
+    missing: tuple[ForceJoinTarget, ...], lang: str
+) -> InlineKeyboardMarkup:
+    """The join wall: one URL button per unjoined target, then verify."""
+    builder = InlineKeyboardBuilder()
+    for target in missing:
+        builder.button(text=target.title, url=target.url)
+    builder.button(
+        text=t("force_join.verify_button", lang),
+        callback_data=FORCE_JOIN_VERIFY_CALLBACK,
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def _force_join_text(missing: tuple[ForceJoinTarget, ...], lang: str) -> str:
+    """The join wall's body: titles come from the operator's config, so they
+    are escaped like any other data before entering the HTML."""
+    lines = "\n".join(f"• {escape_html(target.title)}" for target in missing)
+    return t("force_join.required", lang, channels=lines)
+
+
+async def _send_force_join(
+    message: Message, missing: tuple[ForceJoinTarget, ...], lang: str
+) -> None:
+    """Send the join wall through the deliver path — a message the user must
+    see waits out a flood (bounded) rather than vanishing."""
+    text = _force_join_text(missing, lang)
+    markup = _force_join_keyboard(missing, lang)
+    await flood_aware_call(
+        lambda: message.answer(
+            text, reply_markup=markup, link_preview_options=_NO_PREVIEW
+        ),
+        kind="deliver",
+    )
+
+
+async def _enforce_force_join(
+    message: Message,
+    user: asyncpg.Record | None,
+    lang: str,
+    *,
+    force_join: ForceJoinService | None,
+) -> bool:
+    """True when this download must not start (the join wall went out).
+
+    Runs after the user middleware (the record and language are already here)
+    and only in private chats; premium/VIP users and ADMIN_IDS bypass inside
+    the service. Anything unknown — no record, no service — fails open.
+    """
+    if force_join is None or not force_join.enabled:
+        return False
+    if message.chat.type != "private" or user is None:
+        return False
+    try:
+        user_id = int(user["telegram_id"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    missing = await force_join.missing(user, user_id)
+    if not missing:
+        return False
+    await _send_force_join(message, missing, lang)
+    return True
+
+
 async def _queue_url_flow(
     message: Message,
     state: FSMContext,
@@ -1552,6 +1711,7 @@ async def _queue_url_flow(
     bot: Bot,
     pool: asyncpg.Pool,
     queue: TaskQueue,
+    force_join: ForceJoinService | None = None,
 ) -> None:
     """A link arrives: check it, then ask — or just start. Timed, too.
 
@@ -1571,6 +1731,8 @@ async def _queue_url_flow(
     (``_forget_raw_link``). An invalid link is not "answered" into deletion: what
     the user wrote — no link, or a link-shaped typo — stays where it is.
     """
+    if await _enforce_force_join(message, user, lang, force_join=force_join):
+        return
     started = time.monotonic()
     await _intake_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
     # Observability: this path's budget is "as fast as the menu can appear" —

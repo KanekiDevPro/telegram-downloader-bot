@@ -32,7 +32,7 @@ from core.logging import setup_logging
 from core.telegram_api import build_session, session_target
 from handlers import ROUTERS
 from handlers.admin import publish_commands
-from handlers.user import drain_pending_deletes
+from handlers.user import drain_pending_deletes, force_join_router
 from middlewares.user_middleware import UserMiddleware
 from services import cobalt_cookies, delivery, instance_guard, proxy_health
 from services.cobalt import CobaltService
@@ -51,6 +51,7 @@ from services.oauth import OAuthService
 from services.payments import build_payment_service
 from services.proxy_health import TunnelHealth
 from services.queue import BLOCK_TIMEOUT_S, create_queue, create_redis_client
+from services.subscription import build_force_join
 from services.worker import run_maintenance, run_worker
 
 #: Startup probe of the PO-token provider: how many times, and how far apart.
@@ -488,6 +489,21 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         r.message.middleware(middleware)
         r.callback_query.middleware(middleware)
     dp.include_routers(*ROUTERS)
+    # Force-join (channels/groups): parsed once here into immutable targets.
+    # None = disabled — then neither the dp key nor the verify router is
+    # registered at all, and no handler does any extra work.
+    force_join = build_force_join(
+        settings,
+        bot=bot,
+        redis=redis_client,
+        pool=pool,
+        admin_ids=settings.admin_ids,
+    )
+    if force_join is not None:
+        dp["force_join"] = force_join
+        force_join_router.message.middleware(middleware)
+        force_join_router.callback_query.middleware(middleware)
+        dp.include_router(force_join_router)
 
     pot_provider = await resolve_pot_provider(settings)
     # Asked here, before the workers exist: the answer decides whether *anything*

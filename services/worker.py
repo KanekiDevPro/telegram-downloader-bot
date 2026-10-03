@@ -82,7 +82,7 @@ from services.extractor import (
 )
 from services.quality import LOSSLESS_QUALIFIER, FakeLosslessRejected, QualityEngine, finalize_output
 from services.queue import DownloadTask, TaskQueue
-from services.subscription import effective_daily_limit
+from services.subscription import build_force_join, effective_daily_limit
 
 logger = logging.getLogger(__name__)
 
@@ -1975,6 +1975,40 @@ class _ProgressEditor:
 # Maintenance loop
 # ---------------------------------------------------------------------------
 
+#: The startup force-join validation never holds the boot hostage past this.
+_FORCE_JOIN_STARTUP_TIMEOUT_S = 30.0
+
+
+async def _force_join_startup_check(
+    bot: Bot | None, pool: asyncpg.Pool, admin_ids: Iterable[int]
+) -> None:
+    """First-tick force-join validation: is the bot itself inside each target?
+
+    Runs inside the existing maintenance loop (no new task), time-bounded, and
+    never raises — a target the bot cannot use is fail-open, warned and paged
+    like any other check failure. Warned once at startup already; the parse
+    here stays quiet (``warn_invalid=False``).
+    """
+    if bot is None:
+        return
+    try:
+        service = build_force_join(
+            get_settings(),
+            bot=bot,
+            redis=None,
+            pool=pool,
+            admin_ids=admin_ids,
+            warn_invalid=False,
+        )
+        if service is None:
+            return
+        await asyncio.wait_for(
+            service.validate_bot_access(), timeout=_FORCE_JOIN_STARTUP_TIMEOUT_S
+        )
+    except Exception:
+        logger.warning("force-join startup validation failed — continuing", exc_info=True)
+
+
 async def run_maintenance(
     stop_event: asyncio.Event,
     pool: asyncpg.Pool,
@@ -1984,8 +2018,12 @@ async def run_maintenance(
     """Hourly sweep: expire premium, purge stale jobs, prune telemetry and stale
     cache, report weekly."""
     logger.info("maintenance loop started")
+    first_tick = True
     while not stop_event.is_set():
         try:
+            if first_tick:
+                first_tick = False
+                await _force_join_startup_check(bot, pool, admin_ids)
             expired = await database.expire_premiums(pool)
             if expired:
                 logger.info("expired %s premium account(s)", expired)

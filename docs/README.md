@@ -77,3 +77,35 @@ thumbnail URL handed to Telegram's `send_photo` is fetched by Telegram, not
 this host. Recommendation only (no compose/firewall change made here): run
 the engines behind egress network controls that cannot reach instance
 metadata or the internal network, independent of any URL check.
+
+## Force-join (services/subscription.py)
+
+Optionally require regular users to join configured channels/groups before
+downloading. Empty FORCE_JOIN_TARGETS (the default) disables the check
+entirely: no middleware, no extra handler work, no Telegram or Redis calls.
+
+Setup: list targets comma-separated as @ChannelUsername (public) or
+-100123456789|<invite link>|<Title> (private). The bot must be an admin of
+channels (so it can see members) and at least a member of groups. Premium/VIP
+users and ADMIN_IDS always bypass the check, and it only ever applies in
+private chats - language, /start, /help, /status, /profile, /premium, the
+whole payment/receipt flow, admin screens and the verify button itself are
+never gated.
+
+The check runs where a download starts (URL intake and the download-menu
+section taps, after the user middleware) via bot.get_chat_member: member,
+administrator and creator pass, restricted passes only while is_member is
+true, left/kicked do not. Passes are cached in Redis as fj:ok:<target>:<user>
+with an int EX of FORCE_JOIN_CACHE_TTL_S; negatives are never cached, so a
+user who just joined passes immediately, and the verify button always
+re-checks live. After a pass the user resends the link (no pending-URL state).
+
+Fail-open: a check that cannot run (bot removed, not an admin, flood, timeout,
+dead cache) lets the user through, logs one warning per target, and pages the
+admins once per target per 6h through notify_admins plus a bot_state throttle.
+Each check is bounded (~5s) and concurrent with a total timeout, so a slow
+Telegram never stalls intake. After boot, the maintenance loop validates each
+target once on its first tick (time-bounded, never blocking startup).
+
+NOT supported: sponsor bots. The Bot API cannot verify membership of another
+bot, so a verify button for one would verify nothing.
