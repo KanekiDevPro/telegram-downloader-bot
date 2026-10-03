@@ -63,7 +63,7 @@ from core.utils import (
 from handlers.inline import INLINE_TOKEN_RE_FULL, lookup_token
 from handlers.payment import plans_keyboard, wallet_amount_keyboard
 from services import cache as cache_service
-from services import content, download_mode, host_guard, preflight, song_id, spotify
+from services import content, download_mode, host_guard, preflight, song_id, spotify, telemetry
 from services.delivery import (
     ActionPulse,
     flood_aware_call,
@@ -1795,8 +1795,13 @@ async def _queue_url_flow(
     )
     # Observability: this path's budget is "as fast as the menu can appear" —
     # this number is what says when it drifts (a slow resolve or a slow probe
-    # lands here first). The URL is truncated: a log line is not a link archive.
-    logger.info("intake flow for %.80s completed in %.2fs", url, time.monotonic() - started)
+    # lands here first). The URL is redacted to host+digest: a log line is
+    # not a link archive, and never carries query, fragment or userinfo.
+    logger.info(
+        "intake flow for %s completed in %.2fs",
+        telemetry.log_url(url),
+        time.monotonic() - started,
+    )
 
 
 async def _intake_flow(
@@ -1988,7 +1993,7 @@ async def _ask_about_link(
         try:
             duration = float((await spotify.lookup(url)).duration_s or 0)
         except Exception:
-            logger.warning("spotify lookup gave nothing for %.80s", url)
+            logger.warning("spotify lookup gave nothing for %s", telemetry.log_url(url))
             await _ask_again(
                 message,
                 state,
@@ -2172,7 +2177,11 @@ async def _cached_rows(pool: asyncpg.Pool, url: str) -> list[Any]:
     try:
         rows = await cache_service.get_cached_rows(pool, url)
     except Exception:  # the cache is never worth an error screen
-        logger.debug("cache lookup gave nothing for %.80s — probing as usual", url, exc_info=True)
+        logger.debug(
+            "cache lookup gave nothing for %s — probing as usual",
+            telemetry.log_url(url),
+            exc_info=True,
+        )
         return []
     return [row for row in rows if str(row["quality"] or "").partition(":")[0]]
 
@@ -2538,7 +2547,7 @@ async def _canonical_url(url: str) -> str:
             ) as hop:
                 resolved = hop[1]
     except Exception:
-        logger.info("share link %.80s did not resolve — keeping it as-is", url)
+        logger.info("share link %s did not resolve — keeping it as-is", telemetry.log_url(url))
         return url
     canonical = content.unwrap_media_url(resolved)
     if canonical != resolved or await asyncio.to_thread(
@@ -2549,7 +2558,11 @@ async def _canonical_url(url: str) -> str:
         # cosmetic hop between page forms (youtu.be → watch?v=) changes nothing
         # worth changing — the user's own link stays on the card and in the job.
         if canonical != url:
-            logger.info("share link %.80s resolves to %.80s", url, canonical)
+            logger.info(
+                "share link %s resolves to %s",
+                telemetry.log_url(url),
+                telemetry.log_url(canonical),
+            )
         return canonical
     return url
 

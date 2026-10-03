@@ -43,6 +43,7 @@ from services import content as content_module
 from services import subscription as subscription_module
 from services.extractor import MediaInfo, VideoOption
 from services.queue import MemoryTaskQueue
+from services.telemetry import log_url
 
 USER_ID = 4242
 FA = "fa"
@@ -2976,10 +2977,16 @@ async def test_the_intake_flow_logs_how_long_it_took(
         )
     await _let_the_delete_land()
 
+    # C1: the timing line logs host+digest, never the raw link.
     assert any(
-        "intake flow for https://youtu.be/abc completed in" in record.getMessage()
+        f"intake flow for {log_url('https://youtu.be/abc')} completed in"
+        in record.getMessage()
         for record in caplog.records
     ), "link arrival → menu, measured and logged"
+    assert all(
+        "https://youtu.be/abc" not in record.getMessage()
+        for record in caplog.records
+    ), "no raw URL in the intake logs"
 
 # ---------------------------------------------------------------------------
 # The fast path is in front of the slow path
