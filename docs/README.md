@@ -109,3 +109,26 @@ target once on its first tick (time-bounded, never blocking startup).
 
 NOT supported: sponsor bots. The Bot API cannot verify membership of another
 bot, so a verify button for one would verify nothing.
+
+## Inline mode (handlers/inline.py)
+
+Typing @BotUsername <link> in any chat serves what this bot already
+downloaded: each cached request for that link becomes the matching
+InlineQueryResultCached{Video,Audio,Photo,Document} (at most 10, best
+quality first, honest replay captions), answered personally with a small
+cache time. Anything else becomes a deep-link button that opens the bot with
+that link (/start dl_<digest> runs the normal intake for it).
+
+The inline path performs NO network I/O and NO DNS: only structural parsing,
+pure platform classification and a cache lookup. Links that would need
+redirect resolution, cache misses, unknown users (only ever the plain start
+button — no row is created from an inline query), exhausted quotas and
+unverified membership all become the button instead of results. Membership is
+read from the fj:ok cache only, never a Telegram call. Inline sends do
+NOT consume quota (known property). A flood refusal on the answer itself is
+absorbed and logged, never slept out.
+
+Enabling is a BotFather step (/setinline); the code works whether or not
+inline is enabled. Deep-link tokens live in Redis as dl:<digest> (int EX
+3600, idempotent per URL) with a per-user mint rate limit (about 30/minute);
+Redis trouble means a payload-less start button, never an error.

@@ -85,6 +85,9 @@ def _offline_wiring(monkeypatch: pytest.MonkeyPatch) -> Any:
     # The global routers may only ever belong to one Dispatcher — give each
     # test's app its own fresh, empty stand-ins.
     monkeypatch.setattr(app_module, "ROUTERS", [Router()])
+    # The inline router is included unconditionally (unlike the force-join
+    # one, which stays out while disabled), so it needs the same treatment.
+    monkeypatch.setattr(app_module, "inline_router", Router())
     monkeypatch.setattr(app_module, "get_settings", _settings)
     monkeypatch.setattr(app_module, "create_pool", create_pool)
     monkeypatch.setattr(app_module, "init_db", init_db)

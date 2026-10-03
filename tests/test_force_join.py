@@ -507,19 +507,46 @@ def _gated_callbacks() -> set[str]:
     return names
 
 
-def test_the_gate_stands_on_exactly_four_handlers() -> None:
+def test_the_gate_stands_on_exactly_five_handlers() -> None:
+    # ``cmd_start`` joined in Session B: a ``/start dl_<digest>`` deep link
+    # from inline mode runs the normal intake, so the gate must apply to that
+    # intake — while plain ``/start`` itself stays ungated (pinned below).
     assert _gated_callbacks() == {
         "on_text_with_url",
         "cmd_download",
+        "cmd_start",
         "on_menu_platform",
         "on_force_join_verify",
     }
 
 
+async def test_plain_start_never_touches_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cmd_start`` carries ``force_join`` only to forward it into a deep-link
+    intake. A payload-less ``/start`` — the onboarding path — must never ask
+    Telegram about membership, with or without a configured gate."""
+    from aiogram.filters import CommandObject
+    from test_user_menu import RecordingBot
+    from test_user_menu import _message as _user_message
+
+    service_bot = _FakeBot()
+    service = _service(monkeypatch, service_bot, _StrictFakeRedis())
+    bot = RecordingBot()
+    message = _user_message("/start", cast(Bot, bot))
+    await user_module.cmd_start(
+        message,
+        _user(),
+        command=CommandObject(prefix="/", command="start", args=""),
+        lang="en",
+        force_join=service,
+    )
+    assert service_bot.chat_member_calls == []
+
+
 @pytest.mark.parametrize(
     "name",
     [
-        "cmd_start",
         "cmd_status",
         "cmd_profile",
         "on_menu_profile",

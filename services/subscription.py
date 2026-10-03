@@ -367,6 +367,20 @@ class ForceJoinService:
             logger.warning("force-join check stalled for user %s — failing open", user_id)
             return ()
 
+    async def cached_pass(self, user_id: int) -> bool:
+        """Whether every target has a remembered pass for this user — the
+        cache only, never a Telegram call. Fail-open on Redis trouble, like
+        every other read here; the inline path leans on exactly this."""
+        if not self._targets:
+            return True
+        # _cached_pass is itself best-effort (a dead cache reads as no pass
+        # for one target — and a missing pass only withholds cached inline
+        # results, never a download).
+        for target in self._targets:
+            if not await self._cached_pass(target, user_id):
+                return False
+        return True
+
     async def recheck(self, user_id: int) -> tuple[ForceJoinTarget, ...]:
         """A fresh Telegram check ignoring the cache — the verify button.
 

@@ -416,6 +416,22 @@ MESSAGES: Final[Catalog] = {
     },
 
     # ---------------------------------------------------------------------
+    # Inline mode: @Bot <link> anywhere
+    # ---------------------------------------------------------------------
+    "inline.open_bot": {
+        "en": "📥 Open the bot to download",
+        "fa": "📥 باز کردن ربات برای دانلود",
+    },
+    "inline.open_bot_plain": {
+        "en": "📥 Open the bot and send the link",
+        "fa": "📥 ربات را باز کن و لینک را بفرست",
+    },
+    "inline.token_expired": {
+        "en": "That link expired — send it to me again and I'll take it from there.",
+        "fa": "این لینک منقضی شده — دوباره بفرستش تا ادامه بدم.",
+    },
+
+    # ---------------------------------------------------------------------
     # Link intake: the wait, the questions, the answers
     # ---------------------------------------------------------------------
     "intake.invalid_link": {

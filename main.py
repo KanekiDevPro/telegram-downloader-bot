@@ -32,6 +32,7 @@ from core.logging import setup_logging
 from core.telegram_api import build_session, session_target
 from handlers import ROUTERS
 from handlers.admin import publish_commands
+from handlers.inline import router as inline_router
 from handlers.user import drain_pending_deletes, force_join_router
 from middlewares.user_middleware import UserMiddleware
 from services import cobalt_cookies, delivery, instance_guard, proxy_health
@@ -473,6 +474,7 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
     dp.error.register(on_unhandled_error)
 
     dp["pool"] = pool
+    dp["redis"] = redis_client
     dp["queue"] = create_queue(settings, redis_client)
     # P1-3: wanted Redis but could not reach it — memory queue + FSM, so
     # queued jobs and dialog state die with the process. The flag rides into
@@ -504,6 +506,10 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         force_join_router.message.middleware(middleware)
         force_join_router.callback_query.middleware(middleware)
         dp.include_router(force_join_router)
+    # Inline mode (`@Bot <link>`): no user row is ever created here — the
+    # handler reads the row itself and serves strangers only the start button.
+    # Works whether or not BotFather has inline enabled for this bot.
+    dp.include_router(inline_router)
 
     pot_provider = await resolve_pot_provider(settings)
     # Asked here, before the workers exist: the answer decides whether *anything*

@@ -60,6 +60,7 @@ from core.utils import (
     today_local,
     validate_url,
 )
+from handlers.inline import INLINE_TOKEN_RE_FULL, lookup_token
 from handlers.payment import plans_keyboard, wallet_amount_keyboard
 from services import cache as cache_service
 from services import content, download_mode, host_guard, preflight, spotify
@@ -837,6 +838,11 @@ async def cmd_start(
     pool: asyncpg.Pool | None = None,
     lang: str = DEFAULT_LANG,
     state: FSMContext | None = None,
+    command: CommandObject | None = None,
+    bot: Bot | None = None,
+    queue: TaskQueue | None = None,
+    redis: Any = None,
+    force_join: ForceJoinService | None = None,
 ) -> None:
     """``/start`` — Home, or the one screen that must come before it.
 
@@ -851,6 +857,17 @@ async def cmd_start(
     """
     if state is not None:
         await state.set_state(None)
+    payload = (command.args or "").strip() if command is not None else ""
+    if payload and not _needs_language_screen(user):
+        # A deep link from inline mode (``/start dl_<digest>``): malformed
+        # payloads fall through to the ordinary welcome below, untouched.
+        if INLINE_TOKEN_RE_FULL.match(payload) is not None:
+            await _start_with_token(
+                message, state, user, payload, lang,
+                bot=bot, pool=pool, queue=queue, redis=redis,
+                force_join=force_join,
+            )
+            return
     if _needs_language_screen(user):
         await message.answer(
             t("language.first_time", lang),
@@ -860,6 +877,39 @@ async def cmd_start(
     await message.answer(
         _welcome_text(user["username"] or t("misc.friend", lang), lang),
         reply_markup=_menu_for(user, lang, looks=await _button_looks(pool)),
+    )
+
+
+async def _start_with_token(
+    message: Message,
+    state: FSMContext | None,
+    user: asyncpg.Record,
+    payload: str,
+    lang: str,
+    *,
+    bot: Bot | None,
+    pool: asyncpg.Pool | None,
+    queue: TaskQueue | None,
+    redis: Any,
+    force_join: ForceJoinService | None,
+) -> None:
+    """Run the normal intake flow for a deep-link token's URL.
+
+    The token only names the URL — force-join, quota, session modes,
+    preflight and host_guard all apply unchanged inside ``_queue_url_flow``.
+    An expired or unknown token (or a dispatch without the pieces intake
+    needs) is a friendly localized nudge, never a traceback.
+    """
+    url = await lookup_token(redis, payload)
+    if url is None:
+        await message.answer(t("inline.token_expired", lang), link_preview_options=_NO_PREVIEW)
+        return
+    if state is None or bot is None or pool is None or queue is None:
+        await message.answer(t("inline.token_expired", lang), link_preview_options=_NO_PREVIEW)
+        return
+    await _queue_url_flow(
+        message, state, user, url, lang, bot=bot, pool=pool, queue=queue,
+        force_join=force_join,
     )
 
 
