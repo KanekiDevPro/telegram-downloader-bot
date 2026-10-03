@@ -52,6 +52,7 @@ from services.oauth import OAuthService
 from services.payments import build_payment_service
 from services.proxy_health import TunnelHealth
 from services.queue import BLOCK_TIMEOUT_S, create_queue, create_redis_client
+from services.song_id import SongLookupService
 from services.subscription import build_force_join
 from services.worker import run_maintenance, run_worker
 
@@ -536,6 +537,22 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
         retry_backoff_s=settings.extractor_retry_backoff_s,
     )
     # The admin /doctor command reads the extractor straight from the dispatcher.
+    # Song lookup (B2): one instance for the gateway and the workers — the
+    # button under Instagram/TikTok videos, its Redis mapping and its limits.
+    # Unknown provider names warn once here, at startup; the metadata default
+    # sends nothing anywhere.
+    song_lookup = SongLookupService(
+        redis=redis_client,
+        pool=pool,
+        bot=bot,
+        admin_ids=settings.admin_ids,
+        providers=settings.shazam_providers,
+        cooldown_max=settings.shazam_cooldown_max,
+        cooldown_window_s=settings.shazam_cooldown_window_s,
+        negative_ttl_s=settings.shazam_negative_ttl_s,
+        max_concurrency=settings.shazam_max_concurrency,
+    )
+    dp["song_lookup"] = song_lookup
     dp["extractor"] = extractor
     # The intake probe reaches the same extractor the workers use — through the
     # bot itself, which is what the retry taps consult (``bot.state.extractor``,
@@ -701,7 +718,10 @@ async def build_app(bot: Bot | None = None, *, send_digest: bool = True) -> dict
     workers = [warmup]
     workers += [
         asyncio.create_task(
-            run_worker(i, stop_event, bot, pool, dp["queue"], extractor, cobalt),
+            run_worker(
+                i, stop_event, bot, pool, dp["queue"], extractor, cobalt,
+                song_lookup=song_lookup,
+            ),
             name=f"worker-{i}",
         )
         for i in range(settings.worker_count)

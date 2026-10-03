@@ -27,6 +27,7 @@ from aiogram import Bot
 from aiogram.enums import ChatAction
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import (
+    InlineKeyboardMarkup,
     InputMediaAudio,
     InputMediaDocument,
     InputMediaLivePhoto,
@@ -605,6 +606,7 @@ async def send_cached_file(
     caption: str | None = None,
     *,
     lang: str = DEFAULT_LANG,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> bool:
     """Send a cached file, falling back to a document on type mismatch.
 
@@ -620,6 +622,12 @@ async def send_cached_file(
         logger.info("cache row %s holds no usable file_id — dropping entry", _field(cached, "url_hash"))
         return False
     kind = _kind_of(cached)
+    # The song button rides along only when there is one: an explicit
+    # reply_markup=None must not change the call at all (pinned by the video
+    # metadata tests), so the kwarg is added solely when set.
+    extra: dict[str, Any] = (
+        {"reply_markup": reply_markup} if reply_markup is not None else {}
+    )
     # Floods are honoured inside the send: a replay never downgrades, drops or
     # forgets its row over rate limiting (only TelegramBadRequest below does).
     try:
@@ -636,15 +644,18 @@ async def send_cached_file(
             )
         elif kind == "audio":
             await flood_aware_call(
-                lambda: bot.send_audio(chat_id, ids[0], caption=caption), kind="deliver"
+                lambda: bot.send_audio(chat_id, ids[0], caption=caption, **extra),
+                kind="deliver",
             )
         elif kind == "video":
             await flood_aware_call(
-                lambda: bot.send_video(chat_id, ids[0], caption=caption), kind="deliver"
+                lambda: bot.send_video(chat_id, ids[0], caption=caption, **extra),
+                kind="deliver",
             )
         else:
             await flood_aware_call(
-                lambda: bot.send_document(chat_id, ids[0], caption=caption), kind="deliver"
+                lambda: bot.send_document(chat_id, ids[0], caption=caption, **extra),
+                kind="deliver",
             )
         return True
     except TelegramBadRequest as exc:

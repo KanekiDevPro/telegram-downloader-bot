@@ -432,6 +432,50 @@ MESSAGES: Final[Catalog] = {
     },
 
     # ---------------------------------------------------------------------
+    # Song lookup: the "find full song" button under IG/TikTok videos
+    # ---------------------------------------------------------------------
+    "shz.find_button": {
+        "en": "🎵 Full song",
+        "fa": "🎵 آهنگ کامل",
+    },
+    "shz.likely_match": {
+        "en": (
+            "🎵 Likely match: {artist} — {title}\n"
+            "Top candidate: {candidate}\n"
+            "Tap below to download it as MP3."
+        ),
+        "fa": (
+            "🎵 حدس من: {artist} — {title}\n"
+            "بهترین گزینه: {candidate}\n"
+            "برای دانلود MP3 بزن روش."
+        ),
+    },
+    "shz.download_button": {
+        "en": "⬇️ Download MP3",
+        "fa": "⬇️ دانلود MP3",
+    },
+    "shz.no_match": {
+        "en": "No likely match found for this video's music.",
+        "fa": "برای موزیک این ویدیو گزینهٔ مناسبی پیدا نشد.",
+    },
+    "shz.expired": {
+        "en": "That link expired — send it again.",
+        "fa": "این لینک منقضی شده — دوباره بفرستش.",
+    },
+    "shz.cooldown": {
+        "en": "Too many lookups — try again in a few minutes.",
+        "fa": "زیادی جستجو کردی — چند دقیقهٔ دیگه امتحان کن.",
+    },
+    "shz.send_manually": {
+        "en": (
+            "I couldn't make a download button — send me «{candidate}» in chat."
+        ),
+        "fa": (
+            "نتونستم دکمه بسازم — «{candidate}» رو توی چت بفرست."
+        ),
+    },
+
+    # ---------------------------------------------------------------------
     # Link intake: the wait, the questions, the answers
     # ---------------------------------------------------------------------
     "intake.invalid_link": {

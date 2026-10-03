@@ -132,3 +132,31 @@ Enabling is a BotFather step (/setinline); the code works whether or not
 inline is enabled. Deep-link tokens live in Redis as dl:<digest> (int EX
 3600, idempotent per URL) with a per-user mint rate limit (about 30/minute);
 Redis trouble means a payload-less start button, never an error.
+
+## Song lookup (services/song_id.py)
+
+Videos delivered from Instagram or TikTok carry a "Full song" button only
+when it can work: the metadata provider already named a real song in the
+extraction info, or a non-metadata recognizer is enabled and healthy.
+Videos without a detected song get no button, and neither do inline-sent
+messages. Tapping shows the detected "Artist - Title" (worded as a likely
+match, never a certainty) with the top candidate's title and ONE button
+that downloads it as MP3 through the normal intake path — session modes,
+quota, force-join, preflight, host guard, single-flight and cache all apply
+unchanged, and nothing auto-downloads.
+
+Providers come from SHAZAM_PROVIDERS (comma list, default "metadata");
+unknown names are skipped with one startup warning. The tap mapping lives
+in Redis as shz:<digest> (int EX 86400, same song link re-stores the same
+key); an expired mapping answers "send the link again", and Redis trouble
+at delivery time means no button plus one warning. Taps are budgeted per
+user (about 5 per 10 minutes, Redis INCR + int EXPIRE), misses are
+remembered briefly (int EX about 600), and recognizer work runs at most
+two at a time per process.
+
+What each provider sends to third parties: the metadata provider sends
+nothing — it only reads the extraction info the engines already produced.
+shazamio (opt-in only, named explicitly) is a free but UNOFFICIAL,
+reverse-engineered Shazam client: at tap time it sends a derived audio
+fingerprint, never the file. It is not covered by Shazam's terms and may
+stop working or be rate-limited without notice.

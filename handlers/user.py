@@ -63,7 +63,7 @@ from core.utils import (
 from handlers.inline import INLINE_TOKEN_RE_FULL, lookup_token
 from handlers.payment import plans_keyboard, wallet_amount_keyboard
 from services import cache as cache_service
-from services import content, download_mode, host_guard, preflight, spotify
+from services import content, download_mode, host_guard, preflight, song_id, spotify
 from services.delivery import (
     ActionPulse,
     flood_aware_call,
@@ -843,6 +843,7 @@ async def cmd_start(
     queue: TaskQueue | None = None,
     redis: Any = None,
     force_join: ForceJoinService | None = None,
+    song_lookup: song_id.SongLookupService | None = None,
 ) -> None:
     """``/start`` — Home, or the one screen that must come before it.
 
@@ -865,7 +866,7 @@ async def cmd_start(
             await _start_with_token(
                 message, state, user, payload, lang,
                 bot=bot, pool=pool, queue=queue, redis=redis,
-                force_join=force_join,
+                force_join=force_join, song_lookup=song_lookup,
             )
             return
     if _needs_language_screen(user):
@@ -892,6 +893,7 @@ async def _start_with_token(
     queue: TaskQueue | None,
     redis: Any,
     force_join: ForceJoinService | None,
+    song_lookup: song_id.SongLookupService | None = None,
 ) -> None:
     """Run the normal intake flow for a deep-link token's URL.
 
@@ -909,7 +911,7 @@ async def _start_with_token(
         return
     await _queue_url_flow(
         message, state, user, url, lang, bot=bot, pool=pool, queue=queue,
-        force_join=force_join,
+        force_join=force_join, song_lookup=song_lookup,
     )
 
 
@@ -1529,6 +1531,7 @@ async def on_text_with_url(
     bot: Bot,
     lang: str = DEFAULT_LANG,
     force_join: ForceJoinService | None = None,
+    song_lookup: song_id.SongLookupService | None = None,
 ) -> None:
     if message.chat.type != "private" and not extract_url(message.text or ""):
         # A group is link-driven: no link in the message, no message from the bot
@@ -1542,7 +1545,7 @@ async def on_text_with_url(
         if url and validate_url(url):
             await _queue_url_flow(
                 message, state, user, url, lang, bot=bot, pool=pool, queue=queue,
-                force_join=force_join,
+                force_join=force_join, song_lookup=song_lookup,
             )
         else:
             await message.answer(
@@ -1573,7 +1576,7 @@ async def on_text_with_url(
         return
     await _queue_url_flow(
         message, state, user, url, lang, bot=bot, pool=pool, queue=queue,
-        force_join=force_join,
+        force_join=force_join, song_lookup=song_lookup,
     )
 
 
@@ -1588,6 +1591,7 @@ async def cmd_download(
     bot: Bot,
     lang: str = DEFAULT_LANG,
     force_join: ForceJoinService | None = None,
+    song_lookup: song_id.SongLookupService | None = None,
 ) -> None:
     url = extract_url(command.args or "")
     if not url and message.reply_to_message:
@@ -1599,7 +1603,7 @@ async def cmd_download(
         return
     await _queue_url_flow(
         message, state, user, url, lang, bot=bot, pool=pool, queue=queue,
-        force_join=force_join,
+        force_join=force_join, song_lookup=song_lookup,
     )
 
 
@@ -1762,6 +1766,7 @@ async def _queue_url_flow(
     pool: asyncpg.Pool,
     queue: TaskQueue,
     force_join: ForceJoinService | None = None,
+    song_lookup: song_id.SongLookupService | None = None,
 ) -> None:
     """A link arrives: check it, then ask — or just start. Timed, too.
 
@@ -1784,7 +1789,10 @@ async def _queue_url_flow(
     if await _enforce_force_join(message, user, lang, force_join=force_join):
         return
     started = time.monotonic()
-    await _intake_flow(message, state, user, url, lang, bot=bot, pool=pool, queue=queue)
+    await _intake_flow(
+        message, state, user, url, lang, bot=bot, pool=pool, queue=queue,
+        song_lookup=song_lookup,
+    )
     # Observability: this path's budget is "as fast as the menu can appear" —
     # this number is what says when it drifts (a slow resolve or a slow probe
     # lands here first). The URL is truncated: a log line is not a link archive.
@@ -1801,6 +1809,7 @@ async def _intake_flow(
     bot: Bot,
     pool: asyncpg.Pool,
     queue: TaskQueue,
+    song_lookup: song_id.SongLookupService | None = None,
 ) -> None:
     """The intake flow itself — timed and narrated by ``_queue_url_flow``."""
     if not validate_url(url):
@@ -1892,6 +1901,7 @@ async def _intake_flow(
             # The auto-best path never asked for a tier, so anything this URL has
             # already produced answers it — the zero-wait rule for solo links.
             fallback_any_tier=True,
+            song_lookup=song_lookup,
         )
         return
     if routing.platform in ("instagram", "tiktok"):
@@ -1921,6 +1931,7 @@ async def _intake_flow(
             # No tier was asked for, so anything this URL already produced in
             # the media family answers it (the zero-wait rule for solo links).
             fallback_any_tier=True,
+            song_lookup=song_lookup,
         )
         return
     await _ask_about_link(
@@ -2739,6 +2750,7 @@ async def on_format_chosen(
     queue: TaskQueue,
     bot: Bot,
     lang: str = DEFAULT_LANG,
+    song_lookup: song_id.SongLookupService | None = None,
 ) -> None:
     """A final choice: acknowledge it silently and let the card answer."""
     data = await state.get_data()
@@ -2792,6 +2804,7 @@ async def on_format_chosen(
         size_estimate=(
             int(data["size_guess"]) if isinstance(data.get("size_guess"), int) else None
         ),
+        song_lookup=song_lookup,
     )
 
 
@@ -2902,6 +2915,7 @@ async def on_retry(
     queue: TaskQueue,
     bot: Bot,
     lang: str = DEFAULT_LANG,
+    song_lookup: song_id.SongLookupService | None = None,
 ) -> None:
     """One failed download, tried again — the same job, a fresh run.
 
@@ -2949,6 +2963,7 @@ async def on_retry(
         title=task.title,
         is_live=task.is_live,
         size_estimate=task.size_estimate,
+        song_lookup=song_lookup,
     )
 
 
@@ -3003,6 +3018,7 @@ async def _submit(
     is_live: bool | None = None,
     size_estimate: int | None = None,
     fallback_any_tier: bool = False,
+    song_lookup: song_id.SongLookupService | None = None,
 ) -> None:
     """Tap → wait → the file: cache → quota → preflight → queue, on one card.
 
@@ -3081,7 +3097,19 @@ async def _submit(
         pool, url, media_format, quality, qualifier=read_qualifier
     )
     if cached is not None:
-        if await send_cached_file(bot, chat_id, cached, caption=replay_caption(cached, lang)):
+        if await send_cached_file(
+            bot,
+            chat_id,
+            cached,
+            caption=replay_caption(cached, lang),
+            # A replay wears the same song button the first send had: the row
+            # holds what delivery knew and the digest is deterministic.
+            reply_markup=(
+                await song_lookup.button_for_row(cached, url, lang)
+                if song_lookup is not None and media_format == "video"
+                else None
+            ),
+        ):
             await _forget_menu(message)  # the file landed; the tapped menu goes
             return
         # dead file_id → drop it and fall through to a real download
@@ -3110,7 +3138,17 @@ async def _submit(
                 # _audio_sibling_may_replay); the exact-key read above is the
                 # only replay an audio tap gets.
                 continue
-            if await send_cached_file(bot, chat_id, row, caption=replay_caption(row, lang)):
+            if await send_cached_file(
+                bot,
+                chat_id,
+                row,
+                caption=replay_caption(row, lang),
+                reply_markup=(
+                    await song_lookup.button_for_row(row, url, lang)
+                    if song_lookup is not None and media_format == "video"
+                    else None
+                ),
+            ):
                 await _forget_menu(message)  # the file landed; the tapped menu goes
                 return
             await cache_service.forget(pool, url, row_format, row_tier)
@@ -3183,6 +3221,153 @@ async def _submit(
     # The mode's lifecycle is the jobs: one more relevant job is in flight, so
     # the mode stays locked until the worker settles it (see _settle).
     download_mode.job_started(user["telegram_id"], download_mode.mode_for_url(url))
+
+
+async def _song_popup(tap: CallbackQuery, text: str) -> None:
+    """A cheap callback answer: never sleeps, floods absorbed and logged once.
+
+    ``answer_callback_query`` is cosmetics — the screen change is the answer —
+    so a flood refusal drops the popup instead of stalling the tap behind it.
+    """
+    try:
+        await tap.answer(text, show_alert=True)
+    except TelegramRetryAfter as exc:
+        logger.info(
+            "song popup throttled (%ss asked) — dropping it", exc.retry_after
+        )
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data.startswith(song_id.SONG_CALLBACK_PREFIX))
+async def on_song_tap(
+    cb: CallbackQuery,
+    user: asyncpg.Record,
+    pool: asyncpg.Pool | None = None,
+    queue: TaskQueue | None = None,
+    bot: Bot | None = None,
+    lang: str = DEFAULT_LANG,
+    song_lookup: song_id.SongLookupService | None = None,
+    extractor: ExtractorService | None = None,
+    force_join: ForceJoinService | None = None,
+) -> None:
+    """«Find full song» under an Instagram/TikTok video: name it, offer the MP3.
+
+    Answered at once (the work below can take seconds); the confirming button
+    re-enters the NORMAL intake (``_submit``) with the MP3 tier preselected,
+    so session modes, quota, force-join, preflight and cache apply unchanged.
+    No new enqueue path, no new task type. Wording stays a «likely match».
+    """
+    await _ack(cb)
+    if song_lookup is None:
+        return
+    data = cb.data or ""
+    message = callback_message(cb)
+    if data.startswith(song_id.SONG_GO_PREFIX):
+        await _song_confirm(
+            cb, message, user, lang, bot=bot, pool=pool, queue=queue,
+            song_lookup=song_lookup, force_join=force_join,
+        )
+        return
+    try:
+        user_id = int(user["telegram_id"])
+    except (KeyError, TypeError, ValueError):
+        return
+    digest = data[len(song_id.SONG_CALLBACK_PREFIX):]
+    if not await song_lookup.check_cooldown(user_id):
+        await _song_popup(cb, t("shz.cooldown", lang))
+        return
+    if await song_lookup.is_negative(digest):
+        await _song_popup(cb, t("shz.no_match", lang))
+        return
+    mapping = await song_lookup.read_mapping(digest)
+    if mapping is None:
+        await _song_popup(cb, t("shz.expired", lang))
+        return
+    artist = str(mapping.get("artist") or "")
+    title = str(mapping.get("title") or "")
+    if not artist or not title or extractor is None or message is None:
+        # No name stored (a recognizer-only button with nothing recognized)
+        # or nobody to ask: answered from memory from now on.
+        await song_lookup.remember_negative(digest)
+        await _song_popup(cb, t("shz.no_match", lang))
+        return
+    try:
+        async with song_lookup.slot():
+            hits = await extractor.search(
+                song_id.search_query(artist, title), limit=3
+            )
+    except Exception as exc:  # noqa: BLE001 — a failed search is «no match»
+        logger.warning("song search failed (%s)", type(exc).__name__)
+        await _song_popup(cb, t("shz.no_match", lang))
+        return
+    if not hits:
+        await song_lookup.remember_negative(digest)
+        await _song_popup(cb, t("shz.no_match", lang))
+        return
+    top = hits[0]
+    go = await song_lookup.store_mapping(
+        artist=artist, title=title, url=top.url, candidate=top.title
+    )
+    if go is None:
+        # The name is known but no button can carry it: say it plainly so the
+        # user can search it themselves — never a dead end.
+        await _song_popup(cb, t("shz.send_manually", lang, candidate=top.title[:120]))
+        return
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=t("shz.download_button", lang),
+        callback_data=f"{song_id.SONG_GO_PREFIX}{go}",
+    )
+    text = t(
+        "shz.likely_match", lang,
+        artist=artist, title=title, candidate=top.title,
+    )
+    try:
+        await flood_aware_call(
+            lambda: message.edit_caption(caption=text, reply_markup=builder.as_markup()),
+            kind="edit",
+        )
+    except TelegramBadRequest:
+        await _song_popup(cb, t("shz.send_manually", lang, candidate=top.title[:120]))
+
+
+async def _song_confirm(
+    cb: CallbackQuery,
+    message: Message | None,
+    user: asyncpg.Record,
+    lang: str,
+    *,
+    bot: Bot | None,
+    pool: asyncpg.Pool | None,
+    queue: TaskQueue | None,
+    song_lookup: song_id.SongLookupService,
+    force_join: ForceJoinService | None,
+) -> None:
+    """The MP3 button behind a likely match: the normal submit path, MP3 first."""
+    digest = (cb.data or "")[len(song_id.SONG_GO_PREFIX):]
+    mapping = await song_lookup.read_mapping(digest)
+    url = str((mapping or {}).get("url") or "")
+    candidate = str((mapping or {}).get("candidate") or url)
+    if not url or message is None or bot is None or pool is None or queue is None:
+        await _song_popup(cb, t("shz.expired", lang))
+        return
+    if await _enforce_force_join(message, user, lang, force_join=force_join):
+        return
+    await _submit(
+        bot,
+        message,
+        pool,
+        queue,
+        user,
+        url,
+        "audio",
+        song_id.SONG_AUDIO_QUALITY,
+        lang,
+        tap=cb,
+        title=candidate,
+        song_lookup=song_lookup,
+    )
 
 
 def _parse_format(data: str | None) -> tuple[str, str]:

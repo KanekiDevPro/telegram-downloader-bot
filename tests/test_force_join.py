@@ -507,16 +507,19 @@ def _gated_callbacks() -> set[str]:
     return names
 
 
-def test_the_gate_stands_on_exactly_five_handlers() -> None:
+def test_the_gate_stands_on_exactly_six_handlers() -> None:
     # ``cmd_start`` joined in Session B: a ``/start dl_<digest>`` deep link
     # from inline mode runs the normal intake, so the gate must apply to that
     # intake — while plain ``/start`` itself stays ungated (pinned below).
+    # ``on_song_tap`` joined in Session B2: the shz:go: confirm button enters
+    # the normal submit path, so the gate must apply to that entry too.
     assert _gated_callbacks() == {
         "on_text_with_url",
         "cmd_download",
         "cmd_start",
         "on_menu_platform",
         "on_force_join_verify",
+        "on_song_tap",
     }
 
 

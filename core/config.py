@@ -602,6 +602,22 @@ class Settings(BaseSettings):
         default=BASE_DIR / "cobalt", alias="COBALT_COOKIES_DIR"
     )
 
+    # --- Song lookup --------------------------------------------------------
+    #: Which song providers may identify the music under Instagram/TikTok
+    #: videos (comma-separated; default just the free metadata reader).
+    #: Recognized names: ``metadata``, ``shazamio``. Parsed once at startup
+    #: (see services/song_id): unknown names are skipped with one warning.
+    shazam_providers: str = Field(default="metadata", alias="SHAZAM_PROVIDERS")
+    #: Per-user recognition budget: this many taps per window (int).
+    shazam_cooldown_max: int = Field(default=5, alias="SHAZAM_COOLDOWN_MAX")
+    #: The cooldown window for the budget above (seconds, int).
+    shazam_cooldown_window_s: int = Field(default=600, alias="SHAZAM_COOLDOWN_WINDOW_S")
+    #: How long a tap that found nothing stays answered-from-memory
+    #: (seconds, int), so repeats do not repeat the work.
+    shazam_negative_ttl_s: int = Field(default=600, alias="SHAZAM_NEGATIVE_TTL_S")
+    #: How many recognitions (and samplings) run at once, per process (int).
+    shazam_max_concurrency: int = Field(default=2, alias="SHAZAM_MAX_CONCURRENCY")
+
     # --- Limits / plans -----------------------------------------------------
     default_daily_limit: int = Field(default=10, alias="DEFAULT_DAILY_LIMIT")
     premium_daily_limit: int = Field(default=60, alias="PREMIUM_DAILY_LIMIT")

@@ -26,7 +26,7 @@ from aiogram.exceptions import (
     TelegramEntityTooLarge,
     TelegramRetryAfter,
 )
-from aiogram.types import Chat, FSInputFile, InputMediaPhoto, Message
+from aiogram.types import Chat, FSInputFile, InlineKeyboardMarkup, InputMediaPhoto, Message
 
 from core import database
 from core import texts as text_store
@@ -50,6 +50,7 @@ from services import (
     fallback,
     preflight,
     recipients,
+    song_id,
     spotify,
     telemetry,
     verify,
@@ -172,6 +173,8 @@ async def run_worker(
     queue: TaskQueue,
     extractor: ExtractorService,
     cobalt: CobaltService | None = None,
+    *,
+    song_lookup: song_id.SongLookupService | None = None,
 ) -> None:
     """One consumer loop: dequeue → process (with retries) → repeat.
 
@@ -198,7 +201,10 @@ async def run_worker(
         if task is None:
             continue
         try:
-            await _process_with_retry(task, bot, pool, queue, extractor, stop_event, cobalt)
+            await _process_with_retry(
+                task, bot, pool, queue, extractor, stop_event, cobalt,
+                song_lookup=song_lookup,
+            )
         except Exception:
             logger.exception(
                 "worker %s: unexpected failure while processing %s",
@@ -292,6 +298,8 @@ async def _process_with_retry(
     extractor: ExtractorService,
     stop_event: asyncio.Event,
     cobalt: CobaltService | None = None,
+    *,
+    song_lookup: song_id.SongLookupService | None = None,
 ) -> None:
     lang = task.lang or DEFAULT_LANG
     # The card the gateway showed is the message this job narrates in — progress,
@@ -308,7 +316,8 @@ async def _process_with_retry(
             return
         try:
             await process_download_task(
-                task, bot, pool, extractor, cobalt, status=status, card=card
+                task, bot, pool, extractor, cobalt, status=status, card=card,
+                song_lookup=song_lookup,
             )
             if is_youtube_url(task.url):
                 # An anonymous YouTube download just worked, so "YouTube refuses
@@ -532,6 +541,7 @@ async def process_download_task(
     *,
     status: Any = None,
     card: str = "",
+    song_lookup: song_id.SongLookupService | None = None,
 ) -> None:
     """One attempt at one link. ``status`` is the message the narration goes in.
 
@@ -598,7 +608,18 @@ async def process_download_task(
         timings.cache_hit = True
         timings.upload_started_at = telemetry.now_monotonic()
         if await send_cached_file(
-            bot, task.chat_id, cached, caption=replay_caption(cached, lang)
+            bot,
+            task.chat_id,
+            cached,
+            caption=replay_caption(cached, lang),
+            # A replay wears the same song button the first send had (or
+            # would have had): the row holds what delivery knew, the digest
+            # is deterministic, and a missing mapping is simply re-stored.
+            reply_markup=(
+                await _song_replay_button(song_lookup, cached, task.url, lang)
+                if task.media_format == "video"
+                else None
+            ),
         ):
             # A replay is a delivery too: the file landed, so the status message
             # goes with it (the same rule as the fresh upload below).
@@ -671,6 +692,7 @@ async def process_download_task(
             card=card,
             target_url=target_url,
             track=track,
+            song_lookup=song_lookup,
         )
         timings.probe_finished_at = telemetry.now_monotonic()
         _emit_metrics(True, upload_path=fallback_path, fallback_outcome="used")
@@ -733,6 +755,7 @@ async def process_download_task(
             quota_claimed=True,
             target_url=target_url,
             track=track,
+            song_lookup=song_lookup,
         )
         _emit_metrics(True, upload_path=fallback_path, fallback_outcome="used")
         return
@@ -749,7 +772,8 @@ async def process_download_task(
     download_s = time.monotonic() - download_started
     direct_path = _upload_path_for(result.file_path)
     upload_s = await _finish_upload(
-        task, bot, pool, status, result, card=card, track=track, timings=timings
+        task, bot, pool, status, result, card=card, track=track, timings=timings,
+        song_lookup=song_lookup,
     )
     # The job's bill of time — the evidence any "make it faster" claim owes.
     logger.info(
@@ -824,6 +848,25 @@ async def _claim_quota(
     return True
 
 
+async def _song_replay_button(
+    songs: song_id.SongLookupService | None, row: Any, url: str, lang: str
+) -> InlineKeyboardMarkup | None:
+    """The song button for a cached replay — None when it cannot work.
+
+    Never raises: a replay is a delivery, and a delivery never fails over a
+    button (a Redis blip hides it with the service's own warning).
+    """
+    if songs is None:
+        return None
+    try:
+        return await songs.button_for_row(row, url, lang)
+    except Exception:  # noqa: BLE001 — never let a button fail a replay
+        logger.warning(
+            "song replay button failed for %s", telemetry.log_url(url), exc_info=True
+        )
+        return None
+
+
 async def _finish_upload(
     task: DownloadTask,
     bot: Bot,
@@ -834,6 +877,7 @@ async def _finish_upload(
     card: str = "",
     track: spotify.SpotifyTrack | None = None,
     timings: telemetry.JobTimings | None = None,
+    song_lookup: song_id.SongLookupService | None = None,
 ) -> float:
     """Ceiling check, upload, cache the file_id — and always drop the job dir.
 
@@ -959,6 +1003,28 @@ async def _finish_upload(
         if timings is not None:
             timings.processing_finished_at = telemetry.now_monotonic()
             timings.upload_started_at = telemetry.now_monotonic()
+        # The song button is decided before the bytes move: the mapping it
+        # names must already be stored when the user can tap it. Only a real
+        # video delivery from Instagram/TikTok is ever offered one — photos,
+        # albums and audio take the old path untouched.
+        song_markup: InlineKeyboardMarkup | None = None
+        if (
+            song_lookup is not None
+            and task.media_format == "video"
+            and _delivery_kind(files[0], result.media_format) == "video"
+        ):
+            try:
+                song_markup = await song_lookup.button_for_delivery(
+                    platform=result.info.platform,
+                    title=result.info.title,
+                    url=task.url,
+                    lang=lang,
+                )
+            except Exception:  # noqa: BLE001 — never fail a delivery over a button
+                logger.warning(
+                    "song button failed for %s", telemetry.log_url(task.url), exc_info=True
+                )
+                song_markup = None
         async with ActionPulse(
             bot, task.chat_id, upload_action(_delivery_kind(files[0], result.media_format))
         ):
@@ -972,6 +1038,7 @@ async def _finish_upload(
                     track=track,
                     cover=cover,
                     source_url=task.url,
+                    reply_markup=song_markup,
                     # Only a video send reads these, and only the probed file
                     # carries them: a mixed post's other files keep the old call.
                     facts=facts if result.media_format == "video" else None,
@@ -1111,6 +1178,7 @@ async def _deliver_via_fallback(
     quota_claimed: bool = False,
     target_url: Optional[str] = None,
     track: spotify.SpotifyTrack | None = None,
+    song_lookup: song_id.SongLookupService | None = None,
 ) -> str:
     """Try the fallback engine on a blocked link, and finish the job if it works.
 
@@ -1194,7 +1262,10 @@ async def _deliver_via_fallback(
     await telemetry.record_block(pool, task, error, extractor.cookie_file)
     await fallback.remember_use(pool, fallback.USE_USED)
     upload_path = _upload_path_for(result.file_path)
-    await _finish_upload(task, bot, pool, status, result, card=card, track=track)
+    await _finish_upload(
+        task, bot, pool, status, result, card=card, track=track,
+        song_lookup=song_lookup,
+    )
     return upload_path
 
 
@@ -1487,9 +1558,23 @@ def _photo_id(message: Any) -> str:
     return str(sizes[-1].file_id)
 
 
-async def _send_document(bot: Bot, chat_id: int, path: Path, caption: str) -> str:
+async def _send_document(
+    bot: Bot,
+    chat_id: int,
+    path: Path,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> str:
     """The last resort that is never wrong: the bytes, as a file."""
-    sent = await _deliver_ref(lambda ref: bot.send_document(chat_id, ref, caption=caption), path)
+    doc_kwargs: dict[str, Any] = {}
+    if reply_markup is not None:
+        doc_kwargs["reply_markup"] = reply_markup
+    sent = await _deliver_ref(
+        lambda ref: bot.send_document(
+            chat_id, ref, caption=caption, **doc_kwargs
+        ),
+        path,
+    )
     return _file_id(sent.document)
 
 
@@ -1607,6 +1692,7 @@ async def _send_file(
     cover: Path | None = None,
     facts: verify.MediaFacts | None = None,
     source_url: str = "",
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> str:
     """Upload one file the way its format deserves; returns its file_id.
 
@@ -1641,12 +1727,18 @@ async def _send_file(
             source_url or path.name,
             path.suffix or "unknown container",
         )
-        return await _send_document(bot, chat_id, path, caption)
+        return await _send_document(bot, chat_id, path, caption, reply_markup=reply_markup)
     video_kwargs = _video_send_kwargs(facts)
+    if reply_markup is not None:
+        video_kwargs["reply_markup"] = reply_markup
     try:
         sent = await _deliver_ref(
             lambda ref: bot.send_video(
-                chat_id, ref, caption=caption, supports_streaming=True, **video_kwargs
+                chat_id,
+                ref,
+                caption=caption,
+                supports_streaming=True,
+                **video_kwargs,
             ),
             path,
         )
@@ -1661,7 +1753,7 @@ async def _send_file(
             path.suffix or "unknown container",
             exc.message,
         )
-        return await _send_document(bot, chat_id, path, caption)
+        return await _send_document(bot, chat_id, path, caption, reply_markup=reply_markup)
 
 
 async def _upload(
@@ -1675,6 +1767,7 @@ async def _upload(
     source_url: str = "",
     facts: verify.MediaFacts | None = None,
     produced_p: object = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> Delivered:
     """Send what the download produced: one file, one photo, or a whole album.
 
@@ -1710,6 +1803,7 @@ async def _upload(
             cover=cover,
             facts=facts,
             source_url=source_url,
+            reply_markup=reply_markup,
         ),
         kind=_delivery_kind(files[0], result.media_format),
     )

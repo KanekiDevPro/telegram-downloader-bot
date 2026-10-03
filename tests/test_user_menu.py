@@ -1579,6 +1579,9 @@ _ANSWERS_VIA: dict[str, str] = {
     "on_admin_reject": "_admin_decide",
     "on_wallet_approve": "_wallet_decide",
     "on_wallet_reject": "_wallet_decide",
+    # B2: the song tap acks up front via _ack, then answers popups via
+    # _song_popup (both call tap.answer); either source proves the answer.
+    "on_song_tap": "_song_popup",
 }
 
 
