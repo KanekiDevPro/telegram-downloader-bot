@@ -13,6 +13,7 @@ import asyncio
 import datetime
 import logging
 import os
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -596,3 +597,123 @@ async def test_real_redis_mapping_lifecycle() -> None:
         assert await songs.is_negative(digest) is True
     finally:
         await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# C3: degraded spells warn once and page once, then re-arm on recovery
+# ---------------------------------------------------------------------------
+
+
+class _DownRedis(StrictFakeRedis):
+    """A Redis that answers reads but refuses every mapping write."""
+
+    async def set(
+        self, key: str, value: str, ex: Any = None, **kwargs: Any
+    ) -> bool:
+        if key.startswith("shz:") and not (
+            key.startswith("shz:rl:") or key.startswith("shz:neg:")
+        ):
+            raise ConnectionError("redis is down")
+        return await super().set(key, value, ex=ex, **kwargs)
+
+
+class _NoticeBot:
+    """Records operator pages the way the force-join fakes do."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[int, str]] = []
+
+    async def send_message(self, chat_id: int, text: str, **kwargs: Any) -> Any:
+        self.sent.append((chat_id, text))
+        return SimpleNamespace(message_id=1)
+
+
+class _NoticePool:
+    """bot_state through fetchval/execute, the way database.get/set_state use it."""
+
+    def __init__(self) -> None:
+        self.state: dict[str, str] = {}
+
+    async def fetchval(self, query: str, key: str) -> str | None:
+        return self.state.get(key)
+
+    async def execute(self, query: str, key: str, value: str) -> str:
+        self.state[key] = value
+        return "INSERT 0 1"
+
+
+def _degraded_service(
+    redis: Any, bot: Any = None, pool: Any = None
+) -> SongLookupService:
+    return SongLookupService(
+        redis=redis, pool=pool, bot=bot, admin_ids=[777001],
+    )
+
+
+async def test_sustained_mapping_failures_warn_once_and_page_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bot, pool = _NoticeBot(), _NoticePool()
+    songs = _degraded_service(_DownRedis(), bot=bot, pool=pool)
+    with caplog.at_level(logging.WARNING, logger="services.song_id"):
+        for _ in range(3):
+            assert await songs.store_mapping(
+                artist="A", title="T", url="https://www.instagram.com/p/x/"
+            ) is None
+    warnings = [r for r in caplog.records if "degraded" in r.message]
+    assert len(warnings) == 1, "one warning per degraded spell, not per tap"
+    assert "ConnectionError" in warnings[0].message
+    assert len(bot.sent) == 1 and bot.sent[0][0] == 777001
+    assert pool.state, "the notice stamp survives a restart"
+
+
+async def test_recovery_re_arms_the_spell_while_the_throttle_holds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bot, pool = _NoticeBot(), _NoticePool()
+    songs = _degraded_service(_DownRedis(), bot=bot, pool=pool)
+    with caplog.at_level(logging.INFO, logger="services.song_id"):
+        assert await songs.store_mapping(
+            artist="A", title="T", url="https://www.instagram.com/p/x/"
+        ) is None
+        songs._redis = StrictFakeRedis()
+        digest = await songs.store_mapping(
+            artist="A", title="T", url="https://www.instagram.com/p/x/"
+        )
+        assert digest is not None, "the button works again after recovery"
+        songs._redis = _DownRedis()
+        assert await songs.store_mapping(
+            artist="A", title="T", url="https://www.instagram.com/p/x/"
+        ) is None
+    warnings = [r for r in caplog.records if "degraded" in r.message]
+    assert len(warnings) == 2, "recovery re-arms: the next spell warns again"
+    assert any("watching again" in r.message for r in caplog.records)
+    assert len(bot.sent) == 1, "the 6h throttle holds the second page"
+
+
+async def test_healthy_mapping_path_is_silent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    songs = _degraded_service(StrictFakeRedis())
+    with caplog.at_level(logging.DEBUG, logger="services.song_id"):
+        for _ in range(2):
+            assert await songs.store_mapping(
+                artist="A", title="T", url="https://www.instagram.com/p/x/"
+            ) is not None
+    assert [r for r in caplog.records if "degraded" in r.message] == []
+    assert [r for r in caplog.records if "watching again" in r.message] == []
+
+
+async def test_no_redis_warns_once_without_paging(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bot, pool = _NoticeBot(), _NoticePool()
+    songs = _degraded_service(None, bot=bot, pool=pool)
+    with caplog.at_level(logging.WARNING, logger="services.song_id"):
+        for _ in range(2):
+            assert await songs.store_mapping(
+                artist="A", title="T", url="https://www.instagram.com/p/x/"
+            ) is None
+    warnings = [r for r in caplog.records if "degraded" in r.message]
+    assert len(warnings) == 1, "a static no-Redis setup warns once per process"
+    assert bot.sent == [], "a static setup is not an outage: no page"

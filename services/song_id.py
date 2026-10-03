@@ -60,9 +60,10 @@ SONG_MAX_CONCURRENCY = 2
 BREAKER_FAILURES = 3
 BREAKER_OPEN_S = 600
 #: The operator page for a degraded lookup lives in ``bot_state`` under this
-#: prefix, throttled to at most one notice per cooldown.
+#: prefix, throttled to at most one notice per cooldown — the same 6h quiet
+#: window as the other operator notices (see force-join).
 SONG_NOTICE_KEY_PREFIX = "song_id:notice:"
-SONG_NOTICE_COOLDOWN_S = 3600
+SONG_NOTICE_COOLDOWN_S = 6 * 3600
 
 #: Values that name the absence of a song, not a song. Compared case-folded
 #: after stripping; matched whole or as the whole parenthetical.
@@ -227,6 +228,11 @@ def row_text(row: Any, name: str) -> str:
             return ""
 
 
+def _short(message: object, limit: int = 120) -> str:
+    """One log-safe line: truncated, no newlines (mirrors the guard)."""
+    return " ".join(str(message).split())[:limit]
+
+
 def mapping_digest(canonical: str, artist: str, title: str) -> str:
     """The deterministic ``shz:<digest>`` for one song link."""
     return sha256_hex(f"{canonical}|{artist}|{title}")[:16]
@@ -279,6 +285,11 @@ class SongLookupService:
         #: Last admin notice per key (process-level throttle; ``bot_state``
         #: covers restarts and replicas, mirroring force-join).
         self._last_notice: dict[str, float] = {}
+        #: Whether the current degraded spell was already announced: the ONE
+        #: warning plus the ONE throttled page per spell live here (instance
+        #: state, never module state — mirroring the instance guard). Cleared
+        #: on recovery, so the next spell warns again.
+        self._degraded_announced = False
 
     @property
     def providers(self) -> tuple[str, ...]:
@@ -321,13 +332,35 @@ class SongLookupService:
     # Mapping: digest -> {artist, title, url, candidate?}
     # ------------------------------------------------------------------
 
+    async def _enter_degraded(self, exc: BaseException | None) -> None:
+        """Announce a degraded spell once; the rest of the spell stays silent.
+
+        One warning (exception class + short message, never a URL) plus one
+        throttled admin notice through :meth:`degraded`. A static no-Redis
+        setup warns once per process without paging (nothing to recover
+        from, no outage to report). Recovery re-arms via :meth:`_recover`.
+        """
+        if self._degraded_announced:
+            return
+        self._degraded_announced = True
+        if exc is None:
+            logger.warning("song lookup degraded (no redis) — hiding the button")
+            return
+        await self.degraded("mapping", f"{type(exc).__name__}: {_short(exc)}")
+
+    def _recover(self) -> None:
+        """A mapping write just worked — a past spell ends here, re-armed."""
+        if self._degraded_announced:
+            logger.info("song lookup ok: the mapping store answered — watching again")
+            self._degraded_announced = False
+
     async def store_mapping(
         self, *, artist: str, title: str, url: str, candidate: str = ""
     ) -> str | None:
         """Remember a tap mapping; None when Redis cannot (no button then)."""
         redis = self._redis
         if redis is None:
-            logger.warning("song lookup mapping unwritable (no redis) — hiding the button")
+            await self._enter_degraded(None)
             return None
         canonical = canonical_url(url)
         digest = mapping_digest(canonical, _clean(artist), _clean(title))
@@ -344,11 +377,9 @@ class SongLookupService:
             # a hand-rolled fake would never catch it (see guardfix).
             await redis.set(f"{SONG_KEY_PREFIX}{digest}", payload, ex=int(SONG_MAPPING_TTL_S))
         except Exception as exc:  # noqa: BLE001 — best-effort cache, never fatal
-            logger.warning(
-                "song lookup mapping unwritable (%s) — hiding the button",
-                type(exc).__name__,
-            )
+            await self._enter_degraded(exc)
             return None
+        self._recover()
         return digest
 
     async def read_mapping(self, digest: str) -> dict[str, Any] | None:
