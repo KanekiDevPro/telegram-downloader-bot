@@ -20,7 +20,7 @@ import pytest
 import redis.exceptions as redis_errors
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
-from test_user_menu import _message
+from test_user_menu import RecordingBot, _callback, _message
 
 from core.catalog import MESSAGES
 from core.config import Settings
@@ -626,6 +626,47 @@ def _placeholders(template: str) -> list[str]:
 def test_popups_stay_within_telegrams_200_characters(lang: str) -> None:
     assert len(t("force_join.still_missing", lang)) <= 200
     assert len(t("force_join.verify_button", lang)) <= 200
+    assert len(t("force_join.verified_popup", lang)) <= 200
+
+
+async def test_verified_flood_fallback_answers_the_plain_text_popup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C2: when the flood gives up the verified edit, the alert answers the
+    plain-text popup key — the chat message's HTML never reaches the alert."""
+    from aiogram.methods import AnswerCallbackQuery
+
+    async def _no_edit(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(user_module, "flood_aware_call", _no_edit)
+    bot = RecordingBot()
+    cb = _callback(cast(Bot, bot), "force_join:verify")
+    service = _service(
+        monkeypatch,
+        _FakeBot(membership={TARGET_AT: "member", int(TARGET_ID): "member"}),
+        _StrictFakeRedis(),
+    )
+    await user_module.on_force_join_verify(cb, _user(), lang="en", force_join=service)
+    answers = [
+        call for call in bot.calls if isinstance(call, AnswerCallbackQuery)
+    ]
+    assert len(answers) == 1
+    assert answers[0].show_alert is True
+    assert answers[0].text == t("force_join.verified_popup", "en")
+    assert "<" not in (answers[0].text or "")
+
+
+@pytest.mark.parametrize("lang", ["en", "fa"])
+def test_verified_popup_is_plain_text_while_the_chat_keeps_formatting(
+    lang: str,
+) -> None:
+    """C2: alerts render no HTML — the popup must carry no markup, while the
+    chat message keeps its formatting."""
+    popup = t("force_join.verified_popup", lang)
+    assert "<" not in popup and ">" not in popup
+    assert len(popup) <= 200
+    assert "<b>" in t("force_join.verified", lang)
 
 
 @pytest.mark.parametrize("lang", ["en", "fa"])

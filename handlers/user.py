@@ -1133,7 +1133,9 @@ async def on_force_join_verify(
         )
         if edited is None:
             # The flood gave up the edit — the popup still carries the verdict.
-            await cb.answer(t("force_join.verified", lang), show_alert=True)
+            # Plain text here: alerts render no HTML, so the chat message's
+            # markup would show up as literal tags.
+            await cb.answer(t("force_join.verified_popup", lang), show_alert=True)
         else:
             await cb.answer()
         return

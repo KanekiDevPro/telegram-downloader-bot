@@ -410,6 +410,10 @@ MESSAGES: Final[Catalog] = {
             "لینک را دوباره بفرستید تا دانلود کنم."
         ),
     },
+    "force_join.verified_popup": {
+        "en": "✅ Verified — welcome! Send your link again and I'll download it.",
+        "fa": "✅ تأیید شد — خوش آمدید! لینک را دوباره بفرستید تا دانلود کنم.",
+    },
     "force_join.still_missing": {
         "en": "⏳ Not a member yet — join the channels above, then verify again.",
         "fa": "⏳ هنوز عضو نشده‌اید — اول در کانال‌های بالا عضو شوید، بعد دوباره بررسی کنید.",
