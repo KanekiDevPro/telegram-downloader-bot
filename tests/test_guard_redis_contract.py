@@ -10,13 +10,27 @@ stayed green. These tests pin the contract:
 * guard errors log exactly one warning (and one info on recovery);
 * a non-reachability error never feeds the Redis-down streak, while a
   genuine ``ConnectionError`` still pages after a sustained outage;
-* a real-Redis lifecycle test, skipped automatically without a server.
+* a real-Redis lifecycle test, skipped unless GUARD_TEST_REDIS_URL is set.
+
+Running the real-Redis suites (C4): each suite reads its own variable and
+skips when it is unset — never defaulting to localhost:6379, which on a
+developer machine may be a production Redis, not a disposable one:
+
+* GUARD_TEST_REDIS_URL (this file — the instance-lease lifecycle),
+* SHZ_TEST_REDIS_URL (tests/test_song_id.py),
+* FORCE_JOIN_TEST_REDIS_URL (tests/test_force_join.py),
+* INLINE_TEST_REDIS_URL (tests/test_inline.py).
+
+Point each at a throwaway server (e.g. a ``redis:7-alpine`` container started
+just for the run, ideally with a per-suite db index); the suites touch only
+their own keys and clean up afterwards.
 """
 
 from __future__ import annotations
 
 import datetime
 import logging
+import os
 from typing import Any
 
 import pytest
@@ -214,25 +228,28 @@ async def test_a_genuine_outage_still_pages_after_a_sustained_streak() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Real Redis: skipped automatically when none is reachable
+# Real Redis: skipped unless GUARD_TEST_REDIS_URL points at a disposable
+# server (never localhost by default — see the module docstring).
 # ---------------------------------------------------------------------------
+
+
+def _real_redis_url() -> str | None:
+    return os.getenv("GUARD_TEST_REDIS_URL", "") or None
 
 
 async def _real_client() -> Any:
     import redis.asyncio as aioredis
 
-    client = aioredis.from_url(
-        "redis://localhost:6379", decode_responses=True, socket_timeout=1.0
-    )
+    url = _real_redis_url()
+    if not url:
+        pytest.skip("set GUARD_TEST_REDIS_URL to a disposable Redis")
+    client = aioredis.from_url(url, decode_responses=True, socket_timeout=1.0)
     await client.ping()
     return client
 
 
 async def test_lease_lifecycle_against_real_redis() -> None:
-    try:
-        client = await _real_client()
-    except Exception:
-        pytest.skip("no Redis reachable on localhost:6379")
+    client = await _real_client()
     try:
         first = await guard_module.start_guard(client, grace_s=0)
         assert first.state == "single"
